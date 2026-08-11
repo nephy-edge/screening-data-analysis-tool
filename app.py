@@ -338,10 +338,7 @@ INPUT_COLUMNS = [
     ("Expected Interest", True),
     ("Expected Fee", True),
     ("Total Paid", True),
-    ("Total Due", True),
-    ("Begin Date", False),
-    ("Payment per Period", False),
-    ("Payment Frequency", False),
+    ("Total Due", False),
 ]
 
 
