@@ -32,11 +32,18 @@ def build_cohorts(df: pd.DataFrame):
     if not matured.empty:
         mat_grouped = matured.groupby("Cohort", dropna=False)
         cohorts["Matured Count"] = mat_grouped["Loan ID"].count()
-        cohorts["Loss Rate"] = mat_grouped.apply(
-            lambda g: (
-                (g["Total Due"] - g["Total Paid"]).sum() / g["Total Due"].sum()
-            )
-        )
+
+        def _loss_rate(g):
+            if "Total Due" not in g.columns or "Total Paid" not in g.columns:
+                return float("nan")
+            due = g["Total Due"]
+            paid = g["Total Paid"]
+            denom = due.sum()
+            if denom == 0:
+                return float("nan")
+            return (due - paid).sum() / denom
+
+        cohorts["Loss Rate"] = mat_grouped.apply(_loss_rate)
     else:
         cohorts["Matured Count"] = 0
         cohorts["Loss Rate"] = float("nan")
