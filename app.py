@@ -350,19 +350,6 @@ def fmt_num(v):
     return f"{v:,.2f}" if pd.notna(v) else "—"
 
 
-def guess_column(df: pd.DataFrame, target: str):
-    tokens = [t for t in target.lower().replace("/", " ").split() if t]
-    best = None
-    for col in df.columns:
-        cl = str(col).lower()
-        hits = sum(1 for t in tokens if t in cl)
-        if hits == len(tokens):
-            return col
-        if best is None and hits:
-            best = col
-    return best
-
-
 def _coerce_dates(raw: pd.DataFrame) -> pd.DataFrame:
     for col in ["Disbursement Date", "Expected Completion Date", "Begin Date"]:
         if col in raw.columns:
@@ -394,14 +381,10 @@ if uploaded:
             options = ["(not provided)"] + [
                 c for c in raw.columns if c not in used
             ]
-            guess = guess_column(raw, target)
-            index = 0
-            if guess is not None and guess in options:
-                index = options.index(guess)
             chosen = st.selectbox(
                 f"Map to **{target}** ({'required' if required else 'optional'})",
                 options=options,
-                index=index,
+                index=0,
                 key=f"map_{target}",
             )
             mapping[target] = None if chosen == "(not provided)" else chosen
