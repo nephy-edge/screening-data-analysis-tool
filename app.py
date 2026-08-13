@@ -430,6 +430,22 @@ def _coerce_dates(raw: pd.DataFrame) -> pd.DataFrame:
     return raw
 
 
+DERIVED_OPS = {
+    "+": lambda a, b: a + b,
+    "-": lambda a, b: a - b,
+    "×": lambda a, b: a * b,
+    "÷": lambda a, b: a.divide(b).replace([float("inf"), float("-inf")], pd.NA),
+}
+
+
+def _apply_derived_columns(raw: pd.DataFrame, defs: list) -> pd.DataFrame:
+    for d in defs:
+        col_a = pd.to_numeric(raw[d["col_a"]], errors="coerce")
+        col_b = pd.to_numeric(raw[d["col_b"]], errors="coerce")
+        raw[d["name"]] = DERIVED_OPS[d["op"]](col_a, col_b)
+    return raw
+
+
 @st.cache_data(show_spinner=False)
 def _run_pipeline(raw: pd.DataFrame, extraction_date, days_after_term: int, min_loans_per_cohort: int):
     df = process_data_input(raw, extraction_date, days_after_term)
@@ -445,6 +461,7 @@ if uploaded:
         st.session_state["uploaded_file_id"] = uploaded.file_id
         st.session_state["analysis_ran"] = False
         st.session_state.pop("analysis_mapping", None)
+        st.session_state["derived_columns"] = []
         for target, _ in INPUT_COLUMNS:
             st.session_state.pop(f"map_{target}", None)
 
@@ -456,6 +473,52 @@ if uploaded:
     st.success(f"Loaded {len(raw):,} rows — {len(raw.columns)} columns.")
     st.dataframe(raw.head(10), width="stretch", height=300)
     st.caption("Columns in your file: " + ", ".join(map(str, raw.columns)))
+
+    if "derived_columns" not in st.session_state:
+        st.session_state["derived_columns"] = []
+
+    with st.expander("Need a column that isn't in your file? Calculate one from existing columns"):
+        st.caption(
+            "E.g. if your file has separate Principal / Interest / Fee columns but no "
+            "Total Due, combine them here — the result becomes selectable in the mapping below."
+        )
+        dc1, dc2, dc3, dc4 = st.columns([2, 2, 1, 2])
+        with dc1:
+            new_name = st.text_input("New column name", key="dc_name")
+        with dc2:
+            col_a = st.selectbox("Column A", options=list(raw.columns), key="dc_col_a")
+        with dc3:
+            op = st.selectbox("Operator", options=list(DERIVED_OPS.keys()), key="dc_op")
+        with dc4:
+            col_b = st.selectbox("Column B", options=list(raw.columns), key="dc_col_b")
+
+        if st.button("Add derived column", key="dc_add"):
+            existing_names = {d["name"] for d in st.session_state["derived_columns"]}
+            if not new_name.strip():
+                st.error("Give the derived column a name.")
+            elif new_name in raw.columns or new_name in existing_names:
+                st.error(f"'{new_name}' already exists — choose a different name.")
+            else:
+                st.session_state["derived_columns"].append(
+                    {"name": new_name.strip(), "col_a": col_a, "op": op, "col_b": col_b}
+                )
+                st.rerun()
+
+        if st.session_state["derived_columns"]:
+            st.markdown("**Derived columns:**")
+            for i, d in enumerate(st.session_state["derived_columns"]):
+                rc1, rc2 = st.columns([5, 1])
+                rc1.write(f"`{d['name']}` = {d['col_a']} {d['op']} {d['col_b']}")
+                if rc2.button("Remove", key=f"dc_remove_{i}"):
+                    st.session_state["derived_columns"].pop(i)
+                    st.rerun()
+
+    raw = _apply_derived_columns(raw, st.session_state["derived_columns"])
+    if st.session_state["derived_columns"]:
+        st.dataframe(
+            raw[[d["name"] for d in st.session_state["derived_columns"]]].head(10),
+            width="stretch", height=150,
+        )
 
     cached_mapping = _load_cached_mapping(raw.columns) or {}
     if cached_mapping:
