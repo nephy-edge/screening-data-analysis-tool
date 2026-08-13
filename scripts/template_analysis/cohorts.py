@@ -11,6 +11,14 @@ def _agg(grouped, col):
 def build_cohorts(df: pd.DataFrame):
     grouped = df.groupby("Cohort", dropna=False)
 
+    weighted_term_num = (df["Term (days)"] * df["Principal Value"]).groupby(
+        df["Cohort"], dropna=False
+    ).sum()
+    weighted_term_den = df["Principal Value"].groupby(df["Cohort"], dropna=False).sum()
+    weighted_avg_term = (weighted_term_num / weighted_term_den).reindex(
+        grouped["Cohort"].first().index
+    )
+
     cohorts = pd.DataFrame({
         "Cohort": grouped["Cohort"].first(),
         "Loan Count": grouped["Loan ID"].count(),
@@ -20,30 +28,20 @@ def build_cohorts(df: pd.DataFrame):
         "Total Due": _agg(grouped, "Total Due"),
         "Total Paid": grouped["Total Paid"].sum(),
         "Avg Term (days)": grouped["Term (days)"].mean(),
-        "Weighted Avg Term": (
-            grouped.apply(
-                lambda g: (g["Term (days)"] * g["Principal Value"]).sum()
-                / g["Principal Value"].sum()
-            )
-        ),
+        "Weighted Avg Term": weighted_avg_term,
     })
 
     matured = df[df["Reached T+3?"] == True]
-    if not matured.empty:
+    if not matured.empty and "Total Due" in matured.columns and "Total Paid" in matured.columns:
         mat_grouped = matured.groupby("Cohort", dropna=False)
         cohorts["Matured Count"] = mat_grouped["Loan ID"].count()
 
-        def _loss_rate(g):
-            if "Total Due" not in g.columns or "Total Paid" not in g.columns:
-                return float("nan")
-            due = g["Total Due"]
-            paid = g["Total Paid"]
-            denom = due.sum()
-            if denom == 0:
-                return float("nan")
-            return (due - paid).sum() / denom
-
-        cohorts["Loss Rate"] = mat_grouped.apply(_loss_rate)
+        loss_num = (matured["Total Due"] - matured["Total Paid"]).groupby(
+            matured["Cohort"], dropna=False
+        ).sum()
+        loss_den = matured["Total Due"].groupby(matured["Cohort"], dropna=False).sum()
+        loss_rate = (loss_num / loss_den).where(loss_den != 0).reindex(cohorts.index)
+        cohorts["Loss Rate"] = loss_rate
     else:
         cohorts["Matured Count"] = 0
         cohorts["Loss Rate"] = float("nan")

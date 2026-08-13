@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import io
+import json
 import sys
 import os
 from datetime import datetime as _dt
-from openpyxl.chart import LineChart, BarChart, Reference
+from openpyxl.chart import LineChart, BarChart, AreaChart, ScatterChart, Reference, Series
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
@@ -341,6 +342,78 @@ INPUT_COLUMNS = [
     ("Total Due", False),
 ]
 
+DATE_FIELDS = {"Disbursement Date", "Expected Completion Date"}
+NUMERIC_FIELDS = {"Principal Value", "Expected Interest", "Expected Fee", "Total Paid", "Total Due"}
+REQUIRED_FIELDS = {t for t, required in INPUT_COLUMNS if required}
+
+MAPPING_CACHE_PATH = os.path.join(os.path.expanduser("~"), ".sc_analysis_column_mappings.json")
+
+
+def _mapping_cache_key(columns) -> str:
+    return "|".join(sorted(str(c) for c in columns))
+
+
+def _load_cached_mapping(columns) -> dict | None:
+    if not os.path.exists(MAPPING_CACHE_PATH):
+        return None
+    try:
+        with open(MAPPING_CACHE_PATH, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    return cache.get(_mapping_cache_key(columns))
+
+
+def _save_cached_mapping(columns, mapping: dict) -> None:
+    cache = {}
+    if os.path.exists(MAPPING_CACHE_PATH):
+        try:
+            with open(MAPPING_CACHE_PATH, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            cache = {}
+    cache[_mapping_cache_key(columns)] = mapping
+    try:
+        with open(MAPPING_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+    except OSError:
+        pass
+
+
+def _validate_mapping(raw: pd.DataFrame, mapping: dict) -> tuple[list[str], list[str]]:
+    """Returns (blocking_errors, warnings) for the chosen column mapping."""
+    errors, warnings = [], []
+    for target, source in mapping.items():
+        if not source:
+            continue
+        series = raw[source]
+        non_null = series.notna()
+        if non_null.sum() == 0:
+            msg = f"**{target}** → column '{source}' is entirely empty."
+            (errors if target in REQUIRED_FIELDS else warnings).append(msg)
+            continue
+
+        if target in DATE_FIELDS:
+            parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
+            fail_rate = 1 - (parsed.notna().sum() / non_null.sum())
+            if fail_rate > 0.5:
+                msg = (
+                    f"**{target}** → column '{source}' doesn't look like dates "
+                    f"({fail_rate:.0%} unparseable)."
+                )
+                (errors if target in REQUIRED_FIELDS else warnings).append(msg)
+        elif target in NUMERIC_FIELDS:
+            parsed = pd.to_numeric(series, errors="coerce")
+            fail_rate = 1 - (parsed.notna().sum() / non_null.sum())
+            if fail_rate > 0.5:
+                msg = (
+                    f"**{target}** → column '{source}' doesn't look numeric "
+                    f"({fail_rate:.0%} unparseable)."
+                )
+                (errors if target in REQUIRED_FIELDS else warnings).append(msg)
+
+    return errors, warnings
+
 
 def fmt_pct(v):
     return f"{v:.4%}" if pd.notna(v) else "—"
@@ -357,9 +430,24 @@ def _coerce_dates(raw: pd.DataFrame) -> pd.DataFrame:
     return raw
 
 
+@st.cache_data(show_spinner=False)
+def _run_pipeline(raw: pd.DataFrame, extraction_date, days_after_term: int, min_loans_per_cohort: int):
+    df = process_data_input(raw, extraction_date, days_after_term)
+    cohorts = build_cohorts(df)
+    filtered = filter_cohorts(cohorts, min_loans_per_cohort)
+    return df, cohorts, filtered
+
+
 uploaded = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xlsx"])
 
 if uploaded:
+    if st.session_state.get("uploaded_file_id") != uploaded.file_id:
+        st.session_state["uploaded_file_id"] = uploaded.file_id
+        st.session_state["analysis_ran"] = False
+        st.session_state.pop("analysis_mapping", None)
+        for target, _ in INPUT_COLUMNS:
+            st.session_state.pop(f"map_{target}", None)
+
     if uploaded.name.endswith(".csv"):
         raw = pd.read_csv(uploaded)
     else:
@@ -368,6 +456,13 @@ if uploaded:
     st.success(f"Loaded {len(raw):,} rows — {len(raw.columns)} columns.")
     st.dataframe(raw.head(10), width="stretch", height=300)
     st.caption("Columns in your file: " + ", ".join(map(str, raw.columns)))
+
+    cached_mapping = _load_cached_mapping(raw.columns) or {}
+    if cached_mapping:
+        st.caption(
+            "A saved mapping was found for a file with these same column headers — "
+            "pre-filled below. Adjust and run, or change any field as needed."
+        )
 
     with st.form("column_mapping"):
         st.subheader("Map your columns to the Data Input template")
@@ -381,10 +476,12 @@ if uploaded:
             options = ["(not provided)"] + [
                 c for c in raw.columns if c not in used
             ]
+            cached_choice = cached_mapping.get(target)
+            default_index = options.index(cached_choice) if cached_choice in options else 0
             chosen = st.selectbox(
                 f"Map to **{target}** ({'required' if required else 'optional'})",
                 options=options,
-                index=0,
+                index=default_index,
                 key=f"map_{target}",
             )
             mapping[target] = None if chosen == "(not provided)" else chosen
@@ -392,24 +489,38 @@ if uploaded:
                 used.add(chosen)
         submitted = st.form_submit_button("Run analysis")
 
-    if not submitted:
+    if submitted:
+        missing_required = [
+            t for t, required in INPUT_COLUMNS
+            if required and not mapping[t]
+        ]
+        if missing_required:
+            st.error(
+                "Map these required fields before running: "
+                + ", ".join(missing_required)
+            )
+            st.stop()
+
+        mapping_errors, mapping_warnings = _validate_mapping(raw, mapping)
+        if mapping_errors:
+            st.error(
+                "Fix these mappings before running:\n\n"
+                + "\n".join(f"- {e}" for e in mapping_errors)
+            )
+            st.stop()
+        st.session_state["analysis_mapping"] = mapping
+        st.session_state["analysis_mapping_warnings"] = mapping_warnings
+        st.session_state["analysis_ran"] = True
+        _save_cached_mapping(raw.columns, mapping)
+
+    if not st.session_state.get("analysis_ran"):
         st.info(
             "Map your file's columns above, then click "
             "'Run analysis' to compute all sheets."
         )
         st.stop()
 
-    missing_required = [
-        t for t, required in INPUT_COLUMNS
-        if required and not mapping[t]
-    ]
-    if missing_required:
-        st.error(
-            "Map these required fields before running: "
-            + ", ".join(missing_required)
-        )
-        st.stop()
-
+    mapping = st.session_state["analysis_mapping"]
     rename_map = {src: tgt for tgt, src in mapping.items() if src}
     raw = raw.rename(columns=rename_map)
     _coerce_dates(raw)
@@ -424,14 +535,21 @@ if uploaded:
             + ", ".join(unmapped)
         )
 
+    mapping_warnings = st.session_state.get("analysis_mapping_warnings") or []
+    if mapping_warnings:
+        st.warning(
+            "Mapping quality warnings:\n\n"
+            + "\n".join(f"- {w}" for w in mapping_warnings)
+        )
+
     with st.spinner("Running analysis..."):
         gi = GeneralInputs(raw)
-        df = process_data_input(raw, gi.extraction_date, gi.days_after_term)
+        df, cohorts, filtered = _run_pipeline(
+            raw, gi.extraction_date, gi.days_after_term, gi.min_loans_per_cohort
+        )
         st.caption(f"Mapped & computed columns: {', '.join(df.columns)}")
         if "Total Due" not in df.columns:
             st.warning("No 'Total Due' or payment schedule mapped — loss rate proxy and PvD ratio will be unavailable.")
-        cohorts = build_cohorts(df)
-        filtered = filter_cohorts(cohorts, gi.min_loans_per_cohort)
         ltv = LtvAnalysis(df, filtered)
         ue = UeAnalysis(df)
 
@@ -439,6 +557,7 @@ if uploaded:
         "General Inputs", "Data Questionnaire", "Data Input",
         "Cohorts", "Cohorts for X or more loans",
         "LTV Analysis", "Unit Economics Analysis", "General Analysis",
+        "Custom Visualizations",
     ]
     tabs = st.tabs(tab_names)
 
@@ -562,6 +681,160 @@ if uploaded:
                 ).properties(title="Originations per month (LCY)", height=350),
                 width="stretch",
             )
+
+    # ── Custom Visualizations ──
+    with tabs[8]:
+        st.subheader("Custom Visualizations")
+        st.caption(
+            "Build your own charts from the mapped and computed data. "
+            "Add as many chart cards as you like, each with its own data source, chart type, and columns."
+        )
+
+        CUSTOM_DATA_SOURCES = {
+            "Data Input (loan-level)": df,
+            "Cohorts": cohorts,
+            "Cohorts for X or more loans": filtered,
+        }
+
+        if "custom_chart_cards" not in st.session_state:
+            st.session_state["custom_chart_cards"] = [0]
+            st.session_state["custom_chart_next_id"] = 1
+
+        def _render_chart_card(card_id):
+            k = lambda name: f"cv_{name}_{card_id}"
+            cv1, cv2 = st.columns([1, 1])
+            with cv1:
+                source_name = st.selectbox(
+                    "Data source", options=list(CUSTOM_DATA_SOURCES.keys()), key=k("source")
+                )
+            source_df = CUSTOM_DATA_SOURCES[source_name]
+
+            if source_df is None or source_df.empty:
+                st.info("This data source has no rows to plot.")
+                return
+
+            all_cols = list(source_df.columns)
+            numeric_cols = [c for c in all_cols if pd.api.types.is_numeric_dtype(source_df[c])]
+            datetime_cols = [c for c in all_cols if pd.api.types.is_datetime64_any_dtype(source_df[c])]
+            categorical_cols = [c for c in all_cols if c not in numeric_cols and c not in datetime_cols]
+
+            with cv2:
+                chart_kind = st.selectbox(
+                    "Chart type", options=["Line", "Bar", "Scatter", "Area"], key=k("kind"),
+                )
+
+            cv3, cv4, cv5, cv6 = st.columns(4)
+            with cv3:
+                x_col = st.selectbox(
+                    "X axis", options=all_cols,
+                    index=0 if not datetime_cols else all_cols.index(datetime_cols[0]),
+                    key=k("x"),
+                )
+            with cv4:
+                y_options = numeric_cols if numeric_cols else all_cols
+                y_col = st.selectbox("Y axis", options=y_options, key=k("y"))
+            with cv5:
+                color_col = st.selectbox(
+                    "Group / color by (optional)",
+                    options=["(none)"] + [c for c in categorical_cols if c != x_col],
+                    key=k("color"),
+                )
+            with cv6:
+                agg_func = st.selectbox(
+                    "Aggregate Y by X (optional)",
+                    options=["(none — raw rows)", "Sum", "Mean", "Count", "Median", "Min", "Max"],
+                    key=k("agg"),
+                )
+
+            base_cols = [c for c in {x_col, y_col, color_col} if c in source_df.columns]
+            plot_df = source_df[base_cols].dropna(subset=[x_col, y_col])
+
+            if agg_func != "(none — raw rows)" and not plot_df.empty:
+                group_cols = [x_col] + ([color_col] if color_col != "(none)" else [])
+                agg_name_map = {
+                    "Sum": "sum", "Mean": "mean", "Count": "count",
+                    "Median": "median", "Min": "min", "Max": "max",
+                }
+                if agg_func == "Count":
+                    plot_df = (
+                        plot_df.groupby(group_cols, dropna=False)[y_col]
+                        .count().reset_index()
+                    )
+                else:
+                    plot_df = (
+                        plot_df.groupby(group_cols, dropna=False)[y_col]
+                        .agg(agg_name_map[agg_func]).reset_index()
+                    )
+
+            if plot_df.empty:
+                st.info("No rows with data for the selected columns.")
+                return
+
+            x_type = "T" if x_col in datetime_cols else ("O" if x_col in categorical_cols else "Q")
+            mark_map = {
+                "Line": alt.Chart(plot_df).mark_line(point=True),
+                "Bar": alt.Chart(plot_df).mark_bar(),
+                "Scatter": alt.Chart(plot_df).mark_circle(size=60),
+                "Area": alt.Chart(plot_df).mark_area(opacity=0.6),
+            }
+            base = mark_map[chart_kind]
+            y_title = f"{agg_func} of {y_col}" if agg_func != "(none — raw rows)" else y_col
+            title_prefix = y_title
+            chart_title = f"{title_prefix} by {x_col}" + (f" ({color_col})" if color_col != "(none)" else "")
+
+            encode_kwargs = dict(
+                x=alt.X(f"{x_col}:{x_type}", title=x_col),
+                y=alt.Y(f"{y_col}:Q", title=y_title),
+                tooltip=[x_col, y_col] + ([color_col] if color_col != "(none)" else []),
+            )
+            if color_col != "(none)":
+                encode_kwargs["color"] = alt.Color(f"{color_col}:N", title=color_col)
+
+            custom_chart = base.encode(**encode_kwargs).properties(title=chart_title, height=400)
+            st.altair_chart(custom_chart, width="stretch")
+
+            bc1, bc2 = st.columns([1, 1])
+            with bc1:
+                if st.button("Add this chart to the Excel export", key=k("add_export")):
+                    export_charts = st.session_state.setdefault("export_charts", [])
+                    export_charts.append({
+                        "title": chart_title,
+                        "kind": chart_kind,
+                        "x_col": x_col,
+                        "y_col": y_col,
+                        "color_col": None if color_col == "(none)" else color_col,
+                        "y_title": y_title,
+                        "data": plot_df[[c for c in {x_col, y_col, color_col} if c in plot_df.columns]].copy(),
+                    })
+                    st.success(f"Added '{chart_title}' to the Excel export queue.")
+            with bc2:
+                if len(st.session_state["custom_chart_cards"]) > 1:
+                    if st.button("Remove this chart card", key=k("remove_card")):
+                        st.session_state["custom_chart_cards"].remove(card_id)
+                        st.rerun()
+
+        for i, card_id in enumerate(st.session_state["custom_chart_cards"]):
+            st.markdown(f"#### Chart {i + 1}")
+            _render_chart_card(card_id)
+            st.markdown("---")
+
+        if st.button("Add another chart", key="cv_add_card"):
+            st.session_state["custom_chart_cards"].append(st.session_state["custom_chart_next_id"])
+            st.session_state["custom_chart_next_id"] += 1
+            st.rerun()
+
+        export_charts = st.session_state.get("export_charts", [])
+        if export_charts:
+            st.markdown("**Charts queued for the Excel export:**")
+            for i, ec in enumerate(export_charts):
+                qc1, qc2 = st.columns([5, 1])
+                qc1.write(f"{i + 1}. {ec['title']} ({ec['kind']})")
+                if qc2.button("Remove", key=f"cv_remove_{i}"):
+                    export_charts.pop(i)
+                    st.rerun()
+            if st.button("Clear all queued charts", key="cv_clear_export"):
+                st.session_state["export_charts"] = []
+                st.rerun()
 
     st.markdown("---")
 
@@ -703,6 +976,57 @@ if uploaded:
             c.add_data(data, titles_from_data=True)
             c.set_categories(cats)
             ga_ws.add_chart(c, "A6")
+
+        export_charts = st.session_state.get("export_charts", [])
+        if export_charts:
+            cc_ws = writer.book.create_sheet("Custom Charts")
+            row = 1
+            for ec in export_charts:
+                if ec["color_col"]:
+                    wide = ec["data"].pivot_table(
+                        index=ec["x_col"], columns=ec["color_col"], values=ec["y_col"],
+                        aggfunc="first",
+                    ).reset_index()
+                else:
+                    wide = ec["data"][[ec["x_col"], ec["y_col"]]]
+
+                header_row = row
+                wide.to_excel(writer, sheet_name="Custom Charts", startrow=row - 1, index=False)
+                data_start = header_row + 1
+                data_end = header_row + len(wide)
+                n_series_cols = len(wide.columns) - 1
+
+                chart_map = {"Line": LineChart, "Bar": BarChart, "Area": AreaChart}
+                if ec["kind"] in chart_map:
+                    c = chart_map[ec["kind"]]()
+                    c.title = ec["title"]
+                    c.height = 10
+                    c.width = 20
+                    data = Reference(
+                        cc_ws, min_col=2, min_row=header_row, max_col=1 + n_series_cols,
+                        max_row=data_end,
+                    )
+                    cats = Reference(cc_ws, min_col=1, min_row=data_start, max_row=data_end)
+                    c.add_data(data, titles_from_data=True)
+                    c.set_categories(cats)
+                    cc_ws.add_chart(c, f"{chr(ord('A') + n_series_cols + 3)}{header_row}")
+                else:
+                    sc = ScatterChart()
+                    sc.title = ec["title"]
+                    sc.height = 10
+                    sc.width = 20
+                    sc.x_axis.title = ec["x_col"]
+                    sc.y_axis.title = ec["y_title"]
+                    xvalues = Reference(cc_ws, min_col=1, min_row=data_start, max_row=data_end)
+                    for col_idx in range(2, 2 + n_series_cols):
+                        yvalues = Reference(cc_ws, min_col=col_idx, min_row=header_row, max_row=data_end)
+                        series = Series(yvalues, xvalues, title_from_data=True)
+                        series.marker.symbol = "circle"
+                        series.graphicalProperties.line.noFill = True
+                        sc.series.append(series)
+                    cc_ws.add_chart(sc, f"{chr(ord('A') + n_series_cols + 3)}{header_row}")
+
+                row = data_end + 3
 
         cohorts.to_excel(writer, sheet_name="Cohorts", index=False)
         filtered.to_excel(writer, sheet_name="Cohorts for X or more loans", index=False)
