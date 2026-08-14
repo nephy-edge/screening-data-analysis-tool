@@ -5,8 +5,35 @@ import io
 import json
 import sys
 import os
+import tempfile
+import requests
+import certifi
 from datetime import datetime as _dt
 from openpyxl.chart import LineChart, BarChart, AreaChart, ScatterChart, Reference, Series
+
+DEEPINFRA_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
+DEEPINFRA_CHAT_URL = "https://api.deepinfra.com/v1/openai/chat/completions"
+
+_EXTRA_CA_PEM = os.path.join(os.path.dirname(__file__), "certs", "corporate_root.pem")
+
+
+@st.cache_resource
+def _ca_bundle_path() -> str:
+    """Certifi's trust store plus this machine's corporate proxy root CA (if bundled),
+    so HTTPS calls work on networks with TLS-inspecting proxies (e.g. Zscaler, Cisco
+    Umbrella) without depending on an environment variable being set before launch."""
+    if not os.path.exists(_EXTRA_CA_PEM):
+        return certifi.where()
+    with open(certifi.where(), "r", encoding="utf-8") as f:
+        bundle = f.read()
+    with open(_EXTRA_CA_PEM, "r", encoding="utf-8") as f:
+        bundle += "\n" + f.read()
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".pem", delete=False, encoding="utf-8"
+    )
+    tmp.write(bundle)
+    tmp.close()
+    return tmp.name
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
@@ -446,6 +473,71 @@ def _apply_derived_columns(raw: pd.DataFrame, defs: list) -> pd.DataFrame:
     return raw
 
 
+def _get_deepinfra_api_key():
+    try:
+        return st.secrets["DEEPINFRA_API_KEY"]
+    except Exception:
+        return os.environ.get("DEEPINFRA_API_KEY")
+
+
+def _suggest_derived_column(user_request: str, columns: list) -> dict:
+    """Ask DeepSeek V4 Flash (via DeepInfra) to turn a plain-English request into a
+    two-column formula using only the columns actually present in the uploaded file."""
+    api_key = _get_deepinfra_api_key()
+    if not api_key:
+        raise RuntimeError(
+            "No DEEPINFRA_API_KEY found. Add it to Streamlit secrets or the environment."
+        )
+
+    ops = list(DERIVED_OPS.keys())
+    system_prompt = (
+        "You help map a loan-portfolio spreadsheet's raw columns to a derived column. "
+        "You can only combine exactly two existing columns with one of these operators: "
+        f"{', '.join(ops)} (division). "
+        "Pick the two columns and operator that best satisfy the user's request. "
+        "If the request truly needs more than two columns or a non-arithmetic transform, "
+        "still return your best two-column approximation and say so in the explanation.\n\n"
+        f"Available columns (use these exact names): {', '.join(columns)}\n"
+        f"Available operators (use exactly one of these characters): {', '.join(ops)}\n\n"
+        "Respond with ONLY a JSON object, no markdown fences, matching this shape:\n"
+        '{"name": "<short column name>", "col_a": "<one of the available columns>", '
+        '"op": "<one of the available operators>", "col_b": "<one of the available columns>", '
+        '"explanation": "<one sentence>"}'
+    )
+
+    resp = requests.post(
+        DEEPINFRA_CHAT_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": DEEPINFRA_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_request},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 512,
+        },
+        timeout=30,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    suggestion = json.loads(content)
+
+    missing = [k for k in ("name", "col_a", "op", "col_b", "explanation") if k not in suggestion]
+    if missing:
+        raise ValueError(f"Model response missing fields: {', '.join(missing)}")
+    if suggestion["col_a"] not in columns or suggestion["col_b"] not in columns:
+        raise ValueError("Model suggested a column that isn't in your file.")
+    if suggestion["op"] not in DERIVED_OPS:
+        raise ValueError(f"Model suggested an unsupported operator: {suggestion['op']}")
+
+    return suggestion
+
+
 @st.cache_data(show_spinner=False)
 def _run_pipeline(raw: pd.DataFrame, extraction_date, days_after_term: int, min_loans_per_cohort: int):
     df = process_data_input(raw, extraction_date, days_after_term)
@@ -482,6 +574,58 @@ if uploaded:
             "E.g. if your file has separate Principal / Interest / Fee columns but no "
             "Total Due, combine them here — the result becomes selectable in the mapping below."
         )
+
+        st.markdown("**Not sure which columns to combine? Describe it and let AI suggest a formula.**")
+        ai1, ai2 = st.columns([4, 1])
+        with ai1:
+            ai_request = st.text_area(
+                "What do you want to calculate?",
+                placeholder="e.g. Total amount the borrower owes, combining principal and interest",
+                key="dc_ai_request",
+                height=70,
+            )
+        with ai2:
+            st.write("")
+            ask_ai = st.button("Suggest formula", key="dc_ai_ask")
+
+        if ask_ai:
+            if not ai_request.strip():
+                st.warning("Describe what you want to calculate first.")
+            else:
+                try:
+                    with st.spinner("Asking DeepSeek..."):
+                        st.session_state["dc_ai_suggestion"] = _suggest_derived_column(
+                            ai_request, list(raw.columns)
+                        )
+                except Exception as e:
+                    st.session_state["dc_ai_suggestion"] = None
+                    st.error(f"Couldn't get a suggestion: {e}")
+
+        suggestion = st.session_state.get("dc_ai_suggestion")
+        if suggestion:
+            st.info(
+                f"**Suggested:** {suggestion['name']} = {suggestion['col_a']} "
+                f"{suggestion['op']} {suggestion['col_b']}\n\n{suggestion['explanation']}"
+            )
+            if st.button("Use this suggestion", key="dc_ai_use"):
+                name = suggestion["name"].strip()
+                existing_names = {d["name"] for d in st.session_state["derived_columns"]}
+                if name in raw.columns or name in existing_names:
+                    base, i = name, 2
+                    while f"{base} ({i})" in raw.columns or f"{base} ({i})" in existing_names:
+                        i += 1
+                    name = f"{base} ({i})"
+                st.session_state["derived_columns"].append({
+                    "name": name,
+                    "col_a": suggestion["col_a"],
+                    "op": suggestion["op"],
+                    "col_b": suggestion["col_b"],
+                })
+                st.session_state["dc_ai_suggestion"] = None
+                st.session_state["dc_ai_request"] = ""
+                st.rerun()
+
+        st.markdown("**Or build it manually:**")
         dc1, dc2, dc3, dc4 = st.columns([2, 2, 1, 2])
         with dc1:
             new_name = st.text_input("New column name", key="dc_name")
