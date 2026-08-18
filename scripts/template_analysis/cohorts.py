@@ -32,14 +32,25 @@ def build_cohorts(df: pd.DataFrame):
     })
 
     matured = df[df["Reached T+3?"] == True]
-    if not matured.empty and "Total Due" in matured.columns and "Total Paid" in matured.columns:
+    has_total_due = "Total Due" in df.columns and "Total Paid" in df.columns
+    if not matured.empty and "Total Paid" in matured.columns:
         mat_grouped = matured.groupby("Cohort", dropna=False)
-        cohorts["Matured Count"] = mat_grouped["Loan ID"].count()
+        cohorts["Matured Count"] = mat_grouped["Loan ID"].count().reindex(
+            cohorts.index
+        ).fillna(0)
 
-        loss_num = (matured["Total Due"] - matured["Total Paid"]).groupby(
-            matured["Cohort"], dropna=False
-        ).sum()
-        loss_den = matured["Total Due"].groupby(matured["Cohort"], dropna=False).sum()
+        if has_total_due:
+            loss_num = (matured["Total Due"] - matured["Total Paid"]).groupby(
+                matured["Cohort"], dropna=False
+            ).sum()
+            loss_den = matured["Total Due"].groupby(matured["Cohort"], dropna=False).sum()
+        else:
+            owed = matured["Principal Value"] + matured["Expected Interest"] \
+                + matured["Expected Fee"]
+            loss_num = (owed - matured["Total Paid"]).groupby(
+                matured["Cohort"], dropna=False
+            ).sum()
+            loss_den = owed.groupby(matured["Cohort"], dropna=False).sum()
         loss_rate = (loss_num / loss_den).where(loss_den != 0).reindex(cohorts.index)
         cohorts["Loss Rate"] = loss_rate
     else:
