@@ -1,6 +1,8 @@
 # Direct runtime dependencies, pinned to match the local venv (Python 3.11+)
-streamlit==1.60.0
+streamlit==1.61.1
 pandas==3.0.5
-numpy==2.5.1
+numpy==2.4.6
 openpyxl==3.1.5
 altair==6.2.2
+requests==2.34.2
+certifi==2026.7.22
