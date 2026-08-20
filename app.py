@@ -133,14 +133,6 @@ render_cover(
     "template, and the analysis is computed automatically across all sheets.",
 )
 
-show_sidebar = st.session_state.get("show_sidebar", True)
-if not show_sidebar:
-    st.markdown(
-        "<style>[data-testid='stSidebar'], [data-testid='stSidebarCollapsedControl']"
-        "{display:none !important;}</style>",
-        unsafe_allow_html=True,
-    )
-
 MODEL_LABELS = {"rental": "Rental & Subscription", "lending": "Lending"}
 _default_model = st.session_state.get("model_key", "rental")
 model_key = st.selectbox(
@@ -156,12 +148,6 @@ if st.session_state.get("_active_model") != model_key:
               "custom_chart_cards", "custom_chart_next_id", "export_charts"):
         st.session_state.pop(k, None)
 is_lending = model_key == "lending"
-
-with st.columns([10, 2])[1]:
-    _toggle_label = "Show sidebar" if not show_sidebar else "Hide sidebar"
-    if st.button(_toggle_label, key="toggle_sidebar"):
-        st.session_state["show_sidebar"] = not show_sidebar
-        st.rerun()
 
 with st.sidebar:
     st.subheader("Feedback")
