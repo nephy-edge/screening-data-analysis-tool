@@ -120,7 +120,7 @@ is_lending = st.session_state.get("model_key", "rental") == "lending"
 st.set_page_config(
     page_title="SC Analysis - Lending" if is_lending else "SC Analysis - LTV & UE",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 inject_style()
 render_masthead("SC Analysis - Lending" if is_lending else "SC Analysis - Rental & Subscription")
