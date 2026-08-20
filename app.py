@@ -453,14 +453,20 @@ def _suggest_mapping(columns: list, input_columns: list) -> dict:
     return mapping
 
 
-def _add_reference_line(chart, value, label, color="#d62728"):
+def _add_reference_line(chart, value, label, color="#d62728", x_anchor=None):
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return chart
     ref = pd.DataFrame({"v": [value], "label": [label]})
     rule = alt.Chart(ref).mark_rule(color=color, strokeDash=[6, 6]).encode(y=alt.Y("v:Q"))
-    text = alt.Chart(ref).mark_text(
-        color=color, dy=-7, dx=6, align="left", fontSize=11, fontWeight="bold"
-    ).encode(x=alt.value(70), y=alt.Y("v:Q"), text="label:N")
+    if x_anchor is not None:
+        ref["xa"] = [x_anchor]
+        text = alt.Chart(ref).mark_text(
+            color=color, dx=-6, dy=-6, align="right", fontSize=11, fontWeight="bold"
+        ).encode(x="xa:T", y=alt.Y("v:Q"), text="label:N")
+    else:
+        text = alt.Chart(ref).mark_text(
+            color=color, dy=-7, dx=6, align="left", fontSize=11, fontWeight="bold"
+        ).encode(x=alt.value(70), y=alt.Y("v:Q"), text="label:N")
     return chart + rule + text
 
 
@@ -1015,6 +1021,7 @@ if is_lending:
                     ltv_data["95th Percentile Losses"],
                     f"95th %ile: {ltv_data['95th Percentile Losses']:.2%}",
                     color="#d62728",
+                    x_anchor=lending_chart_data["Cohort"].max(),
                 ).properties(title="Loss per Cohort", height=350),
                 width="stretch",
             )
@@ -1042,6 +1049,7 @@ if is_lending:
                     ue_data["Average Loss"],
                     f"Avg: {ue_data['Average Loss']:.2%}",
                     color="#2ca02c",
+                    x_anchor=lending_chart_data["Cohort"].max(),
                 ).properties(title="Loss per Cohort", height=300),
                 width="stretch",
             )
@@ -1055,6 +1063,7 @@ if is_lending:
                     ue_data["Average Expected Term"],
                     f"Avg: {ue_data['Average Expected Term']:.1f} days",
                     color="#2ca02c",
+                    x_anchor=lending_chart_data["Cohort"].max(),
                 ).properties(title="Average Term per Cohort (days)", height=300),
                 width="stretch",
             )
@@ -1074,10 +1083,12 @@ if is_lending:
                         ue_data["Average Fee %"],
                         f"Fee avg: {ue_data['Average Fee %']:.2%}",
                         color="#1f77b4",
+                        x_anchor=lending_chart_data["Cohort"].max(),
                     ),
                     ue_data["Average Interest %"],
                     f"Interest avg: {ue_data['Average Interest %']:.2%}",
                     color="#ff7f0e",
+                    x_anchor=lending_chart_data["Cohort"].max(),
                 ).properties(title="Average Fee and Interest Percent per Cohort", height=300),
                 width="stretch",
             )
