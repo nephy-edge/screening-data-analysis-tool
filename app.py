@@ -82,6 +82,37 @@ def _ca_bundle_path() -> str:
     return tmp.name
 
 
+def _get_slack_webhook_url():
+    try:
+        return st.secrets["SLACK_WEBHOOK_URL"]
+    except Exception:
+        return os.environ.get("SLACK_WEBHOOK_URL")
+
+
+def _send_slack_feedback(message: str, model: str) -> tuple[bool, str]:
+    """POST a feedback submission to the configured Slack Incoming Webhook."""
+    webhook = _get_slack_webhook_url()
+    if not webhook:
+        return False, "SLACK_WEBHOOK_URL not configured."
+    payload = {
+        "text": (
+            f"*Feedback* ({model})\n{message.strip()}\n"
+            f"_Submitted {_dt.now().strftime('%Y-%m-%d %H:%M')}_"
+        )
+    }
+    try:
+        resp = requests.post(
+            webhook,
+            json=payload,
+            timeout=15,
+            verify=_ca_bundle_path(),
+        )
+        resp.raise_for_status()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 # Read before set_page_config so the page title reflects the model chosen on
 # a prior run (the selectbox widget itself is created further down).
 is_lending = st.session_state.get("model_key", "rental") == "lending"
@@ -117,6 +148,31 @@ if st.session_state.get("_active_model") != model_key:
               "custom_chart_cards", "custom_chart_next_id", "export_charts"):
         st.session_state.pop(k, None)
 is_lending = model_key == "lending"
+
+with st.sidebar:
+    st.subheader("Feedback")
+    with st.expander("What worked / what didn't"):
+        if not _get_slack_webhook_url():
+            st.caption("Feedback routing not configured (SLACK_WEBHOOK_URL).")
+        fb_text = st.text_area(
+            "Share what worked or didn't work for you.",
+            key="fb_text",
+            height=120,
+            label_visibility="collapsed",
+        )
+        if st.button("Send feedback", key="fb_send"):
+            if not fb_text.strip():
+                st.warning("Please enter some feedback first.")
+            else:
+                ok, err = _send_slack_feedback(
+                    fb_text, MODEL_LABELS[model_key]
+                )
+                if ok:
+                    st.session_state.pop("fb_text", None)
+                    st.success("Thanks — feedback sent.")
+                    st.rerun()
+                else:
+                    st.error(f"Could not send feedback: {err}")
 
 RENTAL_CONFIG = dict(
     input_columns=[(c, True) for c in REQUIRED_COLUMNS] + [(c, False) for c in OPTIONAL_COLUMNS],
