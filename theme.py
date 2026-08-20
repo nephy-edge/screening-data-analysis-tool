@@ -186,11 +186,6 @@ div[data-testid="stInfo"]{border-left:3px solid #155B54 !important;background:#E
 /* -- Sidebar -- */
 [data-testid="stSidebar"]{background:#16312E !important;}
 [data-testid="stSidebar"] *{color:#EDF3F1 !important;}
-/* Make the native top-left sidebar toggle clearly visible on hover/closed state */
-[data-testid="stSidebarCollapsedControl"]{
-  color:#ffffff !important;background:#000000 !important;
-  border-radius:6px !important;box-shadow:0 1px 3px rgba(0,0,0,0.35) !important;
-}
 [data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,[data-testid="stSidebar"] h3{color:#ffffff !important;}
 /* Section-banner h2 styling assumes a light background; neutralise it on the dark sidebar */
 [data-testid="stSidebar"] h2{background:transparent !important;border-left:none !important;padding:0 !important;margin-top:18px !important;}
