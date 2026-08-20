@@ -453,6 +453,17 @@ def _suggest_mapping(columns: list, input_columns: list) -> dict:
     return mapping
 
 
+def _add_reference_line(chart, value, label, color="#d62728"):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return chart
+    ref = pd.DataFrame({"v": [value], "label": [label]})
+    rule = alt.Chart(ref).mark_rule(color=color, strokeDash=[6, 6]).encode(y=alt.Y("v:Q"))
+    text = alt.Chart(ref).mark_text(
+        color=color, dy=-7, dx=6, align="left", fontSize=11, fontWeight="bold"
+    ).encode(x=alt.value(70), y=alt.Y("v:Q"), text="label:N")
+    return chart + rule + text
+
+
 def _render_custom_visualizations_tab(data_sources: dict):
     """Generic ad-hoc chart builder shared by both models. `data_sources` maps
     a display name to the DataFrame it plots from for the active model."""
@@ -995,10 +1006,15 @@ if is_lending:
         c3.metric("Average Term (days)", fmt(ltv_data["Average Term"], "{:,.1f}"))
         if not lending_chart_data.empty:
             st.altair_chart(
-                alt.Chart(lending_chart_data).mark_line(point=True).encode(
-                    x=alt.X("Cohort:T", title="Cohort"),
-                    y=alt.Y("Loss Rate:Q", title="Loss Rate", axis=alt.Axis(format="%")),
-                    tooltip=["Cohort:T", alt.Tooltip("Loss Rate:Q", format=".2%")],
+                _add_reference_line(
+                    alt.Chart(lending_chart_data).mark_line(point=True).encode(
+                        x=alt.X("Cohort:T", title="Cohort"),
+                        y=alt.Y("Loss Rate:Q", title="Loss Rate", axis=alt.Axis(format="%")),
+                        tooltip=["Cohort:T", alt.Tooltip("Loss Rate:Q", format=".2%")],
+                    ),
+                    ltv_data["95th Percentile Losses"],
+                    f"95th %ile: {ltv_data['95th Percentile Losses']:.2%}",
+                    color="#d62728",
                 ).properties(title="Loss per Cohort", height=350),
                 width="stretch",
             )
@@ -1017,18 +1033,28 @@ if is_lending:
         row3[0].metric("Sense-check Margin", fmt(ue_data["Sense-check Margin"]))
         if not lending_chart_data.empty:
             st.altair_chart(
-                alt.Chart(lending_chart_data).mark_line(point=True).encode(
-                    x=alt.X("Cohort:T", title="Cohort"),
-                    y=alt.Y("Loss Rate:Q", title="Loss Rate", axis=alt.Axis(format="%")),
-                    tooltip=["Cohort:T", alt.Tooltip("Loss Rate:Q", format=".2%")],
+                _add_reference_line(
+                    alt.Chart(lending_chart_data).mark_line(point=True).encode(
+                        x=alt.X("Cohort:T", title="Cohort"),
+                        y=alt.Y("Loss Rate:Q", title="Loss Rate", axis=alt.Axis(format="%")),
+                        tooltip=["Cohort:T", alt.Tooltip("Loss Rate:Q", format=".2%")],
+                    ),
+                    ue_data["Average Loss"],
+                    f"Avg: {ue_data['Average Loss']:.2%}",
+                    color="#2ca02c",
                 ).properties(title="Loss per Cohort", height=300),
                 width="stretch",
             )
             st.altair_chart(
-                alt.Chart(lending_chart_data).mark_line(point=True).encode(
-                    x=alt.X("Cohort:T", title="Cohort"),
-                    y=alt.Y("Weighted Avg Term:Q", title="Avg Term (days)"),
-                    tooltip=["Cohort:T", alt.Tooltip("Weighted Avg Term:Q", format=".1f")],
+                _add_reference_line(
+                    alt.Chart(lending_chart_data).mark_line(point=True).encode(
+                        x=alt.X("Cohort:T", title="Cohort"),
+                        y=alt.Y("Weighted Avg Term:Q", title="Avg Term (days)"),
+                        tooltip=["Cohort:T", alt.Tooltip("Weighted Avg Term:Q", format=".1f")],
+                    ),
+                    ue_data["Average Expected Term"],
+                    f"Avg: {ue_data['Average Expected Term']:.1f} days",
+                    color="#2ca02c",
                 ).properties(title="Average Term per Cohort (days)", height=300),
                 width="stretch",
             )
@@ -1037,11 +1063,21 @@ if is_lending:
                 var_name="Metric", value_name="Pct",
             )
             st.altair_chart(
-                alt.Chart(fee_int).mark_line(point=True).encode(
-                    x=alt.X("Cohort:T", title="Cohort"),
-                    y=alt.Y("Pct:Q", title="% of Principal", axis=alt.Axis(format="%")),
-                    color="Metric:N",
-                    tooltip=["Cohort:T", "Metric:N", alt.Tooltip("Pct:Q", format=".2%")],
+                _add_reference_line(
+                    _add_reference_line(
+                        alt.Chart(fee_int).mark_line(point=True).encode(
+                            x=alt.X("Cohort:T", title="Cohort"),
+                            y=alt.Y("Pct:Q", title="% of Principal", axis=alt.Axis(format="%")),
+                            color="Metric:N",
+                            tooltip=["Cohort:T", "Metric:N", alt.Tooltip("Pct:Q", format=".2%")],
+                        ),
+                        ue_data["Average Fee %"],
+                        f"Fee avg: {ue_data['Average Fee %']:.2%}",
+                        color="#1f77b4",
+                    ),
+                    ue_data["Average Interest %"],
+                    f"Interest avg: {ue_data['Average Interest %']:.2%}",
+                    color="#ff7f0e",
                 ).properties(title="Average Fee and Interest Percent per Cohort", height=300),
                 width="stretch",
             )
