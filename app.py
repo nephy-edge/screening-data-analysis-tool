@@ -123,6 +123,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 inject_style()
+_show_sidebar = st.session_state.get("show_sidebar", True)
+st.markdown(
+    f"<style>[data-testid='stSidebar']{{display:{'block' if _show_sidebar else 'none'} !important;}}</style>",
+    unsafe_allow_html=True,
+)
+_burger_l, _burger_r = st.columns([1, 11])
+with _burger_l:
+    if st.button("☰", key="burger_toggle", help="Show/hide sidebar"):
+        st.session_state["show_sidebar"] = not _show_sidebar
+        st.rerun()
 render_masthead("SC Analysis - Lending" if is_lending else "SC Analysis - Rental & Subscription")
 render_cover(
     "Structured Credit Analysis - LTV & Unit Economics",
