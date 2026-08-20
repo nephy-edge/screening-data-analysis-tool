@@ -138,7 +138,7 @@ RENTAL_CONFIG = dict(
 LENDING_CONFIG = dict(
     input_columns=[
         ("Loan ID", True), ("Disbursement Date", True), ("Expected Completion Date", True),
-        ("Principal Value", True), ("Expected Interest", True), ("Expected Fee", True),
+        ("Principal Value", True), ("Expected Interest", True), ("Expected Fee", False),
         ("Total Paid", True), ("Total Due", False),
     ],
     date_fields={"Disbursement Date", "Expected Completion Date"},

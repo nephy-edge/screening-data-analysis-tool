@@ -32,7 +32,11 @@ def _compute_total_due(
     begin = _compute_begin_date(df)
     freq = df["Payment Frequency"].str.lower()
     pp = pd.to_numeric(df["Payment per Period"], errors="coerce").fillna(0)
-    fee = pd.to_numeric(df["Expected Fee"], errors="coerce").fillna(0)
+    fee = (
+        pd.to_numeric(df["Expected Fee"], errors="coerce").fillna(0)
+        if "Expected Fee" in df.columns
+        else 0
+    )
     end = df["Expected Completion Date"]
     tenor_months = (end - begin).dt.days / 30
     elapsed_days = (extraction_date - begin).dt.days.clip(lower=0)
@@ -66,6 +70,9 @@ def _normalize_columns(df):
 
 def process_data_input(df: pd.DataFrame, extraction_date, days_after_term=90):
     result = _normalize_columns(_coerce_dates(df.copy()))
+
+    if "Expected Fee" not in result.columns:
+        result["Expected Fee"] = 0
 
     result["Cohort"] = pd.to_datetime(
         result["Disbursement Date"].dt.to_period("M").dt.start_time
