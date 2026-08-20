@@ -189,6 +189,19 @@ div[data-testid="stInfo"]{border-left:3px solid #155B54 !important;background:#E
 [data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,[data-testid="stSidebar"] h3{color:#ffffff !important;}
 /* Section-banner h2 styling assumes a light background; neutralise it on the dark sidebar */
 [data-testid="stSidebar"] h2{background:transparent !important;border-left:none !important;padding:0 !important;margin-top:18px !important;}
+/* Text areas on the dark sidebar: white input with dark text (and a dark placeholder) */
+[data-testid="stSidebar"] [data-testid="stTextArea"] textarea,
+[data-testid="stSidebar"] [data-testid="stTextArea"] div[data-baseweb="textarea"] textarea{
+  background:#ffffff !important;color:#1a1a1a !important;caret-color:#1a1a1a !important;
+}
+[data-testid="stSidebar"] [data-testid="stTextArea"] textarea::placeholder{color:#6b7280 !important;}
+[data-testid="stSidebar"] [data-testid="stTextArea"] div[data-baseweb="textarea"]{
+  background:#ffffff !important;border-color:#cbd5e1 !important;
+}
+[data-testid="stSidebar"] [data-testid="stTextArea"] label p,
+[data-testid="stSidebar"] [data-testid="stTextArea"] div[data-testid="stMarkdownContainer"] p{
+  color:#EDF3F1 !important;
+}
 
 /* -- Captions / muted text -- */
 .stCaption, .caption, small{color:#666666 !important;font-family:"Inter",sans-serif !important;}
