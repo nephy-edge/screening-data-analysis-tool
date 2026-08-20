@@ -28,6 +28,10 @@ import requests
 import streamlit as st
 from openpyxl.chart import AreaChart, BarChart, LineChart, Reference, ScatterChart, Series
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from theme import inject_style, render_cover, render_masthead
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
@@ -302,6 +306,97 @@ def _suggest_derived_column(user_request: str, columns: list, domain_hint: str) 
     return suggestion
 
 
+# Short human-readable meaning for each Data Input template field, used to prompt
+# the auto-fill model so it maps raw file columns to the right template fields.
+FIELD_DESCRIPTIONS = {
+    # Lending
+    "Loan ID": "unique loan/account identifier",
+    "Disbursement Date": "date the loan was disbursed/funded",
+    "Expected Completion Date": "expected maturity or completion date",
+    "Principal Value": "principal amount lent",
+    "Expected Interest": "expected interest amount",
+    "Expected Fee": "expected fee amount",
+    "Total Paid": "total amount the borrower has paid",
+    "Total Due": "total amount owed (principal + interest + fees)",
+    # Rental & Subscription
+    "contract_id": "unique contract/lease identifier",
+    "asset_id": "asset/device identifier",
+    "start_date": "date the contract started",
+    "status": "contract status label",
+    "downpayment": "initial down-payment amount",
+    "monthly_expected_payment": "expected monthly payment amount",
+    "total_paid": "total amount paid to date",
+    "cost_of_asset": "cost of the asset",
+    "expected_end_date": "expected end/maturity date",
+    "closed_date": "date the contract was closed",
+    "asset_recovery_date": "date the asset was recovered",
+    "total_contract_value": "total contract value",
+    "amount_expected_to_date": "amount expected to have been paid to date",
+    "current_asset_value": "current value of the asset",
+    "recovery_date": "date of recovery",
+    "recovery_amount": "recovery amount",
+}
+
+
+def _suggest_mapping(columns: list, input_columns: list) -> dict:
+    """Ask DeepSeek V4 Flash (via DeepInfra) to guess the best mapping of the
+    uploaded file's raw columns to each Data Input template field for the active
+    model. Returns {target_field: source_column} using only columns actually
+    present; fields with no sensible source are left unmapped (None)."""
+    api_key = _get_deepinfra_api_key()
+    if not api_key:
+        return {}
+
+    fields = "\n".join(
+        f"- {target} ({'required' if required else 'optional'}): {FIELD_DESCRIPTIONS.get(target, '')}"
+        for target, required in input_columns
+    )
+    system_prompt = (
+        "You are mapping a model's raw column names to a fixed set of template "
+        "fields. For each template field below, choose the single raw column "
+        "that best matches its meaning.\n\n"
+        f"Available raw columns (use these exact names, or null if none fit): "
+        f"{', '.join(columns)}\n\n"
+        "Template fields to fill:\n"
+        f"{fields}\n\n"
+        "Respond with ONLY a JSON object, no markdown fences, mapping each "
+        "template field to a raw column name (exact string) or null when no "
+        "column plausibly matches. Example:\n"
+        '{"Loan ID": "account_id", "Disbursement Date": "funded_at", '
+        '"Total Due": null}'
+    )
+
+    resp = requests.post(
+        DEEPINFRA_CHAT_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": DEEPINFRA_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "Guess the best mapping for these columns."},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 512,
+        },
+        timeout=30,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    suggestions = json.loads(content)
+
+    valid_columns = set(str(c) for c in columns)
+    mapping = {}
+    for target, _ in input_columns:
+        src = suggestions.get(target)
+        if src is None:
+            mapping[target] = None
+            continue
+        src = str(src).strip()
+        mapping[target] = src if src in valid_columns else None
+    return mapping
+
+
 def _render_custom_visualizations_tab(data_sources: dict):
     """Generic ad-hoc chart builder shared by both models. `data_sources` maps
     a display name to the DataFrame it plots from for the active model."""
@@ -574,6 +669,20 @@ cached_mapping = _load_cache(MAPPING_CACHE_PATH, _cache_key(raw.columns)) or {}
 if cached_mapping:
     st.caption("A saved mapping was found for a file with these same column headers - pre-filled below.")
 
+# AI auto-fill: guess the best column mapping for this file's headers (per model).
+guess_key = f"ai_mapping_guess_{model_key}_{_cache_key(raw.columns)}"
+if guess_key not in st.session_state:
+    if _get_deepinfra_api_key():
+        try:
+            with st.spinner("Asking the AI to auto-fill the column mapping..."):
+                st.session_state[guess_key] = _suggest_mapping(list(raw.columns), INPUT_COLUMNS)
+        except Exception as e:
+            st.session_state[guess_key] = {}
+            st.warning(f"AI auto-fill wasn't available ({e}). You can still map columns manually.")
+    else:
+        st.session_state[guess_key] = {}
+ai_guess = st.session_state.get(guess_key) or {}
+
 default_extraction = pd.Timestamp.now().normalize()
 for candidate in ("start_date", "Start Date", "Disbursement Date"):
     if candidate in raw.columns:
@@ -589,8 +698,9 @@ with st.form("column_mapping"):
     mapping = {}
     for target, required in INPUT_COLUMNS:
         options = ["(not provided)"] + [c for c in raw.columns if c not in used]
-        cached_choice = cached_mapping.get(target)
-        default_index = options.index(cached_choice) if cached_choice in options else 0
+        # Precedence: saved mapping > AI guess > "(not provided)".
+        default_choice = cached_mapping.get(target) or ai_guess.get(target)
+        default_index = options.index(default_choice) if default_choice in options else 0
         chosen = st.selectbox(
             f"Map to **{target}** ({'required' if required else 'optional'})",
             options=options, index=default_index, key=f"map_{target}",

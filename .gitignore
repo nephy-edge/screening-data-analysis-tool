@@ -9,6 +9,9 @@ env/
 # Streamlit secrets (never commit API keys)
 .streamlit/secrets.toml
 
+# Local environment variables (never commit API keys)
+.env
+
 # Certificates / credentials
 *.pem
 *.key
