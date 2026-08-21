@@ -90,14 +90,15 @@ def _get_slack_webhook_url():
         return os.environ.get("SLACK_WEBHOOK_URL")
 
 
-def _send_slack_feedback(message: str, model: str) -> tuple[bool, str]:
+def _send_slack_feedback(message: str, model: str, user: str = "") -> tuple[bool, str]:
     """POST a feedback submission to the configured Slack Incoming Webhook."""
     webhook = _get_slack_webhook_url()
     if not webhook:
         return False, "SLACK_WEBHOOK_URL not configured."
+    who = f" — {user.strip()}" if user.strip() else ""
     payload = {
         "text": (
-            f"*Feedback* ({model})\n{message.strip()}\n"
+            f"*Feedback* ({model}){who}\n{message.strip()}\n"
             f"_Submitted {_dt.now().strftime('%Y-%m-%d %H:%M')}_"
         )
     }
@@ -155,6 +156,10 @@ with st.sidebar:
     with st.expander("What worked / what didn't"):
         if not _get_slack_webhook_url():
             st.caption("Feedback routing not configured (SLACK_WEBHOOK_URL).")
+        fb_user = st.text_input(
+            "Your name or email (optional)",
+            key="fb_user",
+        )
         fb_text = st.text_area(
             "Share what worked or didn't work for you.",
             key="fb_text",
@@ -166,7 +171,7 @@ with st.sidebar:
                 st.warning("Please enter some feedback first.")
             else:
                 ok, err = _send_slack_feedback(
-                    fb_text, MODEL_LABELS[model_key]
+                    fb_text, MODEL_LABELS[model_key], fb_user
                 )
                 if ok:
                     st.session_state.pop("fb_text", None)
@@ -585,19 +590,41 @@ def _render_custom_visualizations_tab(data_sources: dict):
         datetime_cols = [c for c in all_cols if pd.api.types.is_datetime64_any_dtype(source_df[c])]
         categorical_cols = [c for c in all_cols if c not in numeric_cols and c not in datetime_cols]
 
+        # Smart defaults for a fresh chart card: an origination-date-like column on X
+        # and a principal-like column on Y, summed - so it opens showing something
+        # meaningful (e.g. Principal by Cohort) instead of an arbitrary first column.
+        # Only affects the initial selectbox index; once a user picks a value for this
+        # card, Streamlit remembers it under that widget's key on reruns.
+        def _pick(cols, keywords, fallback):
+            for kw in keywords:
+                for c in cols:
+                    if kw in c.lower():
+                        return c
+            return fallback
+
+        default_x = _pick(
+            datetime_cols, ["cohort", "disbursement", "origination", "start"],
+            datetime_cols[0] if datetime_cols else all_cols[0],
+        )
+        y_options = numeric_cols if numeric_cols else all_cols
+        default_y = _pick(numeric_cols, ["principal"], y_options[0])
+        default_agg = "Sum" if default_x in datetime_cols and default_y in numeric_cols else "(none - raw rows)"
+        chart_options = ["Line", "Bar", "Scatter", "Area"]
+        default_kind = "Bar" if default_agg == "Sum" else "Line"
+
         with cv2:
-            chart_kind = st.selectbox("Chart type", options=["Line", "Bar", "Scatter", "Area"], key=k("kind"))
+            chart_kind = st.selectbox("Chart type", options=chart_options, index=chart_options.index(default_kind), key=k("kind"))
 
         cv3, cv4, cv5, cv6 = st.columns(4)
         with cv3:
-            x_col = st.selectbox("X axis", options=all_cols, index=0 if not datetime_cols else all_cols.index(datetime_cols[0]), key=k("x"))
+            x_col = st.selectbox("X axis", options=all_cols, index=all_cols.index(default_x), key=k("x"))
         with cv4:
-            y_options = numeric_cols if numeric_cols else all_cols
-            y_col = st.selectbox("Y axis", options=y_options, key=k("y"))
+            y_col = st.selectbox("Y axis", options=y_options, index=y_options.index(default_y), key=k("y"))
         with cv5:
             color_col = st.selectbox("Group / color by (optional)", options=["(none)"] + [c for c in categorical_cols if c != x_col], key=k("color"))
         with cv6:
-            agg_func = st.selectbox("Aggregate Y by X (optional)", options=["(none - raw rows)", "Sum", "Mean", "Count", "Median", "Min", "Max"], key=k("agg"))
+            agg_options = ["(none - raw rows)", "Sum", "Mean", "Count", "Median", "Min", "Max"]
+            agg_func = st.selectbox("Aggregate Y by X (optional)", options=agg_options, index=agg_options.index(default_agg), key=k("agg"))
 
         base_cols = [c for c in {x_col, y_col, color_col} if c in source_df.columns]
         plot_df = source_df[base_cols].dropna(subset=[x_col, y_col])
