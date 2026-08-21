@@ -186,6 +186,13 @@ div[data-testid="stInfo"]{border-left:3px solid #155B54 !important;background:#E
 /* -- Sidebar -- */
 [data-testid="stSidebar"]{background:#16312E !important;}
 [data-testid="stSidebar"] *{color:#EDF3F1 !important;}
+/* The sticky masthead (z-index:100) sits above the native top-left chevron that
+   re-opens a collapsed sidebar - raise it above the masthead and keep it visible. */
+[data-testid="stSidebarCollapsedControl"]{
+  z-index:200 !important;position:relative !important;
+  color:#16312E !important;background:#ffffff !important;
+  border-radius:6px !important;box-shadow:0 1px 3px rgba(0,0,0,0.25) !important;
+}
 [data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,[data-testid="stSidebar"] h3{color:#ffffff !important;}
 /* Section-banner h2 styling assumes a light background; neutralise it on the dark sidebar */
 [data-testid="stSidebar"] h2{background:transparent !important;border-left:none !important;padding:0 !important;margin-top:18px !important;}

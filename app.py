@@ -875,7 +875,7 @@ if guess_key not in st.session_state:
 ai_guess = st.session_state.get(guess_key) or {}
 
 default_extraction = pd.Timestamp.now().normalize()
-for candidate in ("start_date", "Start Date", "Disbursement Date"):
+for candidate in ("start_date", "Start Date", "Begin Date", "Disbursement Date"):
     if candidate in raw.columns:
         parsed = pd.to_datetime(raw[candidate], errors="coerce")
         if parsed.notna().any():
