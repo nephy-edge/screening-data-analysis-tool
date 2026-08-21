@@ -124,7 +124,7 @@ div[data-baseweb="select"] > div:focus-within, .stSelectbox div[data-baseweb="se
 .stNumberInput button, div[data-testid="stNumberInputStepUp"], div[data-testid="stNumberInputStepDown"]{
     background:#ffffff !important;border-color:#D8DEE5 !important;
 }
-.stNumberInput button svg, div[data-testid="stNumberInputStepUp"] svg, div[data-testid="stNumberInputStepDown"] svg{
+div[data-testid="stNumberInputStepUp"] svg, div[data-testid="stNumberInputStepDown"] svg{
     fill:#16312E !important;
 }
 [data-testid="stDateInput"] input{color:#16312E !important;background:#ffffff !important;}

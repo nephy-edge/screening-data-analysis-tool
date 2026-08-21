@@ -881,12 +881,13 @@ with st.form("column_mapping"):
                 "Date of extraction", value=default_extraction.date(),
                 help="The max date in the loan tape. Used to identify which loans have reached their maturity.",
             )
+        with gc2:
             days_after_term = st.number_input(
                 "Days after term", value=90, min_value=0,
                 help="Days after term used to compute loss rate (default 90 = Term + 3 months). "
                      "Modify only if the company has significant repayments after 3 months from term.",
             )
-        with gc2:
+        with gc3:
             min_loans_per_cohort = st.number_input(
                 "Minimum loans per cohort", value=10, min_value=0,
                 help="Affects the cohort stressed loss rate: requires a minimum number of observations to "
