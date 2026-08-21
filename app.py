@@ -877,19 +877,40 @@ with st.form("column_mapping"):
     if is_lending:
         gc1, gc2, gc3 = st.columns(3)
         with gc1:
-            extraction_date = st.date_input("Date of extraction", value=default_extraction.date())
+            extraction_date = st.date_input(
+                "Date of extraction", value=default_extraction.date(),
+                help="The max date in the loan tape. Used to identify which loans have reached their maturity.",
+            )
+            days_after_term = st.number_input(
+                "Days after term", value=90, min_value=0,
+                help="Days after term used to compute loss rate (default 90 = Term + 3 months). "
+                     "Modify only if the company has significant repayments after 3 months from term.",
+            )
         with gc2:
-            days_after_term = st.number_input("Days after term", value=90, min_value=0)
-        with gc3:
-            min_loans_per_cohort = st.number_input("Minimum loans per cohort", value=10, min_value=0)
+            min_loans_per_cohort = st.number_input(
+                "Minimum loans per cohort", value=10, min_value=0,
+                help="Affects the cohort stressed loss rate: requires a minimum number of observations to "
+                     "include a cohort in the cohort loss rate distribution (default 10).",
+            )
     else:
         gc1, gc2, gc3 = st.columns(3)
         with gc1:
-            extraction_date = st.date_input("Date of extraction", value=default_extraction.date())
-            days_after_term = st.number_input("Days after term", value=0, min_value=0)
+            extraction_date = st.date_input(
+                "Date of extraction", value=default_extraction.date(),
+                help="The max date in the loan tape. Used to identify which loans have reached their maturity.",
+            )
+            days_after_term = st.number_input(
+                "Days after term", value=0, min_value=0,
+                help="Days after term used to compute loss rate (default 90 = Term + 3 months). "
+                     "Modify only if the company has significant repayments after 3 months from term.",
+            )
         with gc2:
             months_since_default = st.number_input("Months since default", value=3, min_value=0)
-            min_loans_per_cohort = st.number_input("Minimum loans per cohort", value=20, min_value=0)
+            min_loans_per_cohort = st.number_input(
+                "Minimum loans per cohort", value=20, min_value=0,
+                help="Affects the cohort stressed loss rate: requires a minimum number of observations to "
+                     "include a cohort in the cohort loss rate distribution (default 10).",
+            )
         with gc3:
             useful_life_years = st.number_input("Useful life of asset (years)", value=3.0, min_value=0.1)
 
