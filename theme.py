@@ -189,7 +189,7 @@ div[data-testid="stInfo"]{border-left:3px solid #155B54 !important;background:#E
 /* The sticky masthead (z-index:100) sits above the native top-left chevron that
    re-opens a collapsed sidebar - raise it above the masthead and keep it visible. */
 [data-testid="stSidebarCollapsedControl"]{
-  z-index:200 !important;position:relative !important;
+  z-index:200 !important;
   color:#16312E !important;background:#ffffff !important;
   border-radius:6px !important;box-shadow:0 1px 3px rgba(0,0,0,0.25) !important;
 }
