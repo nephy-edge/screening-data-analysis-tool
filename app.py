@@ -17,6 +17,7 @@ economics are different domains.
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime as _dt
@@ -262,13 +263,13 @@ def _validate_mapping(
             (errors if target in required_fields else warnings).append(msg)
             continue
         if target in date_fields:
-            parsed = pd.to_datetime(series, errors="coerce", dayfirst=dayfirst)
+            parsed = _detect_date(series)
             fail_rate = 1 - (parsed.notna().sum() / non_null.sum())
             if fail_rate > 0.5:
                 msg = f"**{target}** -> column '{source}' doesn't look like dates ({fail_rate:.0%} unparseable)."
                 (errors if target in required_fields else warnings).append(msg)
         elif target in numeric_fields:
-            parsed = pd.to_numeric(series, errors="coerce")
+            parsed = pd.to_numeric(_clean_numeric(series), errors="coerce")
             fail_rate = 1 - (parsed.notna().sum() / non_null.sum())
             if fail_rate > 0.5:
                 msg = f"**{target}** -> column '{source}' doesn't look numeric ({fail_rate:.0%} unparseable)."
@@ -283,7 +284,96 @@ def fmt(value, spec="{:.1%}"):
 def _coerce_dates(raw: pd.DataFrame, date_fields, dayfirst=False) -> pd.DataFrame:
     for col in date_fields:
         if col in raw.columns:
-            raw[col] = pd.to_datetime(raw[col], errors="coerce", dayfirst=dayfirst)
+            raw[col] = _detect_date(raw[col])
+    return raw
+
+
+# Canonical field -> acceptable header aliases, used to auto-normalise a file
+# whose column names differ from the template's (strip spaces/punctuation/case
+# before matching), so a "clean but differently-worded" upload still maps.
+_FIELD_ALIASES = {
+    "Loan ID": ["loan id", "loan_id", "account id", "account_id", "id", "loan no", "loan number", "contract no", "contract number"],
+    "Disbursement Date": ["disbursement date", "disbursal date", "disbursed date", "funded date", "funding date", "start date", "origination date", "loan date", "issue date"],
+    "Expected Completion Date": ["expected completion date", "maturity date", "expected end date", "end date", "expected maturity", "due date"],
+    "Principal Value": ["principal value", "principal", "loan amount", "disbursement amount", "principal amount"],
+    "Expected Interest": ["expected interest", "interest", "interest amount", "expected interest amount"],
+    "Expected Fee": ["expected fee", "fee", "fee amount", "upfront fee", "expected fees"],
+    "Total Paid": ["total paid", "amount paid", "total repayments", "payments", "total amount paid"],
+    "Total Due": ["total due", "total dues calculated", "total due calculated", "pos", "outstanding", "balance", "amount due"],
+    "Payment per Period": ["payment per period", "payment", "installment", "instalment", "monthly payment", "periodic payment"],
+    "Payment Frequency": ["payment frequency", "frequency", "payment terms", "repayment frequency"],
+    "contract_id": ["contract_id", "contract id", "contract no", "agreement id"],
+    "asset_id": ["asset_id", "asset id", "asset no", "vin", "serial number"],
+    "start_date": ["start_date", "start date", "contract start", "commencement date"],
+    "status": ["status", "status label", "contract status", "stage", "status name"],
+    "downpayment": ["downpayment", "down payment", "initial payment", "deposit"],
+    "monthly_expected_payment": ["monthly_expected_payment", "monthly payment", "monthly rent", "monthly_rent", "expected monthly payment"],
+    "total_paid": ["total_paid", "total paid", "amount paid"],
+    "cost_of_asset": ["cost_of_asset", "cost of asset", "asset cost", "purchase price", "cost of the asset"],
+    "expected_end_date": ["expected_end_date", "expected end date", "maturity date", "end date"],
+    "closed_date": ["closed_date", "closed date", "close date", "cancellation date"],
+    "asset_recovery_date": ["asset_recovery_date", "asset recovery date", "recovery date"],
+    "total_contract_value": ["total_contract_value", "total contract value", "contract value"],
+    "amount_expected_to_date": ["amount_expected_to_date", "amount expected to date", "expected to date"],
+    "current_asset_value": ["current_asset_value", "current asset value", "asset value", "current value"],
+    "recovery_date": ["recovery_date", "recovery date"],
+    "recovery_amount": ["recovery_amount", "recovery amount"],
+}
+
+_ALL_FIELDS = set(_FIELD_ALIASES.keys()) | {
+    "Begin Date", "Total Dues Calculated", "Delinquent Amount", "Write-off amount",
+}
+
+
+def _norm_key(value) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+def _clean_numeric(series) -> pd.Series:
+    s = series.astype(str).str.strip()
+    s = s.str.replace(r"[\$,£€\s%]", "", regex=True)
+    s = s.str.replace(r"\(([^)]*)\)", r"-\1", regex=True)
+    s = s.str.replace(",", "", regex=False)
+    return s
+
+
+def _detect_date(series) -> pd.Series:
+    orig = series.copy()
+    best, best_n = None, -1
+    for kwargs in ({}, {"dayfirst": True}, {"yearfirst": True}):
+        p = pd.to_datetime(orig, errors="coerce", **kwargs)
+        n = int(p.notna().sum())
+        if n > best_n:
+            best_n, best = n, p
+    return best if best_n > 0 else orig
+
+
+def _normalize_columns(raw: pd.DataFrame, fields) -> pd.DataFrame:
+    reverse = {}
+    for canon in fields:
+        reverse[_norm_key(canon)] = canon
+        for alias in _FIELD_ALIASES.get(canon, []):
+            reverse[_norm_key(alias)] = canon
+    rename = {}
+    for col in raw.columns:
+        k = _norm_key(col)
+        if k in reverse:
+            canon = reverse[k]
+            if canon not in raw.columns:
+                rename[col] = canon
+    return raw.rename(columns=rename)
+
+
+def _format_normalize(raw: pd.DataFrame, date_fields, numeric_fields) -> pd.DataFrame:
+    raw = _normalize_columns(raw, set(date_fields) | set(numeric_fields) | _ALL_FIELDS)
+    for col in date_fields:
+        if col in raw.columns and raw[col].dtype != "datetime64[ns]":
+            raw[col] = _detect_date(raw[col])
+    for col in numeric_fields:
+        if col in raw.columns:
+            cleaned = pd.to_numeric(_clean_numeric(raw[col]), errors="coerce")
+            if cleaned.notna().sum() >= raw[col].notna().sum() * 0.5:
+                raw[col] = cleaned
     return raw
 
 
@@ -648,6 +738,7 @@ if st.session_state.get("uploaded_file_id") != uploaded.file_id:
         st.session_state.pop(f"map_{target}", None)
 
 raw = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
+raw = _format_normalize(raw, DATE_FIELDS, NUMERIC_FIELDS)
 
 st.success(f"Loaded {len(raw):,} rows - {len(raw.columns)} columns.")
 st.dataframe(raw.head(10), width="stretch", height=300)
@@ -832,7 +923,7 @@ if submitted:
     analysis_extraction = pd.Timestamp(extraction_date)
     start_src = mapping.get(active_cfg["primary_date_field"])
     if start_src:
-        parsed_start = pd.to_datetime(raw[start_src], errors="coerce", dayfirst=active_cfg["dayfirst"])
+        parsed_start = _detect_date(raw[start_src])
         if parsed_start.notna().any():
             analysis_extraction = pd.Timestamp(parsed_start.max())
     overrides = {
