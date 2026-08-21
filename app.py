@@ -1072,9 +1072,20 @@ with tabs[0]:
     st.subheader("General Inputs")
     if is_lending:
         col1, col2, col3 = st.columns(3)
-        col1.metric("Date of extraction", str(gi.extraction_date.date()))
-        col2.metric("Days after term", gi.days_after_term)
-        col3.metric("Minimum loans per cohort", gi.min_loans_per_cohort)
+        col1.metric(
+            "Date of extraction", str(gi.extraction_date.date()),
+            help="The max date in the loan tape. Used to identify which loans have reached their maturity.",
+        )
+        col2.metric(
+            "Days after term", gi.days_after_term,
+            help="Days after term used to compute loss rate (default 90 = Term + 3 months). "
+                 "Modify only if the company has significant repayments after 3 months from term.",
+        )
+        col3.metric(
+            "Minimum loans per cohort", gi.min_loans_per_cohort,
+            help="Affects the cohort stressed loss rate: requires a minimum number of observations to "
+                 "include a cohort in the cohort loss rate distribution (default 10).",
+        )
     else:
         col1, col2, col3 = st.columns(3)
         col1.metric("Date of extraction", str(gi.extraction_date.date()))
