@@ -875,14 +875,6 @@ if guess_key not in st.session_state:
         st.session_state[guess_key] = {}
 ai_guess = st.session_state.get(guess_key) or {}
 
-default_extraction = pd.Timestamp.now().normalize()
-for candidate in ("start_date", "Start Date", "Begin Date", "Disbursement Date"):
-    if candidate in raw.columns:
-        parsed = pd.to_datetime(raw[candidate], errors="coerce")
-        if parsed.notna().any():
-            default_extraction = parsed.max()
-            break
-
 with st.form("column_mapping"):
     st.subheader("Map your columns to the Data Input template")
     st.caption("For each template field below, select the matching column in your file. Required fields must be mapped to run the analysis.")
@@ -900,6 +892,17 @@ with st.form("column_mapping"):
         mapping[target] = None if chosen == "(not provided)" else chosen
         if chosen != "(not provided)":
             used.add(chosen)
+
+    # Date of extraction defaults to the max of whichever raw column the user
+    # just mapped to the primary date field (Disbursement Date / start_date) -
+    # not a guess at the raw header's name, since that column could be called
+    # anything before mapping renames it.
+    default_extraction = pd.Timestamp.now().normalize()
+    primary_col = mapping.get(active_cfg["primary_date_field"])
+    if primary_col:
+        parsed_primary = pd.to_datetime(raw[primary_col], errors="coerce")
+        if parsed_primary.notna().any():
+            default_extraction = parsed_primary.max()
 
     st.subheader("General Inputs")
     if is_lending:
