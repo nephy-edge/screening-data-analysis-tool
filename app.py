@@ -158,6 +158,11 @@ with feedback_col:
         st.caption("Share what worked or didn't work for you.")
         if not _get_slack_webhook_url():
             st.caption("Feedback routing not configured (SLACK_WEBHOOK_URL).")
+        if st.session_state.pop("fb_just_sent", False):
+            # Shown on the rerun triggered below, not in the same run as the
+            # button click - st.rerun() interrupts the script immediately, so
+            # a st.success() called right before it never reaches the browser.
+            st.success("Thanks — feedback sent.")
         fb_user = st.text_input(
             "Your name or email (optional)",
             key="fb_user",
@@ -176,7 +181,7 @@ with feedback_col:
                 )
                 if ok:
                     st.session_state.pop("fb_text", None)
-                    st.success("Thanks — feedback sent.")
+                    st.session_state["fb_just_sent"] = True
                     st.rerun()
                 else:
                     st.error(f"Could not send feedback: {err}")
