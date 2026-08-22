@@ -167,9 +167,15 @@ with feedback_col:
             "Your name or email (optional)",
             key="fb_user",
         )
+        # The text area's key includes a version counter so a successful send
+        # can force a brand-new, empty widget instance on the next run -
+        # popping the old key alone didn't reliably clear the field in
+        # production (widgets inside a popover can retain their prior value
+        # across a rerun even once the session_state key is removed).
+        fb_form_version = st.session_state.setdefault("fb_form_version", 0)
         fb_text = st.text_area(
             "What worked / what didn't",
-            key="fb_text",
+            key=f"fb_text_{fb_form_version}",
             height=120,
         )
         if st.button("Send feedback", key="fb_send"):
@@ -180,7 +186,7 @@ with feedback_col:
                     fb_text, MODEL_LABELS[model_key], fb_user
                 )
                 if ok:
-                    st.session_state.pop("fb_text", None)
+                    st.session_state["fb_form_version"] = fb_form_version + 1
                     st.session_state["fb_just_sent"] = True
                     st.rerun()
                 else:
