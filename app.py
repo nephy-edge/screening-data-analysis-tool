@@ -137,12 +137,14 @@ render_cover(
 
 MODEL_LABELS = {"rental": "Rental & Subscription", "lending": "Lending"}
 _default_model = st.session_state.get("model_key", "rental")
-model_key = st.selectbox(
-    "Select model", options=list(MODEL_LABELS.keys()),
-    format_func=lambda k: MODEL_LABELS[k],
-    index=list(MODEL_LABELS.keys()).index(_default_model) if _default_model in MODEL_LABELS else 0,
-    key="model_key",
-)
+model_col, feedback_col = st.columns([5, 1])
+with model_col:
+    model_key = st.selectbox(
+        "Select model", options=list(MODEL_LABELS.keys()),
+        format_func=lambda k: MODEL_LABELS[k],
+        index=list(MODEL_LABELS.keys()).index(_default_model) if _default_model in MODEL_LABELS else 0,
+        key="model_key",
+    )
 if st.session_state.get("_active_model") != model_key:
     st.session_state["_active_model"] = model_key
     for k in ("uploaded_file_id", "analysis_ran", "analysis_mapping", "analysis_mapping_warnings",
@@ -151,9 +153,10 @@ if st.session_state.get("_active_model") != model_key:
         st.session_state.pop(k, None)
 is_lending = model_key == "lending"
 
-with st.sidebar:
-    st.subheader("Feedback")
-    with st.expander("What worked / what didn't"):
+with feedback_col:
+    st.write("")  # align the popover trigger with the selectbox, below its label
+    with st.popover("💬 Feedback"):
+        st.caption("Share what worked or didn't work for you.")
         if not _get_slack_webhook_url():
             st.caption("Feedback routing not configured (SLACK_WEBHOOK_URL).")
         fb_user = st.text_input(
@@ -161,10 +164,9 @@ with st.sidebar:
             key="fb_user",
         )
         fb_text = st.text_area(
-            "Share what worked or didn't work for you.",
+            "What worked / what didn't",
             key="fb_text",
             height=120,
-            label_visibility="collapsed",
         )
         if st.button("Send feedback", key="fb_send"):
             if not fb_text.strip():
