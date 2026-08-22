@@ -1001,6 +1001,13 @@ mapping = st.session_state["analysis_mapping"]
 rename_map = {src: tgt for tgt, src in mapping.items() if src}
 raw = raw.rename(columns=rename_map)
 _coerce_dates(raw, DATE_FIELDS, active_cfg["dayfirst"])
+# _format_normalize() coerced numeric_fields before this rename, so it only ever
+# caught columns whose raw header already auto-aliased to a template name.
+# Anything the user had to manually map above skipped coercion entirely and
+# stayed as raw text - re-run numeric coercion now that the mapping is final.
+for col in NUMERIC_FIELDS:
+    if col in raw.columns and raw[col].dtype != "float64":
+        raw[col] = pd.to_numeric(_clean_numeric(raw[col]), errors="coerce")
 
 if not is_lending:
     # The workbooks name the asset recovery sale/proceeds column "recovery_value",
