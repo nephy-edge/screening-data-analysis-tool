@@ -345,6 +345,19 @@ def _clean_numeric(series) -> pd.Series:
 
 def _detect_date(series) -> pd.Series:
     orig = series.copy()
+    if pd.api.types.is_numeric_dtype(orig):
+        # A date column can arrive as a raw Excel serial number (days since
+        # 1899-12-30) when the source cell wasn't formatted as a date. Never
+        # fall through to the string-parsing candidates below for numeric
+        # input: pd.to_datetime treats a bare number as a nanosecond-epoch
+        # timestamp and "succeeds" on every value, which would always win
+        # the parse-rate comparison even though the result is silently wrong
+        # (e.g. serial 44927 -> 1970-01-01, not 2023-01-01). Only trust
+        # values in a plausible calendar-date range (~1900-2119).
+        serial = pd.to_numeric(orig, errors="coerce")
+        plausible = serial.where(serial.between(1, 80000))
+        return pd.to_datetime(plausible, unit="D", origin="1899-12-30", errors="coerce")
+
     best, best_n = None, -1
     for kwargs in ({}, {"dayfirst": True}, {"yearfirst": True}):
         p = pd.to_datetime(orig, errors="coerce", **kwargs)
@@ -748,6 +761,35 @@ def _write_custom_charts_sheet(writer, export_charts):
         row = data_end + 3
 
 
+def _read_tabular_file(uploaded) -> pd.DataFrame:
+    """Read an uploaded CSV/XLSX, robust to a workbook with more than one
+    sheet (defaults to reading the first, but lets the user pick) and to a
+    header row that isn't row 0 - e.g. a title/banner row above the real
+    column headers, which would otherwise silently produce "Unnamed: N"
+    columns instead of an error."""
+    if uploaded.name.endswith(".csv"):
+        return pd.read_csv(uploaded)
+
+    xls = pd.ExcelFile(uploaded)
+    sheet_name = xls.sheet_names[0]
+    if len(xls.sheet_names) > 1:
+        sheet_name = st.selectbox(
+            "This file has multiple sheets - which one has your loan-level data?",
+            options=xls.sheet_names, key="upload_sheet_name",
+        )
+
+    df = xls.parse(sheet_name)
+    unnamed_frac = sum(str(c).startswith("Unnamed:") for c in df.columns) / max(len(df.columns), 1)
+    if unnamed_frac >= 0.5:
+        preview = xls.parse(sheet_name, header=None, nrows=10)
+        for i in range(1, len(preview)):
+            row = preview.iloc[i]
+            if row.notna().mean() > 0.7 and row.dropna().map(lambda v: isinstance(v, str)).mean() > 0.7:
+                df = xls.parse(sheet_name, header=i)
+                break
+    return df
+
+
 uploaded = st.file_uploader(
     "Choose a CSV or Excel file", type=["csv", "xlsx"], key=f"uploader_{model_key}"
 )
@@ -765,7 +807,7 @@ if st.session_state.get("uploaded_file_id") != uploaded.file_id:
     for target, _ in INPUT_COLUMNS:
         st.session_state.pop(f"map_{target}", None)
 
-raw = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
+raw = _read_tabular_file(uploaded)
 raw = _format_normalize(raw, DATE_FIELDS, NUMERIC_FIELDS)
 
 st.success(f"Loaded {len(raw):,} rows - {len(raw.columns)} columns.")
