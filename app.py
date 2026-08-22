@@ -1159,11 +1159,22 @@ with tabs[0]:
                  "that answers whether this product is economically viable after losses.",
         )
         st.markdown("---")
-        s1, s2, s3, s4 = st.columns(4)
+        s1, s2, s3, s4, s5, s6 = st.columns(6)
         s1.metric("Loans", f"{len(df):,}")
         s2.metric("Total Principal", f"{df['Principal Value'].sum():,.0f}")
-        s3.metric("Date Range", f"{df['Disbursement Date'].min().date()} to {gi.extraction_date.date()}")
-        s4.metric("Cohorts Qualifying", f"{len(filtered)} / {len(cohorts)}")
+        s3.metric(
+            "Average Loan Size", f"{df['Principal Value'].sum() / len(df):,.0f}" if len(df) else "n/a",
+            help="Total Principal divided by loan count. A quick sanity check on portfolio scale.",
+        )
+        s4.metric("Date Range", f"{df['Disbursement Date'].min().date()} to {gi.extraction_date.date()}")
+        s5.metric("Cohorts Qualifying", f"{len(filtered)} / {len(cohorts)}")
+        s6.metric(
+            "Loans Matured", fmt(cohorts["Matured Count"].sum() / cohorts["Loan Count"].sum())
+            if cohorts["Loan Count"].sum() else "n/a",
+            help="Share of loans that have reached T+3 (past their observation window). "
+                 "The higher this is, the more the loss metrics below reflect proven outcomes "
+                 "rather than loans still running.",
+        )
         r1, r2, r3 = st.columns(3)
         r1.metric("95th Percentile Losses", fmt(ltv_data["95th Percentile Losses"]))
         r2.metric("Average Loss", fmt(ue_data["Average Loss"]))
@@ -1181,15 +1192,26 @@ with tabs[0]:
                  "and recoveries.",
         )
         st.markdown("---")
-        s1, s2, s3 = st.columns(3)
+        open_contracts = int((df["status_mapping"] == gi.open_label).sum())
+        closed_contracts = int((df["status_mapping"] == gi.closed_label).sum())
+        s1, s2, s3, s4 = st.columns(4)
         s1.metric("Contracts", f"{len(av):,}")
         s2.metric("MRR", fmt(ltv_data["mrr"], "{:,.0f}"))
-        s3.metric("Average Useful Life (m)", fmt(ltv_data["avg_useful_life_m"], "{:.1f}"))
-        r1, r2, r3, r4 = st.columns(4)
+        s3.metric(
+            "Avg MRR per Active Contract",
+            f"{ltv_data['mrr'] / open_contracts:,.0f}" if open_contracts else "n/a",
+            help="MRR divided by currently-open contracts. A quick sanity check on revenue per unit.",
+        )
+        s4.metric("Average Useful Life (m)", fmt(ltv_data["avg_useful_life_m"], "{:.1f}"))
+        r1, r2, r3, r4, r5 = st.columns(5)
         r1.metric("95th %ile Churn", fmt(ltv_data["pctile_95_churn"], "{:.2%}"))
         r2.metric("Stressed Churn", fmt(ltv_data["stressed_churn"], "{:.2%}"))
-        r3.metric("Defaulted contracts > 3mo", fmt(ltv_data["n_defaulted_gt_3m"], "{:.0f}"))
-        r4.metric("% recovered", fmt(ltv_data["pct_recovered"]))
+        r3.metric(
+            "Contracts Churned", fmt(closed_contracts / len(df)) if len(df) else "n/a",
+            help="Share of contracts closed (terminated) rather than paid off or still active.",
+        )
+        r4.metric("Defaulted contracts > 3mo", fmt(ltv_data["n_defaulted_gt_3m"], "{:.0f}"))
+        r5.metric("% recovered", fmt(ltv_data["pct_recovered"]))
         y1, y2, y3 = st.columns(3)
         y1.metric("Loss (non-recoverability)", fmt(ltv_data["loss_non_recoverability"]))
         y2.metric("MRR / average cost", fmt(ltv_data["mrr_over_avg_cost"], "{:.2%}"))
