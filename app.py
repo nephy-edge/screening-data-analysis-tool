@@ -137,7 +137,7 @@ render_cover(
 
 MODEL_LABELS = {"rental": "Rental & Subscription", "lending": "Lending"}
 _default_model = st.session_state.get("model_key", "rental")
-model_col, feedback_col = st.columns([5, 1])
+model_col, feedback_col = st.columns([5, 1], vertical_alignment="bottom")
 with model_col:
     model_key = st.selectbox(
         "Select model", options=list(MODEL_LABELS.keys()),
@@ -154,7 +154,6 @@ if st.session_state.get("_active_model") != model_key:
 is_lending = model_key == "lending"
 
 with feedback_col:
-    st.write("")  # align the popover trigger with the selectbox, below its label
     with st.popover("💬 Feedback"):
         st.caption("Share what worked or didn't work for you.")
         if not _get_slack_webhook_url():
