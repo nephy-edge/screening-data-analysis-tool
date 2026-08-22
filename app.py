@@ -1137,20 +1137,65 @@ active_questions = LENDING_QUESTIONS if is_lending else QUESTIONS
 
 if is_lending:
     tab_names = [
-        "General Inputs", "Data Questionnaire", "Data Input",
+        "Summary", "General Inputs", "Data Questionnaire", "Data Input",
         "Cohorts", "Cohorts for X or more loans",
         "LTV Analysis", "Unit Economics Analysis", "General Analysis",
-        "Custom Visualizations", "Summary",
+        "Custom Visualizations",
     ]
 else:
     tab_names = [
-        "General Inputs", "Data Questionnaire", "Data Input", "Asset View",
+        "Summary", "General Inputs", "Data Questionnaire", "Data Input", "Asset View",
         "Unit Economics Analysis", "Churn Analysis", "LTV Analysis", "TS Covenants",
-        "General Analysis", "Custom Visualizations", "Summary",
+        "General Analysis", "Custom Visualizations",
     ]
 tabs = st.tabs(tab_names)
 
 with tabs[0]:
+    st.subheader("Summary")
+    if is_lending:
+        st.metric(
+            "Sense-check Margin", fmt(ue_data["Sense-check Margin"]),
+            help="Revenue % minus stressed loss, grossed up for that loss. The single number "
+                 "that answers whether this product is economically viable after losses.",
+        )
+        st.markdown("---")
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Loans", f"{len(df):,}")
+        s2.metric("Total Principal", f"{df['Principal Value'].sum():,.0f}")
+        s3.metric("Date Range", f"{df['Disbursement Date'].min().date()} to {gi.extraction_date.date()}")
+        s4.metric("Cohorts Qualifying", f"{len(filtered)} / {len(cohorts)}")
+        r1, r2, r3 = st.columns(3)
+        r1.metric("95th Percentile Losses", fmt(ltv_data["95th Percentile Losses"]))
+        r2.metric("Average Loss", fmt(ue_data["Average Loss"]))
+        r3.metric("Loss Rate Proxy (1-PvD)", fmt(ue_data["Loss Rate Proxy (1-PvD)"]))
+        y1, y2, y3, y4 = st.columns(4)
+        y1.metric("Average Interest %", fmt(ue_data["Average Interest %"]))
+        y2.metric("Average Fee %", fmt(ue_data["Average Fee %"]))
+        y3.metric("Average Total Revenue %", fmt(ltv_data["Average Total Revenue %"]))
+        y4.metric("Average Term (days)", fmt(ltv_data["Average Term"], "{:,.1f}"))
+    else:
+        st.metric(
+            "MRR Multiplier (3y)", fmt(ltv_data["mrr_multiplier"], "{:.2f}"),
+            help="Expected 3-year MRR relative to acquisition cost. The single number that "
+                 "answers whether this asset-lease product is economically viable after churn "
+                 "and recoveries.",
+        )
+        st.markdown("---")
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Contracts", f"{len(av):,}")
+        s2.metric("MRR", fmt(ltv_data["mrr"], "{:,.0f}"))
+        s3.metric("Average Useful Life (m)", fmt(ltv_data["avg_useful_life_m"], "{:.1f}"))
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("95th %ile Churn", fmt(ltv_data["pctile_95_churn"], "{:.2%}"))
+        r2.metric("Stressed Churn", fmt(ltv_data["stressed_churn"], "{:.2%}"))
+        r3.metric("Defaulted contracts > 3mo", fmt(ltv_data["n_defaulted_gt_3m"], "{:.0f}"))
+        r4.metric("% recovered", fmt(ltv_data["pct_recovered"]))
+        y1, y2, y3 = st.columns(3)
+        y1.metric("Loss (non-recoverability)", fmt(ltv_data["loss_non_recoverability"]))
+        y2.metric("MRR / average cost", fmt(ltv_data["mrr_over_avg_cost"], "{:.2%}"))
+        y3.metric("Average Collection Rate", fmt(ltv_data["avg_collection_rate"]))
+
+with tabs[1]:
     st.subheader("General Inputs")
     if is_lending:
         col1, col2, col3 = st.columns(3)
@@ -1179,13 +1224,13 @@ with tabs[0]:
         col2.metric("Useful life of asset (years)", gi.useful_life_years)
         col3.metric("Status labels", f"{gi.open_label} / {gi.closed_label} / {gi.paidoff_label}")
 
-with tabs[1]:
+with tabs[2]:
     st.subheader("Data Questionnaire")
     for i, q in enumerate(active_questions, 1):
         with st.expander(f"Q{i}"):
             st.write(q)
 
-with tabs[2]:
+with tabs[3]:
     if is_lending:
         st.subheader("Data Input")
         st.caption(
@@ -1199,17 +1244,17 @@ with tabs[2]:
         st.dataframe(df, width="stretch", height=400)
 
 if is_lending:
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("Cohorts")
         st.caption(f"{len(cohorts)} monthly cohorts")
         st.dataframe(cohorts, width="stretch", height=400)
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader(f"Cohorts for X or more loans (>= {gi.min_loans_per_cohort})")
         st.caption(f"{len(filtered)} cohorts pass the minimum-loan filter")
         st.dataframe(filtered, width="stretch", height=400)
 
-    with tabs[5]:
+    with tabs[6]:
         st.subheader("LTV Analysis")
         c1, c2, c3 = st.columns(3)
         c1.metric("95th Percentile Losses", fmt(ltv_data["95th Percentile Losses"]))
@@ -1231,7 +1276,7 @@ if is_lending:
                 width="stretch",
             )
 
-    with tabs[6]:
+    with tabs[7]:
         st.subheader("Unit Economics Analysis")
         row1 = st.columns(3)
         row1[0].metric("Average Expected Term (days)", fmt(ue_data["Average Expected Term"], "{:,.1f}"))
@@ -1298,7 +1343,7 @@ if is_lending:
                 width="stretch",
             )
 
-    with tabs[7]:
+    with tabs[8]:
         st.subheader("General Analysis")
         summary = lending_general_analysis(df)
         st.write(f"**Shape:** {summary['shape'][0]:,} rows x {summary['shape'][1]} columns")
@@ -1314,41 +1359,18 @@ if is_lending:
                 width="stretch",
             )
 
-    with tabs[8]:
+    with tabs[9]:
         _render_custom_visualizations_tab({
             "Data Input (loan-level)": df, "Cohorts": cohorts, "Cohorts for X or more loans": filtered,
         })
 
-    with tabs[9]:
-        st.subheader("Summary")
-        st.metric(
-            "Sense-check Margin", fmt(ue_data["Sense-check Margin"]),
-            help="Revenue % minus stressed loss, grossed up for that loss. The single number "
-                 "that answers whether this product is economically viable after losses.",
-        )
-        st.markdown("---")
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Loans", f"{len(df):,}")
-        s2.metric("Total Principal", f"{df['Principal Value'].sum():,.0f}")
-        s3.metric("Date Range", f"{df['Disbursement Date'].min().date()} to {gi.extraction_date.date()}")
-        s4.metric("Cohorts Qualifying", f"{len(filtered)} / {len(cohorts)}")
-        r1, r2, r3 = st.columns(3)
-        r1.metric("95th Percentile Losses", fmt(ltv_data["95th Percentile Losses"]))
-        r2.metric("Average Loss", fmt(ue_data["Average Loss"]))
-        r3.metric("Loss Rate Proxy (1-PvD)", fmt(ue_data["Loss Rate Proxy (1-PvD)"]))
-        y1, y2, y3, y4 = st.columns(4)
-        y1.metric("Average Interest %", fmt(ue_data["Average Interest %"]))
-        y2.metric("Average Fee %", fmt(ue_data["Average Fee %"]))
-        y3.metric("Average Total Revenue %", fmt(ltv_data["Average Total Revenue %"]))
-        y4.metric("Average Term (days)", fmt(ltv_data["Average Term"], "{:,.1f}"))
-
 else:
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("Asset View")
         st.caption(f"{len(av):,} unique assets")
         st.dataframe(av, width="stretch", height=400)
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader("Unit Economics Analysis")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Downpayment %", fmt(ue_data["downpayment_pct"]))
@@ -1371,7 +1393,7 @@ else:
             )
         st.dataframe(curve, width="stretch", height=300)
 
-    with tabs[5]:
+    with tabs[6]:
         st.subheader("Churn Analysis")
         c1, c2, c3 = st.columns(3)
         c1.metric("95th %ile monthly churn", fmt(ca_data["pctile_95"], "{:.2%}"))
@@ -1405,7 +1427,7 @@ else:
         st.markdown(f"**Cohorts for X or more loans (>= {gi.min_loans_per_cohort} new leases)**")
         st.dataframe(filtered, width="stretch", height=200)
 
-    with tabs[6]:
+    with tabs[7]:
         st.subheader("LTV Analysis")
         col1, col2 = st.columns(2)
         with col1:
@@ -1424,7 +1446,7 @@ else:
             st.metric("95th %ile Churn", fmt(ltv_data["pctile_95_churn"], "{:.2%}"))
             st.metric("Stressed Churn", fmt(ltv_data["stressed_churn"], "{:.2%}"))
 
-    with tabs[7]:
+    with tabs[8]:
         st.subheader("TS Covenants")
         st.markdown("**Performance Covenants**")
         for m in (6, 12, 24):
@@ -1435,7 +1457,7 @@ else:
         st.markdown("**Recoverability Covenants**")
         st.metric("Recovery Rate (observed loss)", fmt(ts["recovery_rate_observed"]))
 
-    with tabs[8]:
+    with tabs[9]:
         st.subheader("General Analysis")
         summary = general_analysis(df)
         st.write(f"**Shape:** {summary['shape'][0]:,} rows x {summary['shape'][1]} columns")
@@ -1451,35 +1473,12 @@ else:
                 width="stretch",
             )
 
-    with tabs[9]:
+    with tabs[10]:
         _render_custom_visualizations_tab({
             "Data Input": df, "Asset View": av, "Lease Cohorts": cohorts,
             "Cohorts for X or more loans": filtered, "Repayment Curve": curve,
             "Churn Residual Curve": ca_data["residual_curve"],
         })
-
-    with tabs[10]:
-        st.subheader("Summary")
-        st.metric(
-            "MRR Multiplier (3y)", fmt(ltv_data["mrr_multiplier"], "{:.2f}"),
-            help="Expected 3-year MRR relative to acquisition cost. The single number that "
-                 "answers whether this asset-lease product is economically viable after churn "
-                 "and recoveries.",
-        )
-        st.markdown("---")
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Contracts", f"{len(av):,}")
-        s2.metric("MRR", fmt(ltv_data["mrr"], "{:,.0f}"))
-        s3.metric("Average Useful Life (m)", fmt(ltv_data["avg_useful_life_m"], "{:.1f}"))
-        r1, r2, r3, r4 = st.columns(4)
-        r1.metric("95th %ile Churn", fmt(ltv_data["pctile_95_churn"], "{:.2%}"))
-        r2.metric("Stressed Churn", fmt(ltv_data["stressed_churn"], "{:.2%}"))
-        r3.metric("Defaulted contracts > 3mo", fmt(ltv_data["n_defaulted_gt_3m"], "{:.0f}"))
-        r4.metric("% recovered", fmt(ltv_data["pct_recovered"]))
-        y1, y2, y3 = st.columns(3)
-        y1.metric("Loss (non-recoverability)", fmt(ltv_data["loss_non_recoverability"]))
-        y2.metric("MRR / average cost", fmt(ltv_data["mrr_over_avg_cost"], "{:.2%}"))
-        y3.metric("Average Collection Rate", fmt(ltv_data["avg_collection_rate"]))
 
 st.markdown("---")
 
