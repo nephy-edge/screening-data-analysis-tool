@@ -163,16 +163,16 @@ with feedback_col:
             # button click - st.rerun() interrupts the script immediately, so
             # a st.success() called right before it never reaches the browser.
             st.success("Thanks — feedback sent.")
-        fb_user = st.text_input(
-            "Your name or email (optional)",
-            key="fb_user",
-        )
-        # The text area's key includes a version counter so a successful send
-        # can force a brand-new, empty widget instance on the next run -
-        # popping the old key alone didn't reliably clear the field in
+        # Both fields' keys include a version counter so a successful send
+        # can force brand-new, empty widget instances on the next run -
+        # popping the old keys alone didn't reliably clear them in
         # production (widgets inside a popover can retain their prior value
         # across a rerun even once the session_state key is removed).
         fb_form_version = st.session_state.setdefault("fb_form_version", 0)
+        fb_user = st.text_input(
+            "Your name or email (optional)",
+            key=f"fb_user_{fb_form_version}",
+        )
         fb_text = st.text_area(
             "What worked / what didn't",
             key=f"fb_text_{fb_form_version}",
