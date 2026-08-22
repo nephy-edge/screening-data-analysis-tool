@@ -194,9 +194,9 @@ RENTAL_CONFIG = dict(
     mapping_cache_path=os.path.join(os.path.expanduser("~"), ".rental_sc_analysis_column_mappings.json"),
     needs_status_map=True,
     domain_hint="rental/lease contract-level dataset",
-    derived_hint="E.g. if your file has separate schedule fields but no amount_expected_to_date, "
-                 "combine them here - the result becomes selectable in the mapping below.",
-    derived_placeholder="e.g. Amount expected to date, combining monthly payment and months elapsed",
+    derived_hint="If your file provides separate schedule fields but not amount_expected_to_date, "
+                 "combine them here; the result becomes selectable in the mapping below.",
+    derived_placeholder="For example, amount expected to date, calculated from monthly payment and months elapsed",
 )
 LENDING_CONFIG = dict(
     input_columns=[
@@ -211,9 +211,10 @@ LENDING_CONFIG = dict(
     mapping_cache_path=os.path.join(os.path.expanduser("~"), ".sc_analysis_column_mappings.json"),
     needs_status_map=False,
     domain_hint="loan-portfolio spreadsheet",
-    derived_hint="E.g. if your file has separate Principal / Interest / Fee columns but no "
-                 "Total Due, combine them here - the result becomes selectable in the mapping below.",
-    derived_placeholder="e.g. Total amount the borrower owes, combining principal and interest",
+    derived_hint="If your file provides Total GBV and Principal Value but not Expected Interest, "
+                 "or separate Principal / Interest / Fee columns but not Total Due, combine them "
+                 "here; the result becomes selectable in the mapping below.",
+    derived_placeholder="For example, Expected Interest, calculated as Total GBV minus Principal Value",
 )
 active_cfg = LENDING_CONFIG if is_lending else RENTAL_CONFIG
 INPUT_COLUMNS = active_cfg["input_columns"]
@@ -817,13 +818,13 @@ st.caption("Columns in your file: " + ", ".join(map(str, raw.columns)))
 if "derived_columns" not in st.session_state:
     st.session_state["derived_columns"] = []
 
-with st.expander("Need a column that isn't in your file? Calculate one from existing columns"):
+with st.expander("Derive a missing column from existing fields"):
     st.caption(active_cfg["derived_hint"])
-    st.markdown("**Not sure which columns to combine? Describe it and let AI suggest a formula.**")
+    st.markdown("**Describe the calculation and let AI suggest the formula.**")
     ai1, ai2 = st.columns([4, 1])
     with ai1:
         ai_request = st.text_area(
-            "What do you want to calculate?",
+            "Describe the calculation",
             placeholder=active_cfg["derived_placeholder"],
             key="dc_ai_request", height=70,
         )
@@ -833,7 +834,7 @@ with st.expander("Need a column that isn't in your file? Calculate one from exis
 
     if ask_ai:
         if not ai_request.strip():
-            st.warning("Describe what you want to calculate first.")
+            st.warning("Describe the calculation before requesting a suggestion.")
         else:
             try:
                 with st.spinner("Asking DeepSeek..."):
@@ -842,7 +843,7 @@ with st.expander("Need a column that isn't in your file? Calculate one from exis
                     )
             except Exception as e:
                 st.session_state["dc_ai_suggestion"] = None
-                st.error(f"Couldn't get a suggestion: {e}")
+                st.error(f"Unable to generate a suggestion: {e}")
 
     suggestion = st.session_state.get("dc_ai_suggestion")
     if suggestion:
