@@ -186,10 +186,12 @@ div[data-testid="stInfo"]{border-left:3px solid #155B54 !important;background:#E
 /* -- Sidebar -- */
 [data-testid="stSidebar"]{background:#16312E !important;}
 [data-testid="stSidebar"] *{color:#EDF3F1 !important;}
-/* The sticky masthead (z-index:100) sits above the native top-left chevron that
-   re-opens a collapsed sidebar - raise it above the masthead and keep it visible. */
+/* The sticky masthead occupies the same top-left corner as the native chevron
+   that re-opens a collapsed sidebar. Rather than fight over stacking order,
+   move the chevron below the masthead's height so the two never overlap. */
 [data-testid="stSidebarCollapsedControl"]{
-  z-index:200 !important;
+  position:fixed !important;top:64px !important;left:12px !important;
+  z-index:1000 !important;
   color:#16312E !important;background:#ffffff !important;
   border-radius:6px !important;box-shadow:0 1px 3px rgba(0,0,0,0.25) !important;
 }
