@@ -4,6 +4,14 @@ import numpy as np
 import pandas as pd
 
 
+def count_missing_asset_id_rows(df):
+    """Rows with a blank/null asset_id - pandas' groupby("asset_id") below
+    drops these by default, silently excluding them from every per-asset
+    rollup (and everything derived from it, e.g. utilisation_rate). Callers
+    should surface this count rather than let the rows vanish silently."""
+    return int(df["asset_id"].isna().sum())
+
+
 def build_asset_view(df, gi):
     extraction_date = gi["extraction_date"]
     g = df.groupby("asset_id")

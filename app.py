@@ -28,6 +28,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from openpyxl.chart import AreaChart, BarChart, LineChart, Reference, ScatterChart, Series
+from openpyxl.utils import get_column_letter
 
 from dotenv import load_dotenv
 
@@ -42,7 +43,7 @@ from rental_analysis.data_questionnaire import QUESTIONS
 from rental_analysis.data_input import (
     REQUIRED_COLUMNS, OPTIONAL_COLUMNS, apply_fallbacks, process_data_input,
 )
-from rental_analysis.asset_view import build_asset_view
+from rental_analysis.asset_view import build_asset_view, count_missing_asset_id_rows
 from rental_analysis.repayment_curve import build_repayment_curve
 from rental_analysis.lease_cohorts import build_cohorts, count_unparsed_cohort_rows
 from rental_analysis.cohorts_for_x_or_more_loans import filter_cohorts
@@ -665,9 +666,17 @@ def _render_custom_visualizations_tab(data_sources: dict):
             group_cols = [x_col] + ([color_col] if color_col != "(none)" else [])
             agg_name_map = {"Sum": "sum", "Mean": "mean", "Count": "count", "Median": "median", "Min": "min", "Max": "max"}
             if agg_func == "Count":
-                plot_df = plot_df.groupby(group_cols, dropna=False)[y_col].count().reset_index()
+                agg_series = plot_df.groupby(group_cols, dropna=False)[y_col].count()
             else:
-                plot_df = plot_df.groupby(group_cols, dropna=False)[y_col].agg(agg_name_map[agg_func]).reset_index()
+                agg_series = plot_df.groupby(group_cols, dropna=False)[y_col].agg(agg_name_map[agg_func])
+            # y_col can be the same column as x_col or color_col (e.g. "sum of
+            # Principal Value by Principal Value") - reset_index() would then
+            # try to insert the aggregated value under a name that's already
+            # a group-key column and raise. Give it its own column name in
+            # that case (and point y_col at it for the rest of the chart).
+            value_col = f"{y_col} ({agg_func})" if y_col in group_cols else y_col
+            plot_df = agg_series.rename(value_col).reset_index()
+            y_col = value_col
 
         if plot_df.empty:
             st.info("No rows with data for the selected columns.")
@@ -761,7 +770,7 @@ def _write_custom_charts_sheet(writer, export_charts):
             cats = Reference(cc_ws, min_col=1, min_row=data_start, max_row=data_end)
             c.add_data(data, titles_from_data=True)
             c.set_categories(cats)
-            cc_ws.add_chart(c, f"{chr(ord('A') + n_series_cols + 3)}{header_row}")
+            cc_ws.add_chart(c, f"{get_column_letter(n_series_cols + 4)}{header_row}")
         else:
             sc = ScatterChart()
             sc.title = ec["title"]
@@ -775,7 +784,7 @@ def _write_custom_charts_sheet(writer, export_charts):
                 series.marker.symbol = "circle"
                 series.graphicalProperties.line.noFill = True
                 sc.series.append(series)
-            cc_ws.add_chart(sc, f"{chr(ord('A') + n_series_cols + 3)}{header_row}")
+            cc_ws.add_chart(sc, f"{get_column_letter(n_series_cols + 4)}{header_row}")
         row = data_end + 3
 
 
@@ -1151,6 +1160,12 @@ with st.spinner("Running analysis..."):
         df = process_data_input(fallback_df, gi.as_calc_dict())
         av = build_asset_view(df, gi.as_calc_dict())
         curve = build_repayment_curve(av, gi.as_calc_dict())
+        n_missing_asset_id = count_missing_asset_id_rows(df)
+        if n_missing_asset_id:
+            fallback_notes.append(
+                f"{n_missing_asset_id} row(s) have a blank asset ID and are excluded "
+                "entirely from Asset View (and everything downstream of it)."
+            )
         n_unparsed_cohort = count_unparsed_cohort_rows(df)
         if n_unparsed_cohort:
             fallback_notes.append(
@@ -1703,17 +1718,18 @@ def _build_export_workbook():
         ca_df.to_excel(writer, sheet_name="Churn Analysis", index=False)
         ca_ws = writer.sheets["Churn Analysis"]
         residual = ca_data["residual_curve"]
-        residual.to_excel(writer, sheet_name="Churn Analysis", startrow=len(ca_df) + 2, index=False)
-        sr = len(ca_df) + 3
-        lr = sr + len(residual) - 1
-        c = LineChart()
-        c.title = "Expected residual portfolio by month"
-        c.height, c.width = 14, 24
-        data = Reference(ca_ws, min_col=1, min_row=sr - 1, max_col=2, max_row=lr)
-        cats = Reference(ca_ws, min_col=1, min_row=sr, max_row=lr)
-        c.add_data(data, titles_from_data=True)
-        c.set_categories(cats)
-        ca_ws.add_chart(c, f"D{sr - 1}")
+        if not residual.empty:
+            residual.to_excel(writer, sheet_name="Churn Analysis", startrow=len(ca_df) + 2, index=False)
+            sr = len(ca_df) + 3
+            lr = sr + len(residual) - 1
+            c = LineChart()
+            c.title = "Expected residual portfolio by month"
+            c.height, c.width = 14, 24
+            data = Reference(ca_ws, min_col=1, min_row=sr - 1, max_col=2, max_row=lr)
+            cats = Reference(ca_ws, min_col=1, min_row=sr, max_row=lr)
+            c.add_data(data, titles_from_data=True)
+            c.set_categories(cats)
+            ca_ws.add_chart(c, f"D{sr - 1}")
 
         ltv_df = pd.DataFrame(list(ltv_data.items()), columns=["Metric", "Value"])
         ltv_df.to_excel(writer, sheet_name="LTV Analysis", index=False)
