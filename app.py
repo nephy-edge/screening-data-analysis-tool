@@ -61,6 +61,14 @@ from template_analysis.cohorts_for_x_or_more_loans import filter_cohorts as lend
 from template_analysis.ltv_analysis import LtvAnalysis as LendingLtvAnalysis
 from template_analysis.ue_analysis import UeAnalysis as LendingUeAnalysis
 from template_analysis.general_analysis import describe as lending_general_analysis
+from template_analysis.ltv_calculator import (
+    LtvInputs,
+    compute_ltv,
+    COUNTRIES as LTV_CALC_COUNTRIES,
+    FX_RISK_RATINGS as LTV_CALC_RATINGS,
+    SEGMENTS as LTV_CALC_SEGMENTS,
+    _nearest_term as _ltv_nearest_term,
+)
 
 DEEPINFRA_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
 DEEPINFRA_CHAT_URL = "https://api.deepinfra.com/v1/openai/chat/completions"
@@ -1193,7 +1201,7 @@ if is_lending:
         "Summary", "General Inputs", "Data Questionnaire", "Data Input",
         "Cohorts", "Cohorts for X or more loans",
         "LTV Analysis", "Unit Economics Analysis", "General Analysis",
-        "Custom Visualizations",
+        "Custom Visualizations", "LTV Calculator",
     ]
 else:
     tab_names = [
@@ -1438,6 +1446,130 @@ if is_lending:
         _render_custom_visualizations_tab({
             "Data Input (loan-level)": df, "Cohorts": cohorts, "Cohorts for X or more loans": filtered,
         })
+
+    with tabs[10]:
+        st.subheader("LTV Calculator")
+        st.caption(
+            "Replicates the 'Receivables' column-D formulas from the LTV Calculator v3 workbook. "
+            "**Green** cells are pre-filled from your loan-tape analysis (editable); "
+            "**yellow** cells are manual inputs — all inputs are optional."
+        )
+
+        auto_interests = ltv_data.get("Average Total Revenue %")
+        auto_term_days = ltv_data.get("Average Term")
+        auto_loss = ltv_data.get("95th Percentile Losses")
+
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            gross_interest = st.number_input(
+                "Gross Interest (green, auto)", min_value=0.0, max_value=50.0,
+                value=float(auto_interests) if pd.notna(auto_interests) else 0.0,
+                format="%.4f", help="Weighted Avg. Gross Interest (not annualized) — pre-filled from Average Total Revenue %.",
+            )
+        with g2:
+            default_term_months = None
+            if pd.notna(auto_term_days) and auto_term_days:
+                default_term_months = float(_ltv_nearest_term(auto_term_days / 30.44))
+            receivable_term = st.number_input(
+                "Receivable Term - months (green, auto)", min_value=0.0, max_value=60.0,
+                value=float(default_term_months) if default_term_months else 0.0,
+                format="%.1f", help="Weighted Avg. Receivable Term — pre-filled from Average Term (days / 30.44).",
+            )
+        with g3:
+            loss_rate = st.number_input(
+                "Loss Rate (green, auto)", min_value=0.0, max_value=1.0,
+                value=float(auto_loss) if pd.notna(auto_loss) else 0.0,
+                format="%.4f", help="95th %tile Loss Rate @ Term+3 — pre-filled from 95th Percentile Losses.",
+            )
+
+        st.markdown("##### Manual inputs (optional)")
+        y1, y2, y3, y4, y5 = st.columns(5)
+        with y1:
+            hc_currency = st.selectbox(
+                "Currency / Country (yellow)", options=[None] + LTV_CALC_COUNTRIES,
+                help="Alt Lender Country — optional; if blank, no historical FX stress is applied.",
+            )
+        with y2:
+            hc_rating = st.selectbox(
+                "Macro FX Risk Rating (yellow)", options=[None] + LTV_CALC_RATINGS,
+                help="Green / Orange / Red — optional; if blank, no roll-risk adjustment.",
+            )
+        with y3:
+            hc_seg = st.selectbox(
+                "Segmentation (yellow)", options=[None] + LTV_CALC_SEGMENTS,
+                help="Optional; if blank, no sector minimum-stress-loss floor is applied.",
+            )
+        with y4:
+            hedge_rate = st.number_input(
+                "Hedge Rate (yellow)", min_value=0.0, max_value=1.0, value=0.0,
+                format="%.4f", help="1. If no hedge, enter 0%. 2. If hedged, enter the % OTM.",
+            )
+        with y5:
+            rolled_hedge = st.radio("Rolled hedge? (yellow)", options=["Term", "Roll"], index=0,
+                                    horizontal=True)
+
+        src1, src2 = st.columns([1, 1])
+        with src1:
+            data_source = st.radio("Data Input Source", options=["Observed", "Self-reported"],
+                                   index=0, horizontal=True,
+                                   help="Selects the minimum-stress-loss lookup table (Inputs!G/H vs J/K).")
+
+        if st.button("Run LTV calculation", type="primary"):
+            inp = LtvInputs(
+                green_gross_interest=gross_interest,
+                green_receivable_term_months=receivable_term,
+                green_loss_rate=loss_rate,
+                currency=hc_currency,
+                fx_risk_rating=hc_rating,
+                segmentation=hc_seg,
+                hedge_rate=hedge_rate,
+                rolled_hedge=rolled_hedge,
+                data_input_source=data_source,
+            )
+            res = compute_ltv(inp)
+
+            build = [
+                ("FX Stress Build Up", [
+                    ("Historical FX Devaluation (D18)", res["hist_fx_deval"], "pct"),
+                    ("Utilized Historical FX Deval (D19)", res["util_hist_fx_deval"], "pct"),
+                    ("Stress FX Factor (D20)", res["stress_fx_factor"], "num"),
+                    ("Stress FX Devaluation (D21)", res["stress_fx_deval"], "pct"),
+                    ("Base FX Deval (D22)", res["base_fx_deval"], "pct"),
+                    ("FX Slippage Stress (D23)", res["fx_slippage"], "pct"),
+                    ("Roll Risk Adjustment high (D24)", res["roll_risk_high"], "pct"),
+                    ("Roll Risk Adjustment low (D25)", res["roll_risk_low"], "pct"),
+                    ("Selected FX Deval high (D26)", res["selected_fx_high"], "pct"),
+                    ("Selected FX Deval low (D27)", res["selected_fx_low"], "pct"),
+                ]),
+                ("Credit Stress Build Up", [
+                    ("Credit Stress Factor (D30)", res["credit_stress_factor"], "num"),
+                    ("Stress Loss Rate (D31)", res["stress_loss_rate"], "pct"),
+                    ("Minimum Stress Loss (D32)", res["min_stress_loss"], "pct"),
+                    ("Selected Stress Loss (D33)", res["selected_stress_loss"], "pct"),
+                ]),
+                ("LTGBV", [
+                    ("No FX Adjustment (D36)", res["no_fx_ltgbv"], "pct"),
+                    ("LTGBV With FX Adjustment high (D37)", res["ltgbv_fx_high"], "pct"),
+                    ("LTGBV With FX Adjustment low (D38)", res["ltgbv_fx_low"], "pct"),
+                ]),
+                ("Advance on Principal / LTV", [
+                    ("No FX Adjustment (D41)", res["no_fx_advance_ltv"], "pct"),
+                    ("LTV With FX Adjustment high (D42)", res["ltv_fx_high"], "pct"),
+                    ("LTV With FX Adjustment low (D43)", res["ltv_fx_low"], "pct"),
+                ]),
+            ]
+
+            for section, rows in build:
+                st.markdown(f"#### {section}")
+                cols = st.columns(min(len(rows), 3))
+                for i, (label, val, kind) in enumerate(rows):
+                    with cols[i % 3]:
+                        st.metric(label, (f"{val:.4%}" if kind == "pct" else f"{val:,.2f}x"))
+
+            st.info(
+                f"Selected receivable term snapped to nearest lookup term: **{res['selected_term_months']} months**. "
+                "Pct shown to 4dp; LTGBV fund limit is 75%, LTV fund limit is 95% (compliance not enforced here)."
+            )
 
 else:
     with tabs[4]:
