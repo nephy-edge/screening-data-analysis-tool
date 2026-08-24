@@ -1056,6 +1056,14 @@ if not st.session_state.get("analysis_ran"):
 
 mapping = st.session_state["analysis_mapping"]
 rename_map = {src: tgt for tgt, src in mapping.items() if src}
+# If the raw file already has a column literally named like a mapping target
+# (e.g. a leftover "Total Due" column that isn't the one the user actually
+# mapped), renaming the chosen source into that name would leave two columns
+# sharing the same label - raw[col] then returns a DataFrame instead of a
+# Series and every .dtype/coercion call below breaks. Drop the stale column
+# first so the mapped source always wins.
+stale_target_cols = [tgt for tgt in rename_map.values() if tgt in raw.columns and tgt not in rename_map]
+raw = raw.drop(columns=stale_target_cols)
 raw = raw.rename(columns=rename_map)
 _coerce_dates(raw, DATE_FIELDS, active_cfg["dayfirst"])
 # _format_normalize() coerced numeric_fields before this rename, so it only ever
