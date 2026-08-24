@@ -44,7 +44,7 @@ from rental_analysis.data_input import (
 )
 from rental_analysis.asset_view import build_asset_view
 from rental_analysis.repayment_curve import build_repayment_curve
-from rental_analysis.lease_cohorts import build_cohorts
+from rental_analysis.lease_cohorts import build_cohorts, count_unparsed_cohort_rows
 from rental_analysis.cohorts_for_x_or_more_loans import filter_cohorts
 from rental_analysis.churn_analysis import ChurnAnalysis
 from rental_analysis.ue_analysis import UeAnalysis
@@ -386,12 +386,18 @@ def _normalize_columns(raw: pd.DataFrame, fields) -> pd.DataFrame:
         for alias in _FIELD_ALIASES.get(canon, []):
             reverse[_norm_key(alias)] = canon
     rename = {}
+    claimed = set()
     for col in raw.columns:
         k = _norm_key(col)
         if k in reverse:
             canon = reverse[k]
-            if canon not in raw.columns:
+            # Only the first raw column matching a given canonical field claims
+            # it - a second alias for the same field (e.g. "Principal" and
+            # "Loan Amount" both meaning "Principal Value") is left renamed,
+            # otherwise both would collide into one duplicate-labeled column.
+            if canon not in raw.columns and canon not in claimed:
                 rename[col] = canon
+                claimed.add(canon)
     return raw.rename(columns=rename)
 
 
@@ -819,7 +825,14 @@ if st.session_state.get("uploaded_file_id") != uploaded.file_id:
     for target, _ in INPUT_COLUMNS:
         st.session_state.pop(f"map_{target}", None)
 
-raw = _read_tabular_file(uploaded)
+try:
+    raw = _read_tabular_file(uploaded)
+except Exception as e:
+    st.error(f"Couldn't read '{uploaded.name}': {e}. Check that it's a valid, non-empty CSV or Excel file.")
+    st.stop()
+if raw.empty or not len(raw.columns):
+    st.error(f"'{uploaded.name}' has no data to read.")
+    st.stop()
 raw = _format_normalize(raw, DATE_FIELDS, NUMERIC_FIELDS)
 
 st.success(f"Loaded {len(raw):,} rows - {len(raw.columns)} columns.")
@@ -1091,7 +1104,7 @@ if mapping_warnings:
     st.warning("Mapping quality warnings:\n\n" + "\n".join(f"- {w}" for w in mapping_warnings))
 
 if active_cfg["needs_status_map"]:
-    raw_statuses = sorted(raw["status"].dropna().unique().tolist())
+    raw_statuses = sorted(raw["status"].dropna().unique().tolist(), key=str)
     status_key = _cache_key(raw_statuses)
     cached_status_map = _load_cache(STATUS_CACHE_PATH, status_key) or {}
     seed = [
@@ -1138,6 +1151,12 @@ with st.spinner("Running analysis..."):
         df = process_data_input(fallback_df, gi.as_calc_dict())
         av = build_asset_view(df, gi.as_calc_dict())
         curve = build_repayment_curve(av, gi.as_calc_dict())
+        n_unparsed_cohort = count_unparsed_cohort_rows(df)
+        if n_unparsed_cohort:
+            fallback_notes.append(
+                f"{n_unparsed_cohort} row(s) have an unparseable start date and are excluded "
+                "entirely from Lease Cohorts (and everything downstream of it)."
+            )
         cohorts = build_cohorts(df, gi.as_calc_dict())
         filtered = filter_cohorts(cohorts, gi.min_loans_per_cohort)
         churn = ChurnAnalysis(cohorts, gi.as_calc_dict())

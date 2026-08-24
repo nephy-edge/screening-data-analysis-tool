@@ -19,7 +19,11 @@ class ChurnAnalysis:
         return self._eligible["churn_rate"].mean() if len(self._eligible) else 0.0
 
     def stress_churn(self):
-        return 1.7 * self.pctile_95()
+        # A genuine 95th-percentile churn near 100% (a small eligible cohort
+        # that fully defaulted in one month) would push the 1.7x-stressed rate
+        # above 1.0, which makes (1-c) negative and the survival multipliers
+        # below oscillate in sign - churn can't exceed 100% of a month's pool.
+        return min(1.7 * self.pctile_95(), 1.0)
 
     def _multiplier(self, months):
         c = self.stress_churn()

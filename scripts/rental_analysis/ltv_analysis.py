@@ -12,7 +12,10 @@ class LtvAnalysis:
 
     def avg_useful_life_m(self):
         df = self.df
-        return (df["term_days"] * df["cost_of_asset"]).sum() / df["cost_of_asset"].sum() / 30.5
+        total_cost = df["cost_of_asset"].sum()
+        if not total_cost:
+            return np.nan
+        return (df["term_days"] * df["cost_of_asset"]).sum() / total_cost / 30.5
 
     def n_defaulted_gt_3m(self):
         return (self.df["defaulted_gt_nmo"] == True).sum()  # noqa: E712
@@ -32,7 +35,10 @@ class LtvAnalysis:
         return self.churn.multiplier_3y()
 
     def mrr_over_avg_cost(self):
-        return self.df["monthly_expected_payment"].sum() / self.df["cost_of_asset"].sum()
+        total_cost = self.df["cost_of_asset"].sum()
+        if not total_cost:
+            return np.nan
+        return self.df["monthly_expected_payment"].sum() / total_cost
 
     def pct_value_recovered_company(self):
         redeployed = self.df[self.df["redeployed"]]

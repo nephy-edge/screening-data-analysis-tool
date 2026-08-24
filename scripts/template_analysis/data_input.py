@@ -30,7 +30,7 @@ def _compute_total_due(
     if not needed.issubset(df.columns):
         return None
     begin = _compute_begin_date(df)
-    freq = df["Payment Frequency"].str.lower()
+    freq = df["Payment Frequency"].astype(str).str.lower()
     pp = pd.to_numeric(df["Payment per Period"], errors="coerce").fillna(0)
     fee = (
         pd.to_numeric(df["Expected Fee"], errors="coerce").fillna(0)

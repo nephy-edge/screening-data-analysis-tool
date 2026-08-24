@@ -15,24 +15,39 @@ class UeAnalysis:
         return self.df[self.df["first_asset_lease"]]["cost_of_asset"].mean()
 
     def downpayment_pct(self):
-        return self.df["downpayment"].sum() / self.df["cost_of_asset"].sum()
+        total_cost = self.df["cost_of_asset"].sum()
+        if not total_cost:
+            return np.nan
+        return self.df["downpayment"].sum() / total_cost
 
     def lease_tenor_m(self):
         df = self.df
-        return (df["term_days"] * df["cost_of_asset"]).sum() / df["cost_of_asset"].sum() / 30.5
+        total_cost = df["cost_of_asset"].sum()
+        if not total_cost:
+            return np.nan
+        return (df["term_days"] * df["cost_of_asset"]).sum() / total_cost / 30.5
 
     def monthly_avg_contractual_payment(self):
         df = self.df
-        return (df["monthly_expected_payment"] * df["cost_of_asset"]).sum() / df["cost_of_asset"].sum()
+        total_cost = df["cost_of_asset"].sum()
+        if not total_cost:
+            return np.nan
+        return (df["monthly_expected_payment"] * df["cost_of_asset"]).sum() / total_cost
 
     def avg_total_gbv_leased(self):
         return self.monthly_avg_contractual_payment() * self.lease_tenor_m()
 
     def margin(self):
-        return self.avg_total_gbv_leased() / self.avg_original_asset_value() - 1
+        avg_cost = self.avg_original_asset_value()
+        if not avg_cost or pd.isna(avg_cost):
+            return np.nan
+        return self.avg_total_gbv_leased() / avg_cost - 1
 
     def pvd(self):
-        return self.df["total_paid"].sum() / self.df["amount_expected_to_date"].sum()
+        total_expected = self.df["amount_expected_to_date"].sum()
+        if not total_expected:
+            return np.nan
+        return self.df["total_paid"].sum() / total_expected
 
     def utilisation_rate(self):
         return (self.av["open_count"] == 1).sum() / len(self.av)
@@ -69,7 +84,10 @@ class UeAnalysis:
         return self.monthly_observed_repayment() * self.avg_original_asset_value()
 
     def monthly_avg_contractual_payment_pct(self):
-        return self.df["monthly_expected_payment"].sum() / self.df["cost_of_asset"].sum()
+        total_cost = self.df["cost_of_asset"].sum()
+        if not total_cost:
+            return np.nan
+        return self.df["monthly_expected_payment"].sum() / total_cost
 
     def monthly_avg_actual_payment_pct(self):
         return self.monthly_avg_contractual_payment_pct() * self.pvd()

@@ -29,9 +29,9 @@ def build_cohorts(df: pd.DataFrame):
         df["Cohort"], dropna=False
     ).sum()
     weighted_term_den = principal.groupby(df["Cohort"], dropna=False).sum()
-    weighted_avg_term = (weighted_term_num / weighted_term_den).reindex(
-        grouped["Cohort"].first().index
-    )
+    weighted_avg_term = (weighted_term_num / weighted_term_den).where(
+        weighted_term_den != 0
+    ).reindex(grouped["Cohort"].first().index)
 
     cohorts = pd.DataFrame({
         "Cohort": grouped["Cohort"].first(),

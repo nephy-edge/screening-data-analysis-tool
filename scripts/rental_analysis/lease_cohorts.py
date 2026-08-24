@@ -5,6 +5,14 @@ import numpy as np
 import pandas as pd
 
 
+def count_unparsed_cohort_rows(df):
+    """Rows whose contract_cohort is NaT (start_date failed to parse) - these
+    are excluded from every aggregate build_cohorts() below, since a row with
+    no known start date can't be placed in the chronological cohort cascade.
+    Callers should surface this count rather than let the rows vanish silently."""
+    return int(df["contract_cohort"].isna().sum())
+
+
 def build_cohorts(df, gi):
     cohorts = sorted(df["contract_cohort"].dropna().unique())
     rows = []
@@ -26,7 +34,10 @@ def build_cohorts(df, gi):
             "defaulted": defaulted,
             "recovered": recovered,
             "pct_recovered": recovered / defaulted if defaulted else np.nan,
-            "pvd": sub["total_paid"].sum() / sub["amount_expected_to_date"].sum(),
+            "pvd": (
+                sub["total_paid"].sum() / sub["amount_expected_to_date"].sum()
+                if sub["amount_expected_to_date"].sum() else np.nan
+            ),
             "avg_days_to_recovery": sub["days_to_recovery"].mean(),
             "active_leases_in_month": active,
             "defaulted_leases_in_month": defaulted_in_month,

@@ -8,7 +8,11 @@ import pandas as pd
 def build_repayment_curve(av, gi):
     max_mob = int(gi["useful_life_years"] * 12)
     rows = []
-    for mob in range(0, max_mob):
+    # Inclusive of max_mob itself - ts_covenants.py looks up fixed MOB points
+    # (6/12/24) that must be reachable even for short-life assets where
+    # useful_life_years * 12 == 24, not just for larger assets where it's
+    # comfortably past those checkpoints.
+    for mob in range(0, max_mob + 1):
         bucket = av[av["mob"] == mob]
         count = len(bucket)
         total_paid = bucket["total_paid"].sum()

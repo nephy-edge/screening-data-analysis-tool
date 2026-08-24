@@ -65,7 +65,17 @@ def process_data_input(df, gi):
     df["status_mapping"] = df["status"].map(gi["status_map"])
 
     first_start = df.groupby("asset_id")["start_date"].transform("min")
-    df["first_asset_lease"] = df["start_date"] == first_start
+    # Flag exactly one row per asset, even when two contracts tie for the
+    # earliest start_date (same-day co-lease, date-only granularity) -
+    # idxmin() resolves ties to the first occurrence in file order, so the
+    # cost/term sums below never double-count a tied asset. Restrict to rows
+    # with a parsed start_date first: idxmin() raises if an asset's entire
+    # group is NaT (unparseable start date), where old comparison-based logic
+    # just left first_asset_lease False for that asset.
+    valid_start = df["start_date"].notna()
+    first_idx = df[valid_start].groupby("asset_id")["start_date"].idxmin()
+    df["first_asset_lease"] = False
+    df.loc[first_idx, "first_asset_lease"] = True
 
     df["term_days"] = (df["expected_end_date"] - df["start_date"]).dt.days
 
@@ -105,7 +115,13 @@ def process_data_input(df, gi):
 
     df["contract_cohort"] = df["start_date"].dt.to_period("M").dt.to_timestamp()
 
-    next_rank_start = df.set_index(["asset_id", "rank_by_asset"])["start_date"]
+    # Two contracts can tie for the same rank_by_asset (identical start_date),
+    # which would otherwise leave duplicate labels in the (asset_id, rank)
+    # index below - once *any* duplicate label exists, Series.get() stops
+    # returning scalars even for unrelated, unique keys. Collapse ties first;
+    # tied rows share the same start_date by construction, so "first" is a
+    # correct representative, not an arbitrary pick.
+    next_rank_start = df.groupby(["asset_id", "rank_by_asset"])["start_date"].first()
     lookup_key = list(zip(df["asset_id"], df["rank_by_asset"] + 1))
     next_start = pd.Series([next_rank_start.get(k, pd.NaT) for k in lookup_key], index=df.index)
     is_closed = df["status_mapping"] == gi["closed_label"]
