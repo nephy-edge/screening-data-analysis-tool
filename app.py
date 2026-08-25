@@ -361,12 +361,13 @@ def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> li
 
     if cohorts is not None and "Loss Rate" in cohorts.columns:
         by_month = cohorts.dropna(subset=["Loss Rate"]).sort_values("Cohort")
-        deltas = by_month["Loss Rate"].diff().abs()
-        flagged = by_month.loc[deltas > 0.05]
+        deltas = by_month["Loss Rate"].diff()
+        flagged = by_month.loc[deltas.abs() > 0.05]
         if not flagged.empty:
+            flagged_deltas = deltas.loc[flagged.index]
             examples = ", ".join(
-                f"{c.strftime('%b %Y')} ({lr:.1%})"
-                for c, lr in zip(flagged["Cohort"], flagged["Loss Rate"])
+                f"{c.strftime('%b %Y')} ({d * 100:+.1f}pp swing, rate now {lr:.1%})"
+                for c, lr, d in zip(flagged["Cohort"], flagged["Loss Rate"], flagged_deltas)
             )
             checks.append({
                 "level": "warning",
