@@ -373,6 +373,9 @@ def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> li
             loan_count_pct = by_month["Loan Count"].pct_change().loc[flagged.index]
             term_delta = by_month["Weighted Avg Term"].diff().loc[flagged.index]
             prior_term = by_month["Weighted Avg Term"].shift(1).loc[flagged.index]
+            avg_loan_size = by_month["Total Principal"] / by_month["Loan Count"]
+            avg_loan_size_pct = avg_loan_size.pct_change().loc[flagged.index]
+            pvd_delta = by_month["PvD Ratio"].diff().loc[flagged.index] if "PvD Ratio" in by_month.columns else None
 
             def _diagnose(idx):
                 causes = []
@@ -391,6 +394,19 @@ def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> li
                         f"weighted avg term shifted {td:+.0f} days vs prior cohort "
                         "- possible mix/definition change"
                     )
+                als_pct = avg_loan_size_pct.loc[idx]
+                if pd.notna(als_pct) and abs(als_pct) > 0.5:
+                    causes.append(
+                        f"average loan size {'dropped' if als_pct < 0 else 'grew'} "
+                        f"{abs(als_pct):.0%} vs prior cohort - possible portfolio mix change"
+                    )
+                if pvd_delta is not None:
+                    pvd = pvd_delta.loc[idx]
+                    if pd.notna(pvd) and abs(pvd) > 0.10:
+                        causes.append(
+                            f"PvD ratio shifted {pvd * 100:+.0f}pp vs prior cohort "
+                            "- possible collections/servicing change"
+                        )
                 return "; ".join(causes) if causes else (
                     "No obvious data-driven cause - likely a genuine portfolio "
                     "event, escalate to Borrower"
@@ -1386,6 +1402,29 @@ with tabs[0]:
                                 )
                     else:
                         st.dataframe(detail, width="stretch", hide_index=True)
+                        if check.get("check_id") == "unexplained_variance":
+                            if st.session_state.pop("dq_just_escalated", False):
+                                st.success(
+                                    "Added to the Feedback box (top of page) — "
+                                    "review and send to analytics."
+                                )
+                            if st.button(
+                                "Escalate flagged cohorts to analytics",
+                                key="escalate_variance",
+                            ):
+                                lines = [
+                                    f"- {r['Cohort']}: {r['Loss Rate (%)']}% loss "
+                                    f"({r['Swing vs Prior Cohort (pp)']:+.1f}pp swing) - "
+                                    f"{r['Likely Contributing Factor(s)']}"
+                                    for _, r in detail.iterrows()
+                                ]
+                                fb_form_version = st.session_state.get("fb_form_version", 0)
+                                st.session_state[f"fb_text_{fb_form_version}"] = (
+                                    "Unexplained variance flagged in Lending screening "
+                                    "analysis:\n" + "\n".join(lines)
+                                )
+                                st.session_state["dq_just_escalated"] = True
+                                st.rerun()
         else:
             st.success("No data quality issues flagged.")
     else:
