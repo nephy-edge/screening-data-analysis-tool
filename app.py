@@ -200,6 +200,7 @@ with feedback_col:
                     st.error(f"Could not send feedback: {err}")
 
 RENTAL_CONFIG = dict(
+    id_field="contract_id",
     input_columns=[(c, True) for c in REQUIRED_COLUMNS] + [(c, False) for c in OPTIONAL_COLUMNS],
     date_fields={"start_date", "expected_end_date", "closed_date", "asset_recovery_date", "recovery_date"},
     numeric_fields={
@@ -217,6 +218,7 @@ RENTAL_CONFIG = dict(
     derived_placeholder="For example, amount expected to date, calculated from monthly payment and months elapsed",
 )
 LENDING_CONFIG = dict(
+    id_field="Loan ID",
     input_columns=[
         ("Loan ID", True), ("Disbursement Date", True), ("Expected Completion Date", True),
         ("Principal Value", True), ("Expected Interest", True), ("Expected Fee", False),
@@ -302,34 +304,37 @@ def _validate_mapping(
     return errors, warnings
 
 
-def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> list[dict]:
-    """Rules-engine checks from the screening briefing (Lending model only):
-    duplicate loan IDs, field completion below 80%, portfolio size above
-    5,000 rows, history below 12 months, and cohort-to-cohort loss-rate
-    swings above 5 percentage points. Each check is a dict with "level"
+def _step2_data_quality_checks(raw: pd.DataFrame, config: dict) -> list[dict]:
+    """Model-agnostic Step 2 checks from the screening briefing: duplicate IDs,
+    field completion below 80%, portfolio size above 5,000 rows, and history
+    below 12 months. Driven entirely by the active model's config dict
+    (LENDING_CONFIG / RENTAL_CONFIG - id_field, input_columns,
+    primary_date_field), so every model gets these checks by construction
+    rather than needing its own copy. Each check is a dict with "level"
     ("warning"/"info"), "message", an optional "detail" DataFrame, and an
     optional "detail_expander" title (if absent but "detail" is set, the
     table is shown directly, not collapsed)."""
     checks: list[dict] = []
+    id_field = config["id_field"]
 
-    if "Loan ID" in raw.columns:
-        dup_mask = raw["Loan ID"].notna() & raw["Loan ID"].duplicated(keep=False)
+    if id_field in raw.columns:
+        dup_mask = raw[id_field].notna() & raw[id_field].duplicated(keep=False)
         if dup_mask.any():
             checks.append({
                 "level": "warning",
                 "check_id": "duplicate_loan_id",
                 "message": (
-                    f"**Duplicate Loan IDs** - {raw.loc[dup_mask, 'Loan ID'].nunique()} "
-                    f"loan ID(s) appear more than once ({int(dup_mask.sum())} rows). "
+                    f"**Duplicate {id_field}s** - {raw.loc[dup_mask, id_field].nunique()} "
+                    f"{id_field}(s) appear more than once ({int(dup_mask.sum())} rows). "
                     "Confirm with the borrower whether these are genuine duplicates."
                 ),
-                "detail": raw.loc[dup_mask].sort_values("Loan ID"),
+                "detail": raw.loc[dup_mask].sort_values(id_field),
                 "detail_expander": f"View {int(dup_mask.sum())} duplicate row(s)",
             })
 
     low_completion = [
         f"{target} ({raw[target].notna().mean():.0%})"
-        for target, _ in LENDING_CONFIG["input_columns"]
+        for target, _ in config["input_columns"]
         if target in raw.columns and raw[target].notna().mean() < 0.80
     ]
     if low_completion:
@@ -337,7 +342,7 @@ def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> li
             "level": "warning",
             "message": (
                 "**Field completion below 80%** - " + ", ".join(low_completion) + ". "
-                "Loans missing these fields may distort downstream metrics."
+                "Records missing these fields may distort downstream metrics."
             ),
         })
 
@@ -352,18 +357,29 @@ def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> li
             ),
         })
 
-    if "Disbursement Date" in raw.columns and raw["Disbursement Date"].notna().any():
-        span_days = (raw["Disbursement Date"].max() - raw["Disbursement Date"].min()).days
+    primary_date_field = config["primary_date_field"]
+    if primary_date_field in raw.columns and raw[primary_date_field].notna().any():
+        span_days = (
+            raw[primary_date_field].max() - raw[primary_date_field].min()
+        ).days
         if span_days < 365:
             checks.append({
                 "level": "warning",
                 "message": (
-                    f"**Limited history** - disbursement dates span only "
+                    f"**Limited history** - dates span only "
                     f"{span_days / 30:.1f} months, below the 12-month screening "
-                    "threshold; loss-rate percentiles may be unreliable."
+                    "threshold; loss/churn-rate percentiles may be unreliable."
                 ),
             })
 
+    return checks
+
+
+def _lending_variance_check(cohorts: pd.DataFrame) -> list[dict]:
+    """Step 4: flags cohort-to-cohort loss-rate swings above 5 percentage
+    points, with likely contributing factors diagnosed from signals already
+    in the cohort table."""
+    checks: list[dict] = []
     if cohorts is not None and "Loss Rate" in cohorts.columns:
         by_month = cohorts.dropna(subset=["Loss Rate"]).sort_values("Cohort")
         deltas = by_month["Loss Rate"].diff()
@@ -432,6 +448,11 @@ def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> li
             })
 
     return checks
+
+
+def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> list[dict]:
+    """Lending: Step 2 checks (shared) + Step 4 loss-rate variance diagnosis."""
+    return _step2_data_quality_checks(raw, LENDING_CONFIG) + _lending_variance_check(cohorts)
 
 
 def fmt(value, spec="{:.1%}"):
@@ -825,7 +846,42 @@ def _render_variance_escalation(
             st.error(f"Could not escalate: {err}")
 
 
-def _rental_data_quality_checks(cohorts: "pd.DataFrame") -> list:
+def _render_data_quality_checks(
+    checks: list, variance_metric_label: str, model_name: str, button_key: str,
+    uploaded_name: str,
+) -> None:
+    """Renders the "Data Quality Checks" section, shared by every model so
+    Step 2 (duplicates, completion, portfolio size, history) and Step 4
+    (variance diagnosis + escalation) always render identically regardless
+    of which model is active - one implementation, not one per model."""
+    st.markdown("---")
+    st.subheader("Data Quality Checks")
+    if not checks:
+        st.success("No data quality issues flagged.")
+        return
+    for check in checks:
+        (st.warning if check["level"] == "warning" else st.info)(check["message"])
+        detail = check.get("detail")
+        if detail is None:
+            continue
+        if check.get("detail_expander"):
+            with st.expander(check["detail_expander"]):
+                st.dataframe(detail, width="stretch", hide_index=True)
+                if check.get("check_id") == "duplicate_loan_id":
+                    st.checkbox(
+                        "Deduplicate: keep only the first row for each "
+                        "duplicated ID, then re-run analysis",
+                        key="dedupe_loan_ids",
+                    )
+        else:
+            st.dataframe(detail, width="stretch", hide_index=True)
+            if check.get("check_id") == "unexplained_variance":
+                _render_variance_escalation(
+                    detail, variance_metric_label, model_name, button_key, uploaded_name,
+                )
+
+
+def _rental_variance_check(cohorts: "pd.DataFrame") -> list:
     """Step 4 anomaly diagnostics for Rental & Subscription, mirroring the
     Lending unexplained-variance check: flags cohort-to-cohort churn-rate
     swings above 5 percentage points, with likely contributing factors
@@ -902,6 +958,12 @@ def _rental_data_quality_checks(cohorts: "pd.DataFrame") -> list:
         "detail": detail,
     })
     return checks
+
+
+def _rental_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> list:
+    """Rental & Subscription: Step 2 checks (shared) + Step 4 churn-rate
+    variance diagnosis."""
+    return _step2_data_quality_checks(raw, RENTAL_CONFIG) + _rental_variance_check(cohorts)
 
 
 def _add_reference_line(chart, value, label, color="#d62728", x_anchor=None):
@@ -1438,8 +1500,8 @@ mapping_warnings = st.session_state.get("analysis_mapping_warnings") or []
 if mapping_warnings:
     st.warning("Mapping quality warnings:\n\n" + "\n".join(f"- {w}" for w in mapping_warnings))
 
-if is_lending and st.session_state.get("dedupe_loan_ids") and "Loan ID" in raw.columns:
-    raw = raw.drop_duplicates(subset="Loan ID", keep="first")
+if st.session_state.get("dedupe_loan_ids") and active_cfg["id_field"] in raw.columns:
+    raw = raw.drop_duplicates(subset=active_cfg["id_field"], keep="first")
 
 if active_cfg["needs_status_map"]:
     raw_statuses = sorted(raw["status"].dropna().unique().tolist(), key=str)
@@ -1516,7 +1578,7 @@ if not is_lending and fallback_notes:
             st.write("-", note)
 
 dq_checks = _lending_data_quality_checks(raw, cohorts) if is_lending else []
-dq_checks_rental = _rental_data_quality_checks(cohorts) if not is_lending else []
+dq_checks_rental = _rental_data_quality_checks(raw, cohorts) if not is_lending else []
 
 active_questions = LENDING_QUESTIONS if is_lending else QUESTIONS
 
@@ -1570,31 +1632,10 @@ with tabs[0]:
         y3.metric("Average Total Revenue %", fmt(ltv_data["Average Total Revenue %"]))
         y4.metric("Average Term (days)", fmt(ltv_data["Average Term"], "{:,.1f}"))
 
-        st.markdown("---")
-        st.subheader("Data Quality Checks")
-        if dq_checks:
-            for check in dq_checks:
-                (st.warning if check["level"] == "warning" else st.info)(check["message"])
-                detail = check.get("detail")
-                if detail is not None:
-                    if check.get("detail_expander"):
-                        with st.expander(check["detail_expander"]):
-                            st.dataframe(detail, width="stretch", hide_index=True)
-                            if check.get("check_id") == "duplicate_loan_id":
-                                st.checkbox(
-                                    "Deduplicate: keep only the first row for each "
-                                    "duplicated Loan ID, then re-run analysis",
-                                    key="dedupe_loan_ids",
-                                )
-                    else:
-                        st.dataframe(detail, width="stretch", hide_index=True)
-                        if check.get("check_id") == "unexplained_variance":
-                            _render_variance_escalation(
-                                detail, "Loss Rate (%)", MODEL_LABELS[model_key],
-                                "escalate_variance", uploaded.name,
-                            )
-        else:
-            st.success("No data quality issues flagged.")
+        _render_data_quality_checks(
+            dq_checks, "Loss Rate (%)", MODEL_LABELS[model_key],
+            "escalate_variance", uploaded.name,
+        )
     else:
         st.metric(
             "MRR Multiplier (3y)", fmt(ltv_data["mrr_multiplier"], "{:.2f}"),
@@ -1628,21 +1669,10 @@ with tabs[0]:
         y2.metric("MRR / average cost", fmt(ltv_data["mrr_over_avg_cost"], "{:.2%}"))
         y3.metric("Average Collection Rate", fmt(ltv_data["avg_collection_rate"]))
 
-        st.markdown("---")
-        st.subheader("Data Quality Checks")
-        if dq_checks_rental:
-            for check in dq_checks_rental:
-                (st.warning if check["level"] == "warning" else st.info)(check["message"])
-                detail = check.get("detail")
-                if detail is not None:
-                    st.dataframe(detail, width="stretch", hide_index=True)
-                    if check.get("check_id") == "unexplained_variance":
-                        _render_variance_escalation(
-                            detail, "Churn Rate (%)", MODEL_LABELS[model_key],
-                            "escalate_variance_rental", uploaded.name,
-                        )
-        else:
-            st.success("No data quality issues flagged.")
+        _render_data_quality_checks(
+            dq_checks_rental, "Churn Rate (%)", MODEL_LABELS[model_key],
+            "escalate_variance_rental", uploaded.name,
+        )
 
 with tabs[1]:
     st.subheader("General Inputs")
