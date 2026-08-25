@@ -888,25 +888,28 @@ def _read_tabular_file(uploaded) -> pd.DataFrame:
     column headers, which would otherwise silently produce "Unnamed: N"
     columns instead of an error."""
     if uploaded.name.endswith(".csv"):
-        return pd.read_csv(uploaded)
+        with st.spinner("Reading file..."):
+            return pd.read_csv(uploaded)
 
-    xls = pd.ExcelFile(uploaded)
-    sheet_name = xls.sheet_names[0]
+    with st.spinner("Reading file..."):
+        xls = pd.ExcelFile(uploaded)
+        sheet_name = xls.sheet_names[0]
     if len(xls.sheet_names) > 1:
         sheet_name = st.selectbox(
             "This file has multiple sheets - which one has your loan-level data?",
             options=xls.sheet_names, key="upload_sheet_name",
         )
 
-    df = xls.parse(sheet_name)
-    unnamed_frac = sum(str(c).startswith("Unnamed:") for c in df.columns) / max(len(df.columns), 1)
-    if unnamed_frac >= 0.5:
-        preview = xls.parse(sheet_name, header=None, nrows=10)
-        for i in range(1, len(preview)):
-            row = preview.iloc[i]
-            if row.notna().mean() > 0.7 and row.dropna().map(lambda v: isinstance(v, str)).mean() > 0.7:
-                df = xls.parse(sheet_name, header=i)
-                break
+    with st.spinner("Reading file..."):
+        df = xls.parse(sheet_name)
+        unnamed_frac = sum(str(c).startswith("Unnamed:") for c in df.columns) / max(len(df.columns), 1)
+        if unnamed_frac >= 0.5:
+            preview = xls.parse(sheet_name, header=None, nrows=10)
+            for i in range(1, len(preview)):
+                row = preview.iloc[i]
+                if row.notna().mean() > 0.7 and row.dropna().map(lambda v: isinstance(v, str)).mean() > 0.7:
+                    df = xls.parse(sheet_name, header=i)
+                    break
     return df
 
 
@@ -1761,7 +1764,15 @@ else:
 st.markdown("---")
 
 
-def _build_lending_export_workbook():
+@st.cache_data(show_spinner="Building the Excel export — this can take a while for large portfolios...")
+def _build_lending_export_workbook(
+    df, cohorts, filtered, days_after_term, min_loans_per_cohort,
+    ltv_data, ue_data, lending_chart_data, export_charts,
+):
+    """Cached on its inputs so it's only rebuilt when the analysis or queued
+    custom charts actually change, rather than on every Streamlit rerun (e.g.
+    toggling an unrelated checkbox) -- at scale (hundreds of thousands of
+    rows) rebuilding this from scratch every rerun took 45-60+ seconds."""
     raw_cols = ["Loan ID", "Disbursement Date", "Expected Completion Date",
                 "Principal Value", "Expected Interest", "Expected Fee",
                 "Total Due", "Total Paid"]
@@ -1775,8 +1786,8 @@ def _build_lending_export_workbook():
         for r, label, val, note in [
             (2, "Inputs", None, None),
             (3, "Date of extraction", "=MAX('Data Input'!B:B)", "Defaults to most recent disbursement date"),
-            (4, "Days after term", gi.days_after_term, "Ignore any loans for loss rates that are less than this number of days after term"),
-            (5, "Minimum loans per cohort", gi.min_loans_per_cohort, "Ignore any cohorts for loss rates that are less than this number of loans"),
+            (4, "Days after term", days_after_term, "Ignore any loans for loss rates that are less than this number of days after term"),
+            (5, "Minimum loans per cohort", min_loans_per_cohort, "Ignore any cohorts for loss rates that are less than this number of loans"),
         ]:
             if label:
                 gs.cell(row=r, column=2, value=label)
@@ -1856,13 +1867,13 @@ def _build_lending_export_workbook():
             c.set_categories(cats)
             ga_ws.add_chart(c, "A6")
 
-        _write_custom_charts_sheet(writer, st.session_state.get("export_charts", []))
+        _write_custom_charts_sheet(writer, export_charts)
 
         cohorts.to_excel(writer, sheet_name="Cohorts", index=False)
         filtered.to_excel(writer, sheet_name="Cohorts for X or more loans", index=False)
 
     buf.seek(0)
-    return buf
+    return buf.getvalue()
 
 
 def _build_export_workbook():
@@ -1969,7 +1980,10 @@ def _build_export_workbook():
 
 
 if is_lending:
-    buf = _build_lending_export_workbook()
+    buf = _build_lending_export_workbook(
+        df, cohorts, filtered, gi.days_after_term, gi.min_loans_per_cohort,
+        ltv_data, ue_data, lending_chart_data, st.session_state.get("export_charts", []),
+    )
     file_name = f"SC_Analysis_Lending_{pd.Timestamp.now():%Y-%m-%d}.xlsx"
 else:
     buf = _build_export_workbook()
