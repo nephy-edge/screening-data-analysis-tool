@@ -307,7 +307,9 @@ def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> li
     duplicate loan IDs, field completion below 80%, portfolio size above
     5,000 rows, history below 12 months, and cohort-to-cohort loss-rate
     swings above 5 percentage points. Each check is a dict with "level"
-    ("warning"/"info"), "message", and an optional "detail" DataFrame."""
+    ("warning"/"info"), "message", an optional "detail" DataFrame, and an
+    optional "detail_expander" title (if absent but "detail" is set, the
+    table is shown directly, not collapsed)."""
     checks: list[dict] = []
 
     if "Loan ID" in raw.columns:
@@ -315,12 +317,14 @@ def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> li
         if dup_mask.any():
             checks.append({
                 "level": "warning",
+                "check_id": "duplicate_loan_id",
                 "message": (
                     f"**Duplicate Loan IDs** - {raw.loc[dup_mask, 'Loan ID'].nunique()} "
                     f"loan ID(s) appear more than once ({int(dup_mask.sum())} rows). "
                     "Confirm with the borrower whether these are genuine duplicates."
                 ),
                 "detail": raw.loc[dup_mask].sort_values("Loan ID"),
+                "detail_expander": f"View {int(dup_mask.sum())} duplicate row(s)",
             })
 
     low_completion = [
@@ -365,18 +369,21 @@ def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> li
         flagged = by_month.loc[deltas.abs() > 0.05]
         if not flagged.empty:
             flagged_deltas = deltas.loc[flagged.index]
-            examples = ", ".join(
-                f"{c.strftime('%b %Y')} ({d * 100:+.1f}pp swing, rate now {lr:.1%})"
-                for c, lr, d in zip(flagged["Cohort"], flagged["Loss Rate"], flagged_deltas)
-            )
+            detail = pd.DataFrame({
+                "Cohort": flagged["Cohort"].dt.strftime("%b %Y"),
+                "Loss Rate (%)": (flagged["Loss Rate"] * 100).round(1).values,
+                "Swing vs Prior Cohort (pp)": (flagged_deltas * 100).round(1).values,
+            })
             checks.append({
                 "level": "warning",
+                "check_id": "unexplained_variance",
                 "message": (
-                    "**Unexplained variance** - cohort-to-cohort loss rate moves by "
-                    f"more than 5 percentage points for: {examples}. Investigate "
-                    "before relying on these cohorts (data drift, missing loads, "
-                    "definition changes)."
+                    f"**Unexplained variance** - {len(detail)} cohort(s) show a "
+                    "loss-rate swing of more than 5 percentage points versus the "
+                    "prior cohort. Investigate before relying on these cohorts "
+                    "(data drift, missing loads, definition changes)."
                 ),
+                "detail": detail,
             })
 
     return checks
@@ -1334,14 +1341,19 @@ with tabs[0]:
         if dq_checks:
             for check in dq_checks:
                 (st.warning if check["level"] == "warning" else st.info)(check["message"])
-                if check.get("detail") is not None:
-                    with st.expander(f"View {len(check['detail'])} duplicate row(s)"):
-                        st.dataframe(check["detail"], width="stretch")
-                        st.checkbox(
-                            "Deduplicate: keep only the first row for each duplicated "
-                            "Loan ID, then re-run analysis",
-                            key="dedupe_loan_ids",
-                        )
+                detail = check.get("detail")
+                if detail is not None:
+                    if check.get("detail_expander"):
+                        with st.expander(check["detail_expander"]):
+                            st.dataframe(detail, width="stretch", hide_index=True)
+                            if check.get("check_id") == "duplicate_loan_id":
+                                st.checkbox(
+                                    "Deduplicate: keep only the first row for each "
+                                    "duplicated Loan ID, then re-run analysis",
+                                    key="dedupe_loan_ids",
+                                )
+                    else:
+                        st.dataframe(detail, width="stretch", hide_index=True)
         else:
             st.success("No data quality issues flagged.")
     else:
