@@ -1404,10 +1404,7 @@ with tabs[0]:
                         st.dataframe(detail, width="stretch", hide_index=True)
                         if check.get("check_id") == "unexplained_variance":
                             if st.session_state.pop("dq_just_escalated", False):
-                                st.success(
-                                    "Added to the Feedback box (top of page) — "
-                                    "review and send to analytics."
-                                )
+                                st.success("Sent to analytics.")
                             if st.button(
                                 "Escalate flagged cohorts to analytics",
                                 key="escalate_variance",
@@ -1418,21 +1415,18 @@ with tabs[0]:
                                     f"{r['Likely Contributing Factor(s)']}"
                                     for _, r in detail.iterrows()
                                 ]
-                                # The feedback text_area widget (key f"fb_text_{fb_form_version}")
-                                # is instantiated earlier in this same script run (in the
-                                # popover near the top of the page), so its session_state
-                                # key can no longer be written here - Streamlit raises
-                                # StreamlitAPIException if you try. Bump to a fresh,
-                                # not-yet-instantiated version instead, matching the pattern
-                                # the "clear after send" flow already uses.
-                                next_version = st.session_state.get("fb_form_version", 0) + 1
-                                st.session_state[f"fb_text_{next_version}"] = (
+                                message = (
                                     "Unexplained variance flagged in Lending screening "
                                     "analysis:\n" + "\n".join(lines)
                                 )
-                                st.session_state["fb_form_version"] = next_version
-                                st.session_state["dq_just_escalated"] = True
-                                st.rerun()
+                                ok, err = _send_slack_feedback(
+                                    message, MODEL_LABELS[model_key]
+                                )
+                                if ok:
+                                    st.session_state["dq_just_escalated"] = True
+                                    st.rerun()
+                                else:
+                                    st.error(f"Could not escalate: {err}")
         else:
             st.success("No data quality issues flagged.")
     else:
