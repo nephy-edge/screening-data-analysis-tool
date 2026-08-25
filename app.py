@@ -719,7 +719,7 @@ def _suggest_mapping(columns: list, input_columns: list) -> dict:
     return mapping
 
 
-def _suggest_escalation_writeup(filename: str, facts: list) -> dict:
+def _suggest_escalation_writeup(filename: str, facts: list, model_name: str) -> dict:
     """Ask DeepSeek V4 Flash (via DeepInfra) to guess the borrower from the
     uploaded file name and turn already-aggregated flagged-cohort facts into a
     well organized Slack write-up. Only the file name and cohort-level
@@ -731,7 +731,7 @@ def _suggest_escalation_writeup(filename: str, facts: list) -> dict:
 
     system_prompt = (
         "You help draft a Slack message escalating a data-quality anomaly from "
-        "a loan portfolio screening tool to the analytics team.\n\n"
+        f"a {model_name} portfolio screening tool to the analytics team.\n\n"
         f"Uploaded file name: {filename}\n\n"
         "Flagged cohort facts:\n" + "\n".join(facts) + "\n\n"
         "1. Guess the borrower/company name from the file name (strip file "
@@ -740,7 +740,16 @@ def _suggest_escalation_writeup(filename: str, facts: list) -> dict:
         "2. Rewrite the flagged cohort facts into a clear, well organized Slack "
         "message (Slack mrkdwn: *bold*, bullet points with '-') for an analyst "
         "who hasn't seen the data, summarizing what's flagged and the likely "
-        "causes. Do not invent facts not present above.\n\n"
+        "causes. Do not invent facts not present above.\n"
+        "3. For any fact whose likely cause is \"No obvious data-driven cause\", "
+        "add a short *Possible lines of inquiry (hypotheses to verify with the "
+        f"Borrower - not conclusions)* section with 2-3 plausible external "
+        f"explanations common to a {model_name} business (e.g. underwriting/"
+        "recovery policy changes, a servicing or system migration, a "
+        "regulatory change, a one-off portfolio sale or write-off). Make clear "
+        "these are hypotheses to ask about, not established facts - never state "
+        "them as the actual cause. Omit this section entirely if every fact "
+        "already has a data-driven cause.\n\n"
         "Respond with ONLY a JSON object, no markdown fences:\n"
         '{"borrower_name": "<name>", "message": "<Slack mrkdwn write-up>"}'
     )
@@ -796,7 +805,7 @@ def _render_variance_escalation(
         borrower_name, message, ai_warning = None, None, None
         try:
             with st.spinner("Drafting the escalation with AI..."):
-                ai = _suggest_escalation_writeup(uploaded_name, lines)
+                ai = _suggest_escalation_writeup(uploaded_name, lines, model_name)
             borrower_name = ai.get("borrower_name")
             message = ai.get("message")
         except Exception as e:
