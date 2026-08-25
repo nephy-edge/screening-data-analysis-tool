@@ -719,6 +719,55 @@ def _suggest_mapping(columns: list, input_columns: list) -> dict:
     return mapping
 
 
+def _suggest_escalation_writeup(filename: str, facts: list) -> dict:
+    """Ask DeepSeek V4 Flash (via DeepInfra) to guess the borrower from the
+    uploaded file name and turn already-aggregated flagged-cohort facts into a
+    well organized Slack write-up. Only the file name and cohort-level
+    statistics are sent - never raw loan rows. Returns {} if no API key is
+    configured; raises on network/parsing errors for the caller to handle."""
+    api_key = _get_deepinfra_api_key()
+    if not api_key:
+        return {}
+
+    system_prompt = (
+        "You help draft a Slack message escalating a data-quality anomaly from "
+        "a loan portfolio screening tool to the analytics team.\n\n"
+        f"Uploaded file name: {filename}\n\n"
+        "Flagged cohort facts:\n" + "\n".join(facts) + "\n\n"
+        "1. Guess the borrower/company name from the file name (strip file "
+        "extensions, dates, and generic words like 'template' or 'loan tape'). "
+        'If you can\'t tell, use "Unknown Borrower".\n'
+        "2. Rewrite the flagged cohort facts into a clear, well organized Slack "
+        "message (Slack mrkdwn: *bold*, bullet points with '-') for an analyst "
+        "who hasn't seen the data, summarizing what's flagged and the likely "
+        "causes. Do not invent facts not present above.\n\n"
+        "Respond with ONLY a JSON object, no markdown fences:\n"
+        '{"borrower_name": "<name>", "message": "<Slack mrkdwn write-up>"}'
+    )
+
+    resp = requests.post(
+        DEEPINFRA_CHAT_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": DEEPINFRA_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "Draft the escalation."},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 700,
+        },
+        timeout=30,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    result = json.loads(content)
+    if "borrower_name" not in result or "message" not in result:
+        raise ValueError("Model response missing borrower_name/message")
+    return result
+
+
 def _add_reference_line(chart, value, label, color="#d62728", x_anchor=None):
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return chart
@@ -1404,7 +1453,14 @@ with tabs[0]:
                         st.dataframe(detail, width="stretch", hide_index=True)
                         if check.get("check_id") == "unexplained_variance":
                             if st.session_state.pop("dq_just_escalated", False):
-                                st.success("Sent to analytics.")
+                                ai_warning = st.session_state.pop("dq_escalate_ai_warning", None)
+                                if ai_warning:
+                                    st.warning(
+                                        f"AI write-up unavailable ({ai_warning}); "
+                                        "sent a plain summary instead."
+                                    )
+                                else:
+                                    st.success("Sent to analytics.")
                             if st.button(
                                 "Escalate flagged cohorts to analytics",
                                 key="escalate_variance",
@@ -1415,14 +1471,25 @@ with tabs[0]:
                                     f"{r['Likely Contributing Factor(s)']}"
                                     for _, r in detail.iterrows()
                                 ]
-                                message = (
-                                    "Unexplained variance flagged in Lending screening "
-                                    "analysis:\n" + "\n".join(lines)
-                                )
+                                borrower_name, message, ai_warning = None, None, None
+                                try:
+                                    with st.spinner("Drafting the escalation with AI..."):
+                                        ai = _suggest_escalation_writeup(uploaded.name, lines)
+                                    borrower_name = ai.get("borrower_name")
+                                    message = ai.get("message")
+                                except Exception as e:
+                                    ai_warning = str(e)
+                                if not message:
+                                    message = (
+                                        "Unexplained variance flagged in Lending "
+                                        "screening analysis:\n" + "\n".join(lines)
+                                    )
                                 ok, err = _send_slack_feedback(
-                                    message, MODEL_LABELS[model_key]
+                                    message, borrower_name or MODEL_LABELS[model_key]
                                 )
                                 if ok:
+                                    if ai_warning:
+                                        st.session_state["dq_escalate_ai_warning"] = ai_warning
                                     st.session_state["dq_just_escalated"] = True
                                     st.rerun()
                                 else:
