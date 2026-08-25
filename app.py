@@ -682,13 +682,13 @@ def _add_reference_line(chart, value, label, color="#d62728", x_anchor=None):
     if x_anchor is not None:
         ref["xa"] = [x_anchor]
         text = alt.Chart(ref).mark_text(
-            color=color, dx=-6, dy=-6, align="right", fontSize=11, fontWeight="bold"
+            color=color, dx=8, dy=-6, align="left", fontSize=11, fontWeight="bold"
         ).encode(x="xa:T", y=alt.Y("v:Q"), text="label:N")
     else:
         text = alt.Chart(ref).mark_text(
             color=color, dy=-7, dx=6, align="left", fontSize=11, fontWeight="bold"
         ).encode(x=alt.value(70), y=alt.Y("v:Q"), text="label:N")
-    return chart + rule + text
+    return (chart + rule + text).properties(padding={"right": 95})
 
 
 def _render_custom_visualizations_tab(data_sources: dict):
