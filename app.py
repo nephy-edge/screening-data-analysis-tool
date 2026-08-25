@@ -61,6 +61,12 @@ from template_analysis.cohorts_for_x_or_more_loans import filter_cohorts as lend
 from template_analysis.ltv_analysis import LtvAnalysis as LendingLtvAnalysis
 from template_analysis.ue_analysis import UeAnalysis as LendingUeAnalysis
 from template_analysis.general_analysis import describe as lending_general_analysis
+from template_analysis.ltv_calculator import (
+    COUNTRIES as LTV_CALC_COUNTRIES, DATA_INPUT_SOURCES as LTV_CALC_DATA_SOURCES,
+    FX_RISK_RATINGS as LTV_CALC_FX_RISK_RATINGS, HEDGE_TYPES as LTV_CALC_HEDGE_TYPES,
+    SEGMENTATIONS as LTV_CALC_SEGMENTATIONS, compute_ltv as ltv_calculator_compute,
+    nearest_tenor_bucket as ltv_calculator_nearest_tenor,
+)
 
 DEEPINFRA_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
 DEEPINFRA_CHAT_URL = "https://api.deepinfra.com/v1/openai/chat/completions"
@@ -1193,7 +1199,7 @@ if is_lending:
         "Summary", "General Inputs", "Data Questionnaire", "Data Input",
         "Cohorts", "Cohorts for X or more loans",
         "LTV Analysis", "Unit Economics Analysis", "General Analysis",
-        "Custom Visualizations",
+        "Custom Visualizations", "LTV Calculator",
     ]
 else:
     tab_names = [
@@ -1438,6 +1444,90 @@ if is_lending:
         _render_custom_visualizations_tab({
             "Data Input (loan-level)": df, "Cohorts": cohorts, "Cohorts for X or more loans": filtered,
         })
+
+    with tabs[10]:
+        st.subheader("LTV Calculator")
+        st.caption(
+            "A port of the Receivables-collateral LTV Calculator workbook's per-deal waterfall. "
+            "Green fields are pulled from this analysis; yellow fields are entered manually, "
+            "matching the source workbook's own color convention."
+        )
+
+        green_interest = ue_data["Average Interest %"]
+        green_term_days = ltv_data["Average Term"]
+        green_loss = ltv_data["95th Percentile Losses"]
+        if pd.notna(green_term_days):
+            green_term_bucket = ltv_calculator_nearest_tenor(green_term_days / 30.4375)
+        else:
+            green_term_bucket = None
+
+        g1, g2, g3 = st.columns(3)
+        g1.metric("Weighted Avg. Gross Interest", fmt(green_interest))
+        g2.metric(
+            "Weighted Avg. Receivable Term",
+            f"{green_term_bucket} months" if green_term_bucket else "n/a",
+            help=f"Raw weighted average: {fmt(green_term_days, '{:,.1f} days')}, "
+                 "snapped to the nearest tenor bucket the workbook's dropdown allows.",
+        )
+        g3.metric("Loss Rate (95th %ile @ T+3)", fmt(green_loss))
+
+        st.markdown("---")
+        y1, y2, y3 = st.columns(3)
+        with y1:
+            calc_data_source = st.selectbox("Data Input Source", LTV_CALC_DATA_SOURCES, key="ltvcalc_data_source")
+            calc_country = st.selectbox("Alt Lender Country", LTV_CALC_COUNTRIES, key="ltvcalc_country")
+        with y2:
+            calc_macro_fx = st.selectbox("Macro FX Risk Rating", LTV_CALC_FX_RISK_RATINGS, key="ltvcalc_macro_fx")
+            calc_segmentation = st.selectbox("Segmentation", LTV_CALC_SEGMENTATIONS, key="ltvcalc_segmentation")
+        with y3:
+            calc_hedge_rate = st.number_input(
+                "Hedge Rate (0 if unhedged, else % OTM as a decimal)",
+                min_value=0.0, max_value=1.0, value=0.0, step=0.01, format="%.4f", key="ltvcalc_hedge_rate",
+            )
+            calc_rolled_hedge = st.selectbox("Rolled hedge?", LTV_CALC_HEDGE_TYPES, key="ltvcalc_rolled_hedge")
+
+        if pd.isna(green_interest) or pd.isna(green_loss) or green_term_bucket is None:
+            st.warning(
+                "Can't compute the LTV waterfall - one of the green inputs above is n/a for this portfolio."
+            )
+        else:
+            result = ltv_calculator_compute(
+                gross_interest=green_interest, term_months=green_term_bucket, loss_rate=green_loss,
+                country=calc_country, macro_fx_risk=calc_macro_fx, segmentation=calc_segmentation,
+                hedge_rate=calc_hedge_rate, rolled_hedge=calc_rolled_hedge, data_source=calc_data_source,
+            )
+            for note in result["notes"]:
+                st.info(note)
+
+            st.markdown("**FX Stress Build Up**")
+            f1, f2, f3, f4 = st.columns(4)
+            f1.metric("Historical FX Devaluation", fmt(result["historical_fx_deval"]))
+            f2.metric("Utilized Historical FX Deval", fmt(result["utilized_fx_deval"]))
+            f3.metric("Stress FX Devaluation", fmt(result["stress_fx_deval"]))
+            f4.metric("Base FX Deval", fmt(result["base_fx_deval"]))
+            f5, f6, f7 = st.columns(3)
+            f5.metric("FX Slippage Stress", fmt(result["fx_slippage"]))
+            f6.metric("Selected FX Deval (High)", fmt(result["selected_fx_deval_high"]))
+            f7.metric("Selected FX Deval (Low)", fmt(result["selected_fx_deval_low"]))
+
+            st.markdown("**Credit Stress Build Up**")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Stress Loss Rate", fmt(result["stress_loss_rate"]))
+            c2.metric("Minimum Stress Loss", fmt(result["minimum_stress_loss"]))
+            c3.metric("Selected Stress Loss", fmt(result["selected_stress_loss"]))
+
+            st.markdown("**LTGBV**")
+            l1, l2, l3 = st.columns(3)
+            l1.metric("No FX Adjustment", fmt(result["ltgbv_no_fx"]))
+            l2.metric("With FX Adjustment (High)", fmt(result["ltgbv_high"]))
+            l3.metric("With FX Adjustment (Low)", fmt(result["ltgbv_low"]))
+
+            st.markdown("**Advance on Principal (LTV)**")
+            v1, v2, v3 = st.columns(3)
+            v1.metric("No FX Adjustment", fmt(result["ltv_no_fx"]))
+            v2.metric("With FX Adjustment (High)", fmt(result["ltv_high"]))
+            v3.metric("With FX Adjustment (Low)", fmt(result["ltv_low"]))
+            st.caption("Both LTGBV and LTV limits must be complied with (source: Receivables sheet, cell C44).")
 
 else:
     with tabs[4]:
