@@ -1418,11 +1418,19 @@ with tabs[0]:
                                     f"{r['Likely Contributing Factor(s)']}"
                                     for _, r in detail.iterrows()
                                 ]
-                                fb_form_version = st.session_state.get("fb_form_version", 0)
-                                st.session_state[f"fb_text_{fb_form_version}"] = (
+                                # The feedback text_area widget (key f"fb_text_{fb_form_version}")
+                                # is instantiated earlier in this same script run (in the
+                                # popover near the top of the page), so its session_state
+                                # key can no longer be written here - Streamlit raises
+                                # StreamlitAPIException if you try. Bump to a fresh,
+                                # not-yet-instantiated version instead, matching the pattern
+                                # the "clear after send" flow already uses.
+                                next_version = st.session_state.get("fb_form_version", 0) + 1
+                                st.session_state[f"fb_text_{next_version}"] = (
                                     "Unexplained variance flagged in Lending screening "
                                     "analysis:\n" + "\n".join(lines)
                                 )
+                                st.session_state["fb_form_version"] = next_version
                                 st.session_state["dq_just_escalated"] = True
                                 st.rerun()
         else:
