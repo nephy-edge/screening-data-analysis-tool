@@ -768,6 +768,133 @@ def _suggest_escalation_writeup(filename: str, facts: list) -> dict:
     return result
 
 
+def _render_variance_escalation(
+    detail: "pd.DataFrame", metric_label: str, model_name: str, button_key: str,
+    uploaded_name: str,
+) -> None:
+    """Shared by the Lending and Rental & Subscription unexplained-variance
+    checks: renders the "escalate to analytics" button, drafts an AI write-up
+    from the flagged cohort facts (falling back to a plain summary if the AI
+    call fails), and sends it to the existing Slack feedback webhook.
+    `detail` must have columns Cohort, <metric_label>, 'Swing vs Prior Cohort
+    (pp)', 'Likely Contributing Factor(s)'."""
+    if st.session_state.pop("dq_just_escalated", False):
+        ai_warning = st.session_state.pop("dq_escalate_ai_warning", None)
+        if ai_warning:
+            st.warning(
+                f"AI write-up unavailable ({ai_warning}); sent a plain summary instead."
+            )
+        else:
+            st.success("Sent to analytics.")
+    if st.button("Escalate flagged cohorts to analytics", key=button_key):
+        lines = [
+            f"- {r['Cohort']}: {r[metric_label]}% "
+            f"({r['Swing vs Prior Cohort (pp)']:+.1f}pp swing) - "
+            f"{r['Likely Contributing Factor(s)']}"
+            for _, r in detail.iterrows()
+        ]
+        borrower_name, message, ai_warning = None, None, None
+        try:
+            with st.spinner("Drafting the escalation with AI..."):
+                ai = _suggest_escalation_writeup(uploaded_name, lines)
+            borrower_name = ai.get("borrower_name")
+            message = ai.get("message")
+        except Exception as e:
+            ai_warning = str(e)
+        if not message:
+            message = (
+                f"Unexplained variance flagged in {model_name} screening "
+                "analysis:\n" + "\n".join(lines)
+            )
+        ok, err = _send_slack_feedback(message, borrower_name or model_name)
+        if ok:
+            if ai_warning:
+                st.session_state["dq_escalate_ai_warning"] = ai_warning
+            st.session_state["dq_just_escalated"] = True
+            st.rerun()
+        else:
+            st.error(f"Could not escalate: {err}")
+
+
+def _rental_data_quality_checks(cohorts: "pd.DataFrame") -> list:
+    """Step 4 anomaly diagnostics for Rental & Subscription, mirroring the
+    Lending unexplained-variance check: flags cohort-to-cohort churn-rate
+    swings above 5 percentage points, with likely contributing factors
+    diagnosed from signals already in the lease_cohorts table (small
+    active-lease sample size, active-lease-count swings, average-lease-value
+    shifts, PvD shifts)."""
+    checks: list = []
+    if cohorts is None or "churn_rate" not in cohorts.columns:
+        return checks
+
+    by_month = cohorts.dropna(subset=["churn_rate"]).sort_values("cohort")
+    deltas = by_month["churn_rate"].diff()
+    flagged = by_month.loc[deltas.abs() > 0.05]
+    if flagged.empty:
+        return checks
+
+    flagged_deltas = deltas.loc[flagged.index]
+    active_pct = by_month["active_leases_in_month"].pct_change().loc[flagged.index]
+    avg_lease_value = by_month["value_of_leases"] / by_month["new_leases"].where(
+        by_month["new_leases"] > 0
+    )
+    avg_lease_value_pct = avg_lease_value.pct_change().loc[flagged.index]
+    pvd_delta = (
+        by_month["pvd"].diff().loc[flagged.index] if "pvd" in by_month.columns else None
+    )
+
+    def _diagnose(idx):
+        causes = []
+        active = flagged.loc[idx, "active_leases_in_month"]
+        if pd.notna(active) and active < 10:
+            causes.append(
+                f"small active-lease sample ({int(active)} contracts) - swing may be noise"
+            )
+        ap = active_pct.loc[idx]
+        if pd.notna(ap) and abs(ap) > 0.5:
+            causes.append(
+                f"active leases {'dropped' if ap < 0 else 'grew'} {abs(ap):.0%} vs "
+                "prior cohort - check for missing loads or a status-mapping issue"
+            )
+        alv = avg_lease_value_pct.loc[idx]
+        if pd.notna(alv) and abs(alv) > 0.5:
+            causes.append(
+                f"average lease value {'dropped' if alv < 0 else 'grew'} {abs(alv):.0%} "
+                "vs prior cohort - possible portfolio mix change"
+            )
+        if pvd_delta is not None:
+            pvd = pvd_delta.loc[idx]
+            if pd.notna(pvd) and abs(pvd) > 0.10:
+                causes.append(
+                    f"PvD ratio shifted {pvd * 100:+.0f}pp vs prior cohort - "
+                    "possible collections/servicing change"
+                )
+        return "; ".join(causes) if causes else (
+            "No obvious data-driven cause - likely a genuine portfolio "
+            "event, escalate to Borrower"
+        )
+
+    detail = pd.DataFrame({
+        "Cohort": pd.to_datetime(flagged["cohort"]).dt.strftime("%b %Y"),
+        "Churn Rate (%)": (flagged["churn_rate"] * 100).round(1).values,
+        "Swing vs Prior Cohort (pp)": (flagged_deltas * 100).round(1).values,
+        "Likely Contributing Factor(s)": [_diagnose(i) for i in flagged.index],
+    })
+    checks.append({
+        "level": "warning",
+        "check_id": "unexplained_variance",
+        "message": (
+            f"**Unexplained variance** - {len(detail)} cohort(s) show a churn-rate "
+            "swing of more than 5 percentage points versus the prior cohort. Likely "
+            "contributing factors are diagnosed below from active-lease-count, "
+            "sample-size, and lease-value signals already in the data - verify "
+            "before relying on these cohorts."
+        ),
+        "detail": detail,
+    })
+    return checks
+
+
 def _add_reference_line(chart, value, label, color="#d62728", x_anchor=None):
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return chart
@@ -1380,6 +1507,7 @@ if not is_lending and fallback_notes:
             st.write("-", note)
 
 dq_checks = _lending_data_quality_checks(raw, cohorts) if is_lending else []
+dq_checks_rental = _rental_data_quality_checks(cohorts) if not is_lending else []
 
 active_questions = LENDING_QUESTIONS if is_lending else QUESTIONS
 
@@ -1452,48 +1580,10 @@ with tabs[0]:
                     else:
                         st.dataframe(detail, width="stretch", hide_index=True)
                         if check.get("check_id") == "unexplained_variance":
-                            if st.session_state.pop("dq_just_escalated", False):
-                                ai_warning = st.session_state.pop("dq_escalate_ai_warning", None)
-                                if ai_warning:
-                                    st.warning(
-                                        f"AI write-up unavailable ({ai_warning}); "
-                                        "sent a plain summary instead."
-                                    )
-                                else:
-                                    st.success("Sent to analytics.")
-                            if st.button(
-                                "Escalate flagged cohorts to analytics",
-                                key="escalate_variance",
-                            ):
-                                lines = [
-                                    f"- {r['Cohort']}: {r['Loss Rate (%)']}% loss "
-                                    f"({r['Swing vs Prior Cohort (pp)']:+.1f}pp swing) - "
-                                    f"{r['Likely Contributing Factor(s)']}"
-                                    for _, r in detail.iterrows()
-                                ]
-                                borrower_name, message, ai_warning = None, None, None
-                                try:
-                                    with st.spinner("Drafting the escalation with AI..."):
-                                        ai = _suggest_escalation_writeup(uploaded.name, lines)
-                                    borrower_name = ai.get("borrower_name")
-                                    message = ai.get("message")
-                                except Exception as e:
-                                    ai_warning = str(e)
-                                if not message:
-                                    message = (
-                                        "Unexplained variance flagged in Lending "
-                                        "screening analysis:\n" + "\n".join(lines)
-                                    )
-                                ok, err = _send_slack_feedback(
-                                    message, borrower_name or MODEL_LABELS[model_key]
-                                )
-                                if ok:
-                                    if ai_warning:
-                                        st.session_state["dq_escalate_ai_warning"] = ai_warning
-                                    st.session_state["dq_just_escalated"] = True
-                                    st.rerun()
-                                else:
-                                    st.error(f"Could not escalate: {err}")
+                            _render_variance_escalation(
+                                detail, "Loss Rate (%)", MODEL_LABELS[model_key],
+                                "escalate_variance", uploaded.name,
+                            )
         else:
             st.success("No data quality issues flagged.")
     else:
@@ -1528,6 +1618,22 @@ with tabs[0]:
         y1.metric("Loss (non-recoverability)", fmt(ltv_data["loss_non_recoverability"]))
         y2.metric("MRR / average cost", fmt(ltv_data["mrr_over_avg_cost"], "{:.2%}"))
         y3.metric("Average Collection Rate", fmt(ltv_data["avg_collection_rate"]))
+
+        st.markdown("---")
+        st.subheader("Data Quality Checks")
+        if dq_checks_rental:
+            for check in dq_checks_rental:
+                (st.warning if check["level"] == "warning" else st.info)(check["message"])
+                detail = check.get("detail")
+                if detail is not None:
+                    st.dataframe(detail, width="stretch", hide_index=True)
+                    if check.get("check_id") == "unexplained_variance":
+                        _render_variance_escalation(
+                            detail, "Churn Rate (%)", MODEL_LABELS[model_key],
+                            "escalate_variance_rental", uploaded.name,
+                        )
+        else:
+            st.success("No data quality issues flagged.")
 
 with tabs[1]:
     st.subheader("General Inputs")
