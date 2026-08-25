@@ -302,6 +302,73 @@ def _validate_mapping(
     return errors, warnings
 
 
+def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> list[tuple[str, str]]:
+    """Rules-engine checks from the screening briefing (Lending model only):
+    duplicate loan IDs, field completion below 80%, portfolio size above
+    5,000 rows, history below 12 months, and cohort-to-cohort loss-rate
+    swings above 5 percentage points."""
+    checks: list[tuple[str, str]] = []
+
+    if "Loan ID" in raw.columns:
+        dup_mask = raw["Loan ID"].notna() & raw["Loan ID"].duplicated(keep=False)
+        if dup_mask.any():
+            checks.append((
+                "warning",
+                f"**Duplicate Loan IDs** - {raw.loc[dup_mask, 'Loan ID'].nunique()} "
+                f"loan ID(s) appear more than once ({int(dup_mask.sum())} rows). "
+                "Confirm with the borrower whether these are genuine duplicates."
+            ))
+
+    low_completion = [
+        f"{target} ({raw[target].notna().mean():.0%})"
+        for target, _ in LENDING_CONFIG["input_columns"]
+        if target in raw.columns and raw[target].notna().mean() < 0.80
+    ]
+    if low_completion:
+        checks.append((
+            "warning",
+            "**Field completion below 80%** - " + ", ".join(low_completion) + ". "
+            "Loans missing these fields may distort downstream metrics."
+        ))
+
+    if len(raw) > 5000:
+        checks.append((
+            "info",
+            f"**Large portfolio** - {len(raw):,} rows exceeds the 5,000-row "
+            "screening threshold; a sampled or ad-hoc review may scale better "
+            "than the standard template flow."
+        ))
+
+    if "Disbursement Date" in raw.columns and raw["Disbursement Date"].notna().any():
+        span_days = (raw["Disbursement Date"].max() - raw["Disbursement Date"].min()).days
+        if span_days < 365:
+            checks.append((
+                "warning",
+                f"**Limited history** - disbursement dates span only "
+                f"{span_days / 30:.1f} months, below the 12-month screening "
+                "threshold; loss-rate percentiles may be unreliable."
+            ))
+
+    if cohorts is not None and "Loss Rate" in cohorts.columns:
+        by_month = cohorts.dropna(subset=["Loss Rate"]).sort_values("Cohort")
+        deltas = by_month["Loss Rate"].diff().abs()
+        flagged = by_month.loc[deltas > 0.05]
+        if not flagged.empty:
+            examples = ", ".join(
+                f"{c.strftime('%b %Y')} ({lr:.1%})"
+                for c, lr in zip(flagged["Cohort"], flagged["Loss Rate"])
+            )
+            checks.append((
+                "warning",
+                "**Unexplained variance** - cohort-to-cohort loss rate moves by "
+                f"more than 5 percentage points for: {examples}. Investigate "
+                "before relying on these cohorts (data drift, missing loads, "
+                "definition changes)."
+            ))
+
+    return checks
+
+
 def fmt(value, spec="{:.1%}"):
     return spec.format(value) if pd.notna(value) else "n/a"
 
@@ -1191,6 +1258,15 @@ if not is_lending and fallback_notes:
     with st.expander(f"Data quality: {len(fallback_notes)} fallback rule(s) applied"):
         for note in fallback_notes:
             st.write("-", note)
+
+if is_lending:
+    st.subheader("Data Quality Checks")
+    dq_checks = _lending_data_quality_checks(raw, cohorts)
+    if dq_checks:
+        for level, msg in dq_checks:
+            (st.warning if level == "warning" else st.info)(msg)
+    else:
+        st.success("No data quality issues flagged.")
 
 active_questions = LENDING_QUESTIONS if is_lending else QUESTIONS
 
