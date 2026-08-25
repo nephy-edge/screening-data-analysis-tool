@@ -1197,6 +1197,9 @@ mapping_warnings = st.session_state.get("analysis_mapping_warnings") or []
 if mapping_warnings:
     st.warning("Mapping quality warnings:\n\n" + "\n".join(f"- {w}" for w in mapping_warnings))
 
+if is_lending and st.session_state.get("dedupe_loan_ids") and "Loan ID" in raw.columns:
+    raw = raw.drop_duplicates(subset="Loan ID", keep="first")
+
 if active_cfg["needs_status_map"]:
     raw_statuses = sorted(raw["status"].dropna().unique().tolist(), key=str)
     status_key = _cache_key(raw_statuses)
@@ -1333,6 +1336,11 @@ with tabs[0]:
                 if check.get("detail") is not None:
                     with st.expander(f"View {len(check['detail'])} duplicate row(s)"):
                         st.dataframe(check["detail"], width="stretch")
+                        st.checkbox(
+                            "Deduplicate: keep only the first row for each duplicated "
+                            "Loan ID, then re-run analysis",
+                            key="dedupe_loan_ids",
+                        )
         else:
             st.success("No data quality issues flagged.")
     else:
