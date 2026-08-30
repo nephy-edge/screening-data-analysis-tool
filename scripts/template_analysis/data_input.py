@@ -78,9 +78,16 @@ def process_data_input(df: pd.DataFrame, extraction_date, days_after_term=90):
         result["Disbursement Date"].dt.to_period("M").dt.start_time
     )
 
-    result["Term (days)"] = (
-        result["Expected Completion Date"] - result["Disbursement Date"]
-    ).dt.days
+    if "Term (days)" in result.columns:
+        # A real per-loan tenor supplied directly by the source file - some
+        # deals only ever record a completed/not-completed flag rather than
+        # a true completion date, making the subtraction below meaningless.
+        # Trust the given values over deriving anything from dates.
+        result["Term (days)"] = pd.to_numeric(result["Term (days)"], errors="coerce")
+    else:
+        result["Term (days)"] = (
+            result["Expected Completion Date"] - result["Disbursement Date"]
+        ).dt.days
 
     computed = _compute_total_due(result, extraction_date)
     if computed is not None:

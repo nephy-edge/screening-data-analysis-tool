@@ -148,11 +148,18 @@ div[data-testid="stNumberInputStepUp"] svg, div[data-testid="stNumberInputStepDo
 .stDataFrame, div[data-testid="stTable"]{
     border:1px solid #D8DEE5 !important;border-radius:7px !important;overflow:hidden !important;
 }
-.stDataFrame thead th, div[data-testid="stTable"] thead th, .stDataFrame th, div[data-testid="stTable"] th{
+.stDataFrame thead th, div[data-testid="stTable"] thead th{
     background:#155B54 !important;color:#ffffff !important;
     font-size:.62rem !important;text-transform:uppercase !important;letter-spacing:.06em !important;
     font-weight:600 !important;font-family:"Inter",sans-serif !important;
     padding:9px 10px !important;border-bottom:1px solid #155B54 !important;
+}
+div[data-testid="stTable"] thead th *,
+div[data-testid="stTable"] thead th * *,
+div[data-testid="stTable"] thead [data-testid="stMarkdownContainer"],
+div[data-testid="stTable"] thead [data-testid="stMarkdownContainer"] *,
+.stDataFrame thead th *{
+    color:#ffffff !important;
 }
 .stDataFrame tbody td, div[data-testid="stTable"] tbody td, .stDataFrame td, div[data-testid="stTable"] td{
     font-family:"Inter",sans-serif !important;font-size:.8rem !important;

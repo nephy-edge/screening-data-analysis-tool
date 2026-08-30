@@ -3,7 +3,10 @@ import pandas as pd
 
 class GeneralInputs:
     def __init__(self, df: pd.DataFrame, **overrides):
-        self.extraction_date = overrides.get("extraction_date", df["Disbursement Date"].max())
+        self.extraction_date = (
+            overrides["extraction_date"] if "extraction_date" in overrides
+            else df["Disbursement Date"].max()
+        )
         self.days_after_term = overrides.get("days_after_term", 90)
         self.min_loans_per_cohort = overrides.get("min_loans_per_cohort", 10)
 

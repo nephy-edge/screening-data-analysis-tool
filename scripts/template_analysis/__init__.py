@@ -6,3 +6,4 @@ from .cohorts_for_x_or_more_loans import filter_cohorts
 from .ltv_analysis import LtvAnalysis
 from .ue_analysis import UeAnalysis
 from .general_analysis import describe as general_analysis
+from .apr import compute_loan_rates, principal_weighted_average_rates

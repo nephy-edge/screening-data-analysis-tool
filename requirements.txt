@@ -4,6 +4,8 @@ pandas==3.0.5
 numpy==2.4.6
 openpyxl==3.1.5
 altair==6.2.2
+streamlit-aggrid==1.2.1.post2
+numpy-financial==1.0.0
 requests==2.34.2
 certifi==2026.7.22
 python-dotenv==1.1.1

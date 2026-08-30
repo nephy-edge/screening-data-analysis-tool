@@ -40,7 +40,7 @@ def run(loan_csv_path):
     print("=" * 60)
     print("COHORTS")
     print("=" * 60)
-    cohorts = build_cohorts(df)
+    cohorts = build_cohorts(df, min_matured=gi.min_loans_per_cohort)
     print(f"  Total cohorts: {len(cohorts)}")
     print(f"  Avg loss rate (matured): {cohorts['Loss Rate'].mean():.4%}")
     print()
