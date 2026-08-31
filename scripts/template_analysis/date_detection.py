@@ -55,7 +55,7 @@ def detect_date(series) -> pd.Series:
 
     dayfirst = infer_dayfirst(orig)
     if dayfirst is not None:
-        parsed = pd.to_datetime(orig, errors="coerce", dayfirst=dayfirst)
+        parsed = _parse_mixed(orig, dayfirst=dayfirst)
         return parsed if parsed.notna().any() else orig
 
     # No unambiguous row anywhere to learn the format from - fall back to
@@ -64,11 +64,27 @@ def detect_date(series) -> pd.Series:
     # ever applies to columns with no day/month >12 anywhere in them.
     best, best_n = None, -1
     for kwargs in ({}, {"dayfirst": True}, {"yearfirst": True}):
-        p = pd.to_datetime(orig, errors="coerce", **kwargs)
+        p = _parse_mixed(orig, **kwargs)
         n = int(p.notna().sum())
         if n > best_n:
             best_n, best = n, p
     return best if best_n > 0 else orig
+
+
+def _parse_mixed(series, **kwargs) -> pd.Series:
+    """pd.to_datetime with a fixed dayfirst/yearfirst hint infers ONE format
+    from the column and applies it to every row - when a column genuinely
+    mixes formats (e.g. "11/28/2024" alongside "2024-08-11 00:00:00", seen
+    on real Rental & Subscription files), every row in the other format
+    silently becomes NaT instead of falling back to per-row parsing.
+    format="mixed" parses each element independently, so it self-selects the
+    single-format fast path may have missed. Falls back to the single-format
+    parse if "mixed" itself errors (e.g. an already-mixed datetime/text
+    column, handled separately by mixed_parsed_and_text_warning)."""
+    try:
+        return pd.to_datetime(series, errors="coerce", format="mixed", **kwargs)
+    except (ValueError, TypeError):
+        return pd.to_datetime(series, errors="coerce", **kwargs)
 
 
 def mixed_parsed_and_text_warning(series, field_name: str) -> str | None:

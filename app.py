@@ -18,9 +18,12 @@ import io
 import json
 import os
 import re
+import secrets
 import sys
 import tempfile
+import time
 from datetime import datetime as _dt
+from urllib.parse import quote
 
 import altair as alt
 import certifi
@@ -165,7 +168,8 @@ if st.session_state.get("_active_model") != model_key:
     st.session_state["_active_model"] = model_key
     for k in ("uploaded_file_id", "analysis_ran", "analysis_mapping", "analysis_mapping_warnings",
               "analysis_gi_overrides", "derived_columns", "dc_ai_suggestion",
-              "custom_chart_cards", "custom_chart_next_id", "export_charts"):
+              "custom_chart_cards", "custom_chart_next_id", "export_charts",
+              "context_files", "context_documents", "context_doc_ids"):
         st.session_state.pop(k, None)
 is_lending = model_key == "lending"
 
@@ -269,6 +273,116 @@ def _invalidate_ai_mapping_guesses() -> None:
     for k in list(st.session_state):
         if k.startswith("ai_mapping_guess_"):
             st.session_state.pop(k, None)
+
+
+def _read_uploaded_bytes(uploaded) -> bytes:
+    try:
+        return uploaded.getvalue()
+    except AttributeError:
+        uploaded.seek(0)
+        return uploaded.read()
+
+
+def _extract_pdf_text(data: bytes) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        raise RuntimeError("PDF support requires the 'pypdf' package (pip install pypdf).")
+    reader = PdfReader(io.BytesIO(data))
+    parts = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        if text.strip():
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def _extract_excel_text(data: bytes) -> str:
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    lines = []
+    try:
+        for ws in wb.worksheets:
+            lines.append(f"=== Sheet: {ws.title} ===")
+            for n, row in enumerate(ws.iter_rows(values_only=True), 1):
+                vals = [str(v) for v in row if v is not None]
+                if vals:
+                    lines.append(" | ".join(vals))
+                if n >= 2000:
+                    lines.append("...[sheet truncated at 2000 rows]")
+                    break
+    finally:
+        wb.close()
+    return "\n".join(lines)
+
+
+def _extract_docx_text(data: bytes) -> str:
+    try:
+        from docx import Document
+    except ImportError:
+        raise RuntimeError("Word support requires the 'python-docx' package (pip install python-docx).")
+    doc = Document(io.BytesIO(data))
+    parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+    for table in doc.tables:
+        for row in table.rows:
+            parts.append(" | ".join(c.text.strip() for c in row.cells))
+    return "\n".join(parts)
+
+
+def _extract_text_file(data: bytes) -> str:
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _extract_document_text(uploaded) -> dict:
+    """Extract readable text from an uploaded document so it can be included in
+    AI context. Returns {"name", "text", "error"}; a missing/unsupported parser
+    or a parse failure surfaces as an "error" note instead of breaking upload."""
+    name = uploaded.name or "document"
+    suffix = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    data = _read_uploaded_bytes(uploaded)
+    try:
+        if suffix == "pdf":
+            text = _extract_pdf_text(data)
+        elif suffix in ("xlsx", "xlsm"):
+            text = _extract_excel_text(data)
+        elif suffix == "docx":
+            text = _extract_docx_text(data)
+        elif suffix in ("txt", "csv", "md", "json", "log"):
+            text = _extract_text_file(data)
+        else:
+            return {"name": name, "text": "", "error": f"Unsupported file type '.{suffix}' - use PDF, Excel, Word (.docx), or text files."}
+    except Exception as e:
+        return {"name": name, "text": "", "error": str(e)}
+    return {"name": name, "text": text, "error": None}
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n...[truncated, {len(text) - limit:,} chars omitted]"
+
+
+def _ai_context_text(max_chars: int = 60000, per_doc: int = 15000) -> str:
+    """Combine the user's free-text notes with text extracted from uploaded
+    documents into one prompt block, truncated to keep AI calls bounded."""
+    parts = []
+    notes = st.session_state.get("analysis_context", "").strip()
+    if notes:
+        parts.append("## Additional context notes\n" + notes)
+    for doc in st.session_state.get("context_documents", []):
+        if doc.get("error"):
+            parts.append(f"## Uploaded document: {doc['name']}\n[Could not be used: {doc['error']}]")
+        else:
+            parts.append(
+                f"## Uploaded document: {doc['name']}\n" + _truncate_text(doc["text"], per_doc)
+            )
+    text = "\n\n".join(parts)
+    return _truncate_text(text, max_chars) if len(text) > max_chars else text
 
 
 def _load_cache(path, key) -> dict | None:
@@ -479,6 +593,50 @@ def _lending_variance_check(cohorts: pd.DataFrame) -> list[dict]:
     return checks
 
 
+def _negative_loss_rate_check(cohorts: pd.DataFrame) -> list[dict]:
+    """Flags any cohort whose Loss Rate came out negative - i.e. Total Paid
+    exceeded Principal+Interest+Fee for that cohort's matured loans. This can
+    be legitimate (late fees/penalty interest collected but never added to
+    the "owed" side) or a real data issue (refinanced/rolled-over principal
+    double-counted in Total Paid, a scale/currency mismatch, a sign error
+    upstream) - the detail table below shows the exact owed/paid components
+    behind the number so either can be traced by hand, the same way the
+    Loss Rate is actually computed in cohorts.py, rather than just asserting
+    something looks wrong."""
+    checks: list[dict] = []
+    if cohorts is None or cohorts.empty or "Loss Rate" not in cohorts.columns:
+        return checks
+    flagged = cohorts[cohorts["Loss Rate"] < 0].sort_values("Cohort")
+    if flagged.empty:
+        return checks
+
+    owed = flagged["Total Principal"] + flagged["Total Interest"] + flagged["Total Fee"]
+    detail = pd.DataFrame({
+        "Cohort": flagged["Cohort"].dt.strftime("%b %Y"),
+        "Matured Count": flagged["Matured Count"].values,
+        "Loss Rate (%)": (flagged["Loss Rate"] * 100).round(2).values,
+        "Owed = Principal+Interest+Fee": owed.round(2).values,
+        "Total Paid": flagged["Total Paid"].round(2).values,
+        "Excess Collected (Paid - Owed)": (flagged["Total Paid"] - owed).round(2).values,
+    })
+    checks.append({
+        "level": "warning",
+        "check_id": "negative_loss_rate",
+        "message": (
+            f"**Negative Loss Rate** - {len(detail)} cohort(s) show Total Paid exceeding "
+            "Principal+Interest+Fee for their matured loans, i.e. a negative loss. This can "
+            "be legitimate (late fees or penalty interest collected but never added to the "
+            "\"owed\" side of the formula) or a real data issue (refinanced/rolled-over loans "
+            "double-counting principal in Total Paid, a scale or currency mismatch, or a sign "
+            "error upstream) - the owed/paid components below are the exact figures the Loss "
+            "Rate is computed from, so the cause can be traced directly rather than guessed at."
+        ),
+        "detail": detail,
+        "detail_expander": f"View {len(detail)} negative-loss cohort(s)",
+    })
+    return checks
+
+
 def _cohort_coverage_note(cohorts: pd.DataFrame) -> list[dict]:
     """Surfaces the exact date range and month count behind the cohort-level
     metrics, so a mismatch against a previously-downloaded Excel/Google
@@ -512,14 +670,81 @@ def _cohort_coverage_note(cohorts: pd.DataFrame) -> list[dict]:
     return checks
 
 
-def _lending_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> list[dict]:
+def _cohort_threshold_check(gi, cohorts: pd.DataFrame, filtered: pd.DataFrame) -> list[dict]:
+    """Flags when 'Minimum loans per cohort' excludes most of this file's own
+    cohorts. That threshold is a per-deal assumption baked into each Excel
+    copy of the template (confirmed to vary: GoCab/Subbyx use 20, Ennoo/SME
+    Go Rental use 1) - the app has no way to read the "right" value for a
+    given file from its data alone, so a mismatch here is silent: cohorts
+    keep rendering, just built from far fewer loans than the real template
+    would have used. This can't fix that, only make the mismatch visible."""
+    checks: list[dict] = []
+    if cohorts is None or cohorts.empty:
+        return checks
+    total = len(cohorts)
+    kept = len(filtered) if filtered is not None else 0
+    if total >= 3 and kept / total < 0.5:
+        checks.append({
+            "level": "warning",
+            "check_id": "min_loans_per_cohort_too_high",
+            "message": (
+                f"**Minimum loans per cohort ({gi.min_loans_per_cohort}) may not fit this file** - "
+                f"only {kept} of {total} cohorts meet it. This threshold is a per-deal assumption "
+                "that varies between real files (seen as low as 1, as high as 20) and isn't "
+                "derivable from the uploaded data - if this file's real threshold is lower, "
+                "loss/churn-rate percentiles are being computed from a small, filtered slice of "
+                "the portfolio. Check the file's own General Inputs value if you have it, or "
+                "lower the number in the form above and re-run."
+            ),
+        })
+    return checks
+
+
+def _useful_life_sanity_check(gi, ue_data: dict) -> list[dict]:
+    """Flags when 'Useful life of asset (years)' looks far off from this
+    file's own average lease tenor. Also a per-deal Excel assumption
+    (confirmed to range 3-5+ years across real files) that can't be inferred
+    automatically - a mismatch distorts the repayment curve's cohort buckets
+    and everything computed from it (LTV, UE), silently."""
+    checks: list[dict] = []
+    tenor_m = (ue_data or {}).get("lease_tenor_m")
+    if tenor_m is None or pd.isna(tenor_m) or tenor_m <= 0:
+        return checks
+    if not gi.useful_life_years or gi.useful_life_years <= 0:
+        return checks
+    tenor_years = tenor_m / 12
+    ratio = tenor_years / gi.useful_life_years
+    if ratio < 0.5 or ratio > 2.0:
+        checks.append({
+            "level": "warning",
+            "check_id": "useful_life_mismatch",
+            "message": (
+                f"**Useful life of asset ({gi.useful_life_years:.1f}yr) looks far from this "
+                f"file's own average lease tenor ({tenor_years:.1f}yr)** - this is a per-deal "
+                "Excel assumption (real files range from 3 to 5+ years), not something derived "
+                "from the data. A mismatch here distorts the repayment curve's cohort buckets and "
+                "the LTV/Unit Economics figures built on top of it. Confirm the intended asset "
+                "life for this deal and adjust it in the General Inputs form above if needed."
+            ),
+        })
+    return checks
+
+
+def _lending_data_quality_checks(
+    raw: pd.DataFrame, cohorts: pd.DataFrame, gi=None, filtered: pd.DataFrame = None
+) -> list[dict]:
     """Lending: Step 2 checks (shared) + Step 4 loss-rate variance diagnosis
-    + cohort-coverage note."""
-    return (
+    + negative-loss-rate flag + cohort-coverage note + General Inputs
+    sanity check (min loans/cohort vs this file's own cohort count)."""
+    checks = (
         _step2_data_quality_checks(raw, LENDING_CONFIG)
         + _lending_variance_check(cohorts)
+        + _negative_loss_rate_check(cohorts)
         + _cohort_coverage_note(cohorts)
     )
+    if gi is not None and filtered is not None:
+        checks += _cohort_threshold_check(gi, cohorts, filtered)
+    return checks
 
 
 def fmt(value, spec="{:.1%}"):
@@ -608,27 +833,6 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
     implied_interest = rates["APR"]
     term_m = ue_data["Average Expected Term"] / 30.4375
 
-    _ue_model_badge("Auto-calculated from your data", "#2ca02c", "#fff")
-    _render_snapshot_table([
-        ("Revenue (interest)", f"${revenue:,.0f}", "Total expected interest income across all loans."),
-        ("Origination Income", f"${origination_income:,.0f}", "Total expected fee income across all loans."),
-        ("Implied Interest (annualized)", fmt(implied_interest),
-         "Nominal APR: principal-weighted average implied rate, same figure as the Cohorts Stats tab."),
-        ("Interest Rate (m)", fmt(implied_interest / 12), "Implied interest divided by 12."),
-        ("Losses", f"${losses_dollar:,.0f}" if pd.notna(losses_dollar) else "n/a",
-         "Owed - paid across matured loans (Reached T+3? = True)."),
-        ("Losses (% of GBV)", fmt(losses_pct_of_gbv),
-         "Losses in dollars divided by total Principal Value disbursed across the whole book - a "
-         "literal % of GBV (not the Summary tab's Loss Rate, which divides by matured owed instead "
-         "and is scoped to a much smaller base)."),
-        ("Term (m)", fmt(term_m, "{:,.1f}"), "Principal-weighted average term, in months."),
-    ])
-    st.caption(
-        f"{len(matured):,} of {len(df):,} loans have matured (Reached T+3? = True), "
-        f"{matured_principal / principal:.1%} of GBV" if principal else "No loans in view."
-    )
-
-    st.markdown("")
     _ue_model_badge("Manual inputs (not in a loan tape)", "#f5d90a", "#16312E")
     st.caption(
         "The master workbook needs these to complete the Unit Economics picture, but they're cost "
@@ -686,6 +890,27 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
         variable_costs_dollar = float("nan")
         product_contribution = product_margin = float("nan")
         net_ue_simple = float("nan")
+
+    st.markdown("")
+    _ue_model_badge("Auto-calculated from your data", "#2ca02c", "#fff")
+    _render_snapshot_table([
+        ("Revenue (interest)", f"${revenue:,.0f}", "Total expected interest income across all loans."),
+        ("Origination Income", f"${origination_income:,.0f}", "Total expected fee income across all loans."),
+        ("Implied Interest (annualized)", fmt(implied_interest),
+         "Nominal APR: principal-weighted average implied rate, same figure as the Cohorts Stats tab."),
+        ("Interest Rate (m)", fmt(implied_interest / 12), "Implied interest divided by 12."),
+        ("Losses", f"${losses_dollar:,.0f}" if pd.notna(losses_dollar) else "n/a",
+         "Owed - paid across matured loans (Reached T+3? = True)."),
+        ("Losses (% of GBV)", fmt(losses_pct_of_gbv),
+         "Losses in dollars divided by total Principal Value disbursed across the whole book - a "
+         "literal % of GBV (not the Summary tab's Loss Rate, which divides by matured owed instead "
+         "and is scoped to a much smaller base)."),
+        ("Term (m)", fmt(term_m, "{:,.1f}"), "Principal-weighted average term, in months."),
+    ])
+    st.caption(
+        f"{len(matured):,} of {len(df):,} loans have matured (Reached T+3? = True), "
+        f"{matured_principal / principal:.1%} of GBV" if principal else "No loans in view."
+    )
 
     st.markdown("")
     _ue_model_badge("Derived - matured loans only (auto-calculated + manual inputs)", "#2ca02c", "#fff")
@@ -768,7 +993,7 @@ _FIELD_ALIASES = {
     "cost_of_asset": ["cost_of_asset", "cost of asset", "asset cost", "purchase price", "cost of the asset"],
     "expected_end_date": ["expected_end_date", "expected end date", "maturity date", "end date"],
     "closed_date": ["closed_date", "closed date", "close date", "cancellation date"],
-    "asset_recovery_date": ["asset_recovery_date", "asset recovery date", "recovery date"],
+    "asset_recovery_date": ["asset_recovery_date", "asset recovery date"],
     "total_contract_value": ["total_contract_value", "total contract value", "contract value"],
     "amount_expected_to_date": ["amount_expected_to_date", "amount expected to date", "expected to date"],
     "current_asset_value": ["current_asset_value", "current asset value", "asset value", "current value"],
@@ -776,7 +1001,7 @@ _FIELD_ALIASES = {
     "recovery_amount": ["recovery_amount", "recovery amount"],
 }
 
-_ALL_FIELDS = set(_FIELD_ALIASES.keys()) | {
+_LENDING_EXTRA_FIELDS = {
     "Begin Date", "Total Dues Calculated", "Delinquent Amount", "Write-off amount",
 }
 
@@ -815,8 +1040,13 @@ def _normalize_columns(raw: pd.DataFrame, fields) -> pd.DataFrame:
     return raw.rename(columns=rename)
 
 
-def _format_normalize(raw: pd.DataFrame, date_fields, numeric_fields) -> pd.DataFrame:
-    raw = _normalize_columns(raw, set(date_fields) | set(numeric_fields) | _ALL_FIELDS)
+def _format_normalize(raw: pd.DataFrame, date_fields, numeric_fields, model_fields=()) -> pd.DataFrame:
+    # model_fields must be scoped to the active model only (not the union of
+    # Lending + Rental canonical names) - several aliases collide across the
+    # two models (e.g. "status", "start date", "total paid"), and since the
+    # lookup table is built by iterating a set, an unscoped union would let
+    # the collision winner change randomly between process runs.
+    raw = _normalize_columns(raw, set(date_fields) | set(numeric_fields) | set(model_fields))
     for col in date_fields:
         if col in raw.columns and raw[col].dtype != "datetime64[ns]":
             raw[col] = _detect_date(raw[col])
@@ -1245,10 +1475,18 @@ def _rental_variance_check(cohorts: "pd.DataFrame") -> list:
     return checks
 
 
-def _rental_data_quality_checks(raw: pd.DataFrame, cohorts: pd.DataFrame) -> list:
+def _rental_data_quality_checks(
+    raw: pd.DataFrame, cohorts: pd.DataFrame, gi=None, filtered: pd.DataFrame = None, ue_data: dict = None
+) -> list:
     """Rental & Subscription: Step 2 checks (shared) + Step 4 churn-rate
-    variance diagnosis."""
-    return _step2_data_quality_checks(raw, RENTAL_CONFIG) + _rental_variance_check(cohorts)
+    variance diagnosis + General Inputs sanity checks (min loans/cohort and
+    useful life vs this file's own data)."""
+    checks = _step2_data_quality_checks(raw, RENTAL_CONFIG) + _rental_variance_check(cohorts)
+    if gi is not None and filtered is not None:
+        checks += _cohort_threshold_check(gi, cohorts, filtered)
+    if gi is not None and ue_data is not None:
+        checks += _useful_life_sanity_check(gi, ue_data)
+    return checks
 
 
 def _add_reference_line(chart, value, label, color="#d62728", x_anchor=None):
@@ -1744,6 +1982,331 @@ def _write_custom_charts_sheet(writer, export_charts):
         row = data_end + 3
 
 
+class _NamedBytes(io.BytesIO):
+    """Bytes with a filename, so _read_tabular_file's .name checks and
+    pd.read_csv / pd.ExcelFile work on remote downloads that aren't real
+    Streamlit UploadedFile objects."""
+
+    def __init__(self, data: bytes, name: str):
+        super().__init__(data)
+        self.name = name
+
+
+def _extract_google_id(url: str) -> str:
+    """Pull the document ID out of a Google Sheets or Google Drive share link."""
+    for pattern in (
+        r"/spreadsheets/d/([a-zA-Z0-9-_]+)",
+        r"drive\.google\.com/file/d/([a-zA-Z0-9-_]+)",
+    ):
+        m = re.search(pattern, url)
+        if m:
+            return m.group(1)
+    raise ValueError(
+        "That link doesn't look like a Google Sheets or Google Drive document - paste the "
+        "full share link (https://docs.google.com/spreadsheets/d/...)."
+    )
+
+
+def _download_google_sheet(url: str) -> tuple[bytes, str]:
+    """Download a Google Sheets / Google Drive document over HTTPS, returning
+    (bytes, suggested filename). The document must be shared with 'Anyone with
+    the link can view'; no Google API key is needed for public documents. A
+    Sheets link exports CSV (honouring a #gid= tab in the URL); a generic Drive
+    file link is fetched as-is and sniffed for CSV vs Excel."""
+    url = url.strip()
+    doc_id = _extract_google_id(url)
+    if "spreadsheets" in url:
+        export = f"https://docs.google.com/spreadsheets/d/{doc_id}/export?format=csv"
+        gid = re.search(r"[#&]gid=(\d+)", url)
+        if gid:
+            export += f"&gid={gid.group(1)}"
+        resp = requests.get(export, timeout=30, verify=_ca_bundle_path())
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Google returned HTTP {resp.status_code} - the sheet must be shared with "
+                "'Anyone with the link can view' (File > Share > General access)."
+            )
+        data = resp.content
+        if data.startswith(b"\xef\xbb\xbf"):
+            data = data[3:]
+        return data, "google_sheet.csv"
+    resp = requests.get(
+        f"https://drive.google.com/uc?export=download&id={doc_id}",
+        timeout=30, verify=_ca_bundle_path(),
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Google Drive returned HTTP {resp.status_code} - the file must be shared with "
+            "'Anyone with the link can view'."
+        )
+    data = resp.content
+    name = "google_file.xlsx" if data[:4] == b"PK\x03\x04" else "google_file.csv"
+    return data, name
+
+
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+# OAuth callback lands back on the app itself (the redirect URI registered in the
+# Google Cloud console) with ?code=...&state=... in the query string. For local
+# runs that's http://localhost:8501; override via GOOGLE_REDIRECT_URI for cloud.
+GDRIVE_TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".google_drive_token.json")
+
+
+def _get_google_client_id():
+    try:
+        return st.secrets.get("GOOGLE_CLIENT_ID")
+    except Exception:
+        return os.environ.get("GOOGLE_CLIENT_ID")
+
+
+def _get_google_client_secret():
+    try:
+        return st.secrets.get("GOOGLE_CLIENT_SECRET")
+    except Exception:
+        return os.environ.get("GOOGLE_CLIENT_SECRET")
+
+
+def _google_redirect_uri() -> str:
+    uri = None
+    try:
+        uri = st.secrets.get("GOOGLE_REDIRECT_URI")
+    except Exception:
+        pass
+    uri = uri or os.environ.get("GOOGLE_REDIRECT_URI")
+    return uri or "http://localhost:8501"
+
+
+def _load_gdrive_token_file() -> dict | None:
+    try:
+        with open(GDRIVE_TOKEN_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _save_gdrive_token_file(token: dict) -> None:
+    try:
+        with open(GDRIVE_TOKEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(token, f, indent=2)
+    except OSError:
+        pass
+
+
+def _google_auth_url(state: str) -> str:
+    return (
+        f"{GOOGLE_AUTH_URL}?client_id={quote(_get_google_client_id())}"
+        f"&redirect_uri={quote(_google_redirect_uri())}"
+        f"&response_type=code&scope={quote(GOOGLE_DRIVE_SCOPE)}"
+        f"&access_type=offline&prompt=consent&state={quote(state)}"
+    )
+
+
+def _exchange_google_code(code: str) -> dict:
+    resp = requests.post(
+        GOOGLE_TOKEN_URL,
+        data={
+            "code": code,
+            "client_id": _get_google_client_id(),
+            "client_secret": _get_google_client_secret(),
+            "redirect_uri": _google_redirect_uri(),
+            "grant_type": "authorization_code",
+        },
+        timeout=30,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    token = resp.json()
+    token["expires_at"] = time.time() + int(token.get("expires_in", 3600))
+    return token
+
+
+def _refresh_google_token(refresh_token: str) -> dict:
+    resp = requests.post(
+        GOOGLE_TOKEN_URL,
+        data={
+            "client_id": _get_google_client_id(),
+            "client_secret": _get_google_client_secret(),
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        },
+        timeout=30,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    token = resp.json()
+    token["expires_at"] = time.time() + int(token.get("expires_in", 3600))
+    return token
+
+
+def _gdrive_token() -> dict | None:
+    token = st.session_state.get("gdrive_token")
+    if not token:
+        token = _load_gdrive_token_file()
+        if token:
+            st.session_state["gdrive_token"] = token
+    return token
+
+
+def _gdrive_access_token(token: dict) -> str:
+    if (
+        time.time() >= token.get("expires_at", 0) - 60
+        and token.get("refresh_token")
+    ):
+        refreshed = _refresh_google_token(token["refresh_token"])
+        refreshed["refresh_token"] = token["refresh_token"]
+        st.session_state["gdrive_token"] = refreshed
+        _save_gdrive_token_file(refreshed)
+        return refreshed["access_token"]
+    return token["access_token"]
+
+
+def _list_drive_files(access_token: str) -> list[dict]:
+    query = (
+        "(mimeType='application/vnd.google-apps.spreadsheet' or "
+        "mimeType='text/csv' or "
+        "mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or "
+        "mimeType='application/vnd.ms-excel') and trashed=false"
+    )
+    resp = requests.get(
+        GOOGLE_DRIVE_FILES_URL,
+        params={
+            "q": query,
+            "pageSize": 200,
+            "fields": "files(id,name,mimeType,modifiedTime)",
+            "orderBy": "modifiedTime desc",
+        },
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    return resp.json().get("files", [])
+
+
+def _drive_mime_label(mime: str) -> str:
+    if mime == "application/vnd.google-apps.spreadsheet":
+        return "Google Sheet"
+    if mime == "text/csv":
+        return "CSV"
+    if mime in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    ):
+        return "Excel"
+    return mime.rsplit(".", 1)[-1]
+
+
+def _download_drive_file(access_token: str, drive_file: dict) -> tuple[bytes, str]:
+    """Download a Drive file (or export a Google Sheet as CSV), returning
+    (bytes, suggested filename)."""
+    mid = drive_file["mimeType"]
+    name = drive_file["name"]
+    if mid == "application/vnd.google-apps.spreadsheet":
+        url = f"{GOOGLE_DRIVE_FILES_URL}/{drive_file['id']}/export?mimeType=text/csv"
+        if not name.lower().endswith(".csv"):
+            name += ".csv"
+    else:
+        url = f"{GOOGLE_DRIVE_FILES_URL}/{drive_file['id']}?alt=media"
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=60,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    data = resp.content
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
+    return data, name
+
+
+def _render_gdrive_picker() -> dict | None:
+    """Google Drive OAuth connect + file picker for the "My Google Drive" data
+    source. Returns a dict {file_id, file_name, data, name} for the chosen file,
+    or None after a st.stop() when nothing is connected/chosen yet."""
+    if not (_get_google_client_id() and _get_google_client_secret()):
+        st.error(
+            "Google Drive isn't configured - add GOOGLE_CLIENT_ID and "
+            "GOOGLE_CLIENT_SECRET to Streamlit secrets or .env, and register the "
+            f"redirect URI '{_google_redirect_uri()}' in your Google Cloud OAuth client."
+        )
+        st.stop()
+        return None
+
+    token = _gdrive_token()
+    if not token:
+        code = st.query_params.get("code")
+        state = st.query_params.get("state")
+        if code and state and state == st.session_state.get("gdrive_state"):
+            try:
+                with st.spinner("Connecting to Google Drive..."):
+                    token = _exchange_google_code(code)
+            except Exception as e:
+                st.error(f"Couldn't complete Google sign-in: {e}")
+                st.query_params.clear()
+                st.stop()
+                return None
+            st.query_params.clear()
+            if token.get("refresh_token"):
+                _save_gdrive_token_file(token)
+            st.session_state["gdrive_token"] = token
+            st.rerun()
+            return None
+        state_token = secrets.token_urlsafe(16)
+        st.session_state["gdrive_state"] = state_token
+        st.markdown("**Pick a file from your Google Drive**")
+        st.caption(
+            "Connect your Google account to browse and load files directly from your "
+            "Drive. Only read access is requested; your files stay in your account."
+        )
+        st.link_button("Connect Google Drive", _google_auth_url(state_token))
+        st.stop()
+        return None
+
+    access_token = _gdrive_access_token(token)
+    cached = st.session_state.get("gdrive_files_cache") or {}
+    if cached.get("token") != access_token:
+        try:
+            with st.spinner("Listing your Drive..."):
+                files = _list_drive_files(access_token)
+        except Exception as e:
+            st.error(f"Couldn't list your Google Drive: {e}")
+            st.stop()
+            return None
+        st.session_state["gdrive_files_cache"] = {"token": access_token, "files": files}
+        cached = st.session_state["gdrive_files_cache"]
+    files = cached.get("files", [])
+
+    if not files:
+        st.info("No spreadsheets, CSV or Excel files found in your Google Drive.")
+        st.stop()
+        return None
+
+    labels = {f"{f['name']}  ({_drive_mime_label(f['mimeType'])})": f for f in files}
+    choice = st.selectbox("Choose a file from your Google Drive", options=list(labels.keys()))
+    sel = labels[choice]
+
+    if st.session_state.get("gdrive_dl_id") != sel["id"]:
+        try:
+            with st.spinner("Downloading from your Drive..."):
+                data, dl_name = _download_drive_file(access_token, sel)
+        except Exception as e:
+            st.error(f"Couldn't download '{sel['name']}': {e}")
+            st.stop()
+            return None
+        st.session_state["gdrive_dl_id"] = sel["id"]
+        st.session_state["gdrive_dl_bytes"] = data
+        st.session_state["gdrive_dl_name"] = dl_name
+    return {
+        "file_id": "gdrive:" + sel["id"],
+        "file_name": sel["name"],
+        "data": st.session_state["gdrive_dl_bytes"],
+        "name": st.session_state["gdrive_dl_name"],
+    }
+
+
 def _read_tabular_file(uploaded) -> pd.DataFrame:
     """Read an uploaded CSV/XLSX, robust to a workbook with more than one
     sheet (defaults to reading the first, but lets the user pick) and to a
@@ -1776,36 +2339,136 @@ def _read_tabular_file(uploaded) -> pd.DataFrame:
     return df
 
 
-uploaded = st.file_uploader(
-    "Choose a CSV or Excel file", type=["csv", "xlsx"], key=f"uploader_{model_key}"
+data_source = st.radio(
+    "Data source",
+    ["Local file", "Google Sheets / Drive link", "My Google Drive"],
+    key="data_source",
+    horizontal=True,
 )
 
-if not uploaded:
-    st.info("Upload a contract-level file to begin.")
-    st.stop()
+uploaded = None
+file_id = None
+file_name = None
+gdrive_pick = None
+if data_source == "Local file":
+    uploaded = st.file_uploader(
+        "Choose a CSV or Excel file", type=["csv", "xlsx"], key=f"uploader_{model_key}"
+    )
+    if not uploaded:
+        st.info("Upload a contract-level file to begin.")
+        st.stop()
+    file_id = uploaded.file_id
+    file_name = uploaded.name
+elif data_source == "Google Sheets / Drive link":
+    gs_url = st.text_input(
+        "Paste a Google Sheets or Google Drive link",
+        placeholder="https://docs.google.com/spreadsheets/d/<ID>/edit#gid=0",
+        key="gs_url_input",
+    )
+    if not gs_url.strip():
+        st.info("Paste a Google Sheets / Google Drive link to begin.")
+        st.stop()
+    try:
+        doc_id = _extract_google_id(gs_url)
+    except ValueError as e:
+        st.error(str(e))
+        st.stop()
+    file_id = "gs:" + doc_id
+    file_name = f"Google Sheet ({doc_id})"
+else:
+    gdrive_pick = _render_gdrive_picker()
+    if gdrive_pick is None:
+        st.stop()
+    file_id = gdrive_pick["file_id"]
+    file_name = gdrive_pick["file_name"]
 
-if st.session_state.get("uploaded_file_id") != uploaded.file_id:
-    st.session_state["uploaded_file_id"] = uploaded.file_id
+if st.session_state.get("uploaded_file_id") != file_id:
+    st.session_state["uploaded_file_id"] = file_id
     st.session_state["analysis_ran"] = False
     st.session_state.pop("analysis_mapping", None)
     st.session_state.pop("analysis_gi_overrides", None)
+    st.session_state.pop("analysis_context", None)
+    st.session_state.pop("context_files", None)
+    st.session_state.pop("context_documents", None)
+    st.session_state.pop("context_doc_ids", None)
     st.session_state["derived_columns"] = []
     for target, _ in INPUT_COLUMNS:
         st.session_state.pop(f"map_{target}", None)
 
 try:
-    raw = _read_tabular_file(uploaded)
+    if data_source == "Local file":
+        raw = _read_tabular_file(uploaded)
+    elif data_source == "Google Sheets / Drive link":
+        if st.session_state.get("gs_download_id") != file_id:
+            with st.spinner("Loading Google Sheet..."):
+                gs_bytes, gs_name = _download_google_sheet(gs_url)
+            st.session_state["gs_download_id"] = file_id
+            st.session_state["gs_bytes"] = gs_bytes
+            st.session_state["gs_name"] = gs_name
+        raw = _read_tabular_file(_NamedBytes(st.session_state["gs_bytes"], st.session_state["gs_name"]))
+    else:
+        raw = _read_tabular_file(_NamedBytes(gdrive_pick["data"], gdrive_pick["name"]))
 except Exception as e:
-    st.error(f"Couldn't read '{uploaded.name}': {e}. Check that it's a valid, non-empty CSV or Excel file.")
+    st.error(f"Couldn't read '{file_name}': {e}. Check that the file is a valid, non-empty CSV or Excel.")
     st.stop()
 if raw.empty or not len(raw.columns):
-    st.error(f"'{uploaded.name}' has no data to read.")
+    st.error(f"'{file_name}' has no data to read.")
     st.stop()
-raw = _format_normalize(raw, DATE_FIELDS, NUMERIC_FIELDS)
+_active_model_fields = {c for c, _ in INPUT_COLUMNS} | (_LENDING_EXTRA_FIELDS if is_lending else set())
+raw = _format_normalize(raw, DATE_FIELDS, NUMERIC_FIELDS, _active_model_fields)
 
 st.success(f"Loaded {len(raw):,} rows - {len(raw.columns)} columns.")
 st.dataframe(raw.head(10), width="stretch", height=300)
 st.caption("Columns in your file: " + ", ".join(map(str, raw.columns)))
+
+st.subheader("Additional context for the AI")
+st.caption(
+    "Optional documentation about this dataset. The AI uses it to answer questions about "
+    "the analysis, to auto-fill the column mapping, and to suggest derived columns - for "
+    "example the loan product and currency, what each field means, or how interest and "
+    "fees are charged. You can type notes and/or upload supporting documents (PDF, Excel, "
+    "Word, text). Editing either re-runs the AI column-mapping suggestion."
+)
+st.text_area(
+    "Context / notes",
+    placeholder=(
+        "e.g. 'Portfolio of 12-month invoice-financing loans in Indonesia (IDR). Expected "
+        "Interest and Expected Fee are blank because no interest or fees are charged; Total "
+        "Paid is the invoiced amount actually collected. Refinanced loans are flagged in the "
+        "Memo column. Principal is disbursed on the Disbursement Date and fully due by the "
+        "Expected Completion Date.'"
+    ),
+    key="analysis_context",
+    height=120,
+    on_change=_invalidate_ai_mapping_guesses,
+)
+
+context_files = st.file_uploader(
+    "Upload supporting documents",
+    type=["pdf", "xlsx", "xlsm", "docx", "txt", "csv", "md"],
+    accept_multiple_files=True,
+    key="context_files",
+)
+current_doc_ids = tuple(sorted(f.file_id for f in context_files)) if context_files else ()
+if st.session_state.get("context_doc_ids") != current_doc_ids:
+    docs = []
+    if context_files:
+        with st.spinner("Extracting text from uploaded documents..."):
+            docs = [_extract_document_text(f) for f in context_files]
+    st.session_state["context_documents"] = docs
+    st.session_state["context_doc_ids"] = current_doc_ids
+    _invalidate_ai_mapping_guesses()
+
+for doc in st.session_state.get("context_documents", []):
+    if doc.get("error"):
+        st.warning(f"**{doc['name']}** could not be used - {doc['error']}")
+    else:
+        st.caption(f"{doc['name']} - {len(doc['text']):,} characters extracted")
+if st.session_state.get("context_documents"):
+    with st.expander("Preview extracted text"):
+        for doc in st.session_state["context_documents"]:
+            st.markdown(f"**{doc['name']}**")
+            st.text(_truncate_text(doc.get("text", ""), 3000))
 
 if "derived_columns" not in st.session_state:
     st.session_state["derived_columns"] = []
@@ -1833,7 +2496,8 @@ with st.expander("Derive a missing column from existing fields"):
             try:
                 with st.spinner("Asking DeepSeek..."):
                     st.session_state["dc_ai_suggestion"] = _suggest_derived_column(
-                        ai_request, list(raw.columns), active_cfg["domain_hint"]
+                        ai_request, list(raw.columns), active_cfg["domain_hint"],
+                        _ai_context_text(max_chars=20000, per_doc=6000),
                     )
             except Exception as e:
                 st.session_state["dc_ai_suggestion"] = None
@@ -1904,7 +2568,10 @@ if guess_key not in st.session_state:
     if _get_deepinfra_api_key():
         try:
             with st.spinner("Asking the AI to auto-fill the column mapping..."):
-                st.session_state[guess_key] = _suggest_mapping(list(raw.columns), INPUT_COLUMNS)
+                st.session_state[guess_key] = _suggest_mapping(
+                    list(raw.columns), INPUT_COLUMNS,
+                    _ai_context_text(max_chars=20000, per_doc=6000),
+                )
         except Exception as e:
             st.session_state[guess_key] = {}
             st.warning(f"AI auto-fill wasn't available ({e}). You can still map columns manually.")
@@ -1917,6 +2584,7 @@ with st.form("column_mapping"):
     st.caption("For each template field below, select the matching column in your file. Required fields must be mapped to run the analysis.")
     used = set()
     mapping = {}
+    fillna_zero = {}
     for target, required in INPUT_COLUMNS:
         options = ["(not provided)"] + [c for c in raw.columns if c not in used]
         # Precedence: saved mapping > AI guess > "(not provided)".
@@ -1929,6 +2597,23 @@ with st.form("column_mapping"):
         mapping[target] = None if chosen == "(not provided)" else chosen
         if chosen != "(not provided)":
             used.add(chosen)
+        # Required numeric fields normally hard-block the run if the mapped
+        # column has gaps (or is entirely empty, e.g. a lender who never
+        # recorded payment amounts) - offer to treat missing values as 0
+        # instead, mirroring how Excel's own SUM()/SUMIFS() formulas already
+        # treat a blank cell as 0, rather than fabricating a number.
+        if required and target in NUMERIC_FIELDS and chosen != "(not provided)":
+            n_missing = raw[chosen].isna().sum()
+            fillna_zero[target] = st.checkbox(
+                f"Treat missing values in **{target}** as 0 (instead of blocking if this column has gaps)",
+                key=f"fillna0_{target}", value=False,
+            )
+            if fillna_zero[target] and n_missing:
+                st.caption(f"{n_missing:,} row(s) with a blank '{chosen}' will be treated as 0.")
+
+    for target, checked in fillna_zero.items():
+        if checked and mapping.get(target):
+            raw[mapping[target]] = raw[mapping[target]].fillna(0)
 
     # Date of extraction defaults to the max of whichever raw column the user
     # just mapped to the primary date field (Disbursement Date / start_date) -
@@ -1982,6 +2667,12 @@ with st.form("column_mapping"):
             )
         with gc3:
             useful_life_years = st.number_input("Useful life of asset (years)", value=3.0, min_value=0.1)
+            churn_stress_multiplier = st.number_input(
+                "Churn stress multiplier", value=1.7, min_value=1.0,
+                help="Multiplies the 95th-percentile monthly churn rate to get the stressed churn used "
+                     "in the MRR multiple (default 1.7x per the template; some deals use a higher stress, "
+                     "e.g. 2.0x).",
+            )
 
         st.subheader("Lendable status labels")
         lc1, lc2, lc3 = st.columns(3)
@@ -2025,6 +2716,7 @@ if submitted:
         overrides.update({
             "months_since_default": months_since_default,
             "useful_life_years": useful_life_years,
+            "churn_stress_multiplier": churn_stress_multiplier,
             "open_label": open_label,
             "closed_label": closed_label,
             "paidoff_label": paidoff_label,
@@ -2125,17 +2817,24 @@ with st.spinner("Running analysis..."):
         df = process_data_input(fallback_df, gi.as_calc_dict())
         av = build_asset_view(df, gi.as_calc_dict())
         curve = build_repayment_curve(av, gi.as_calc_dict())
+        # Kept separate from fallback_notes (routine, usually-benign inferences)
+        # since these mean rows are silently dropped from every downstream
+        # number - surfaced as an un-collapsed warning below instead of buried
+        # in the same collapsed expander as routine notes.
+        exclusion_notes = []
         n_missing_asset_id = count_missing_asset_id_rows(df)
         if n_missing_asset_id:
-            fallback_notes.append(
-                f"{n_missing_asset_id} row(s) have a blank asset ID and are excluded "
-                "entirely from Asset View (and everything downstream of it)."
+            pct = n_missing_asset_id / len(df) if len(df) else 0
+            exclusion_notes.append(
+                f"{n_missing_asset_id:,} row(s) ({pct:.0%} of the file) have a blank asset ID and "
+                "are excluded entirely from Asset View (and everything downstream of it)."
             )
         n_unparsed_cohort = count_unparsed_cohort_rows(df)
         if n_unparsed_cohort:
-            fallback_notes.append(
-                f"{n_unparsed_cohort} row(s) have an unparseable start date and are excluded "
-                "entirely from Lease Cohorts (and everything downstream of it)."
+            pct = n_unparsed_cohort / len(df) if len(df) else 0
+            exclusion_notes.append(
+                f"{n_unparsed_cohort:,} row(s) ({pct:.0%} of the file) have an unparseable start "
+                "date and are excluded entirely from Lease Cohorts (and everything downstream of it)."
             )
         cohorts = build_cohorts(df, gi.as_calc_dict())
         filtered = filter_cohorts(cohorts, gi.min_loans_per_cohort)
@@ -2146,18 +2845,25 @@ with st.spinner("Running analysis..."):
         st.caption(f"Mapped & computed columns: {', '.join(df.columns)}")
         ue_data, ltv_data, ca_data = ue.as_dict(), ltv.as_dict(), churn.as_dict()
 
+if not is_lending and exclusion_notes:
+    st.warning(
+        "**Rows excluded from this analysis:**\n\n"
+        + "\n\n".join(f"- {note}" for note in exclusion_notes)
+    )
 if not is_lending and fallback_notes:
     with st.expander(f"Data quality: {len(fallback_notes)} fallback rule(s) applied"):
         for note in fallback_notes:
             st.write("-", note)
 
-dq_checks = _lending_data_quality_checks(raw, cohorts) if is_lending else []
-dq_checks_rental = _rental_data_quality_checks(raw, cohorts) if not is_lending else []
+dq_checks = _lending_data_quality_checks(raw, cohorts, gi, filtered) if is_lending else []
+dq_checks_rental = (
+    _rental_data_quality_checks(raw, cohorts, gi, filtered, ue_data) if not is_lending else []
+)
 
 if is_lending:
     tab_names = [
         "Summary", "Data Checks",
-        "Cohorts", "LTV Calculator",
+        "Cohorts", "LTV Analysis",
         "Unit Economics Analysis",
         "Custom Visualizations", "Ask AI",
     ]
@@ -2526,7 +3232,7 @@ if is_lending:
 
     with tabs[4]:
         st.subheader("Unit Economics Analysis")
-        overview_tab, ue_model_tab = st.tabs(["Overview", "UE Model (AI)"])
+        overview_tab, ue_model_tab = st.tabs(["Overview", "UE Model"])
         with overview_tab:
             row1 = st.columns(3)
             row1[0].metric("Average Expected Term (days)", fmt(ue_data["Average Expected Term"], "{:,.1f}"))
@@ -2603,6 +3309,7 @@ if is_lending:
     with tabs[6]:
         chat_context = _build_lending_chat_context(
             gi, df, cohorts, ue_data, ltv_data, ue_model_ai_data, dq_checks,
+            user_context=_ai_context_text(max_chars=60000, per_doc=15000),
         )
         _render_ai_chat_tab(chat_context)
 
@@ -2723,7 +3430,10 @@ else:
         })
 
     with tabs[9]:
-        chat_context = _build_rental_chat_context(gi, df, av, cohorts, ue_data, ltv_data, ca_data, dq_checks_rental)
+        chat_context = _build_rental_chat_context(
+            gi, df, av, cohorts, ue_data, ltv_data, ca_data, dq_checks_rental,
+            user_context=_ai_context_text(max_chars=60000, per_doc=15000),
+        )
         _render_ai_chat_tab(chat_context)
 
 with tabs[1]:
@@ -2733,12 +3443,12 @@ with tabs[1]:
         if is_lending:
             _render_data_quality_checks(
                 dq_checks, "Loss Rate (%)", MODEL_LABELS[model_key],
-                "escalate_variance", uploaded.name,
+                "escalate_variance", file_name,
             )
         else:
             _render_data_quality_checks(
                 dq_checks_rental, "Churn Rate (%)", MODEL_LABELS[model_key],
-                "escalate_variance_rental", uploaded.name,
+                "escalate_variance_rental", file_name,
             )
     with data_tab:
         if is_lending:
