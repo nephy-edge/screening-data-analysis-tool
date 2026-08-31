@@ -1,0 +1,39 @@
+# Keep the build context small, and keep client data and local credentials out
+# of the image even when building from a dirty working tree. Several of these
+# are gitignored too, but .dockerignore is what protects a local `docker build`.
+
+.git
+.gitignore
+
+# Virtualenvs and bytecode
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.egg-info
+
+# Credentials and local config -- must never reach an image
+.streamlit/secrets.toml
+.env
+certs/
+*.pem
+*.key
+*.crt
+
+# Client/source workbooks: raw portfolio data, must not be published
+docs/
+
+# Local tooling and notes
+.devcontainer/
+.kilo/
+.claude/
+.idea/
+.vscode/
+PROGRESS.md
+AGENTS.md
+README.md
+
+# Docker's own files
+Dockerfile
+.dockerignore

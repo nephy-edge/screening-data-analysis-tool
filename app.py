@@ -131,6 +131,16 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# Access gate. When the container is given Cognito credentials (the ECS Express
+# deployment), require a login before anything renders. The os.environ check
+# short-circuits before st.user so a local run without an [auth] block in
+# secrets.toml behaves exactly as before.
+if os.environ.get("COGNITO_CLIENT_ID") and not st.user.is_logged_in:
+    st.info("Sign in with your Lendable account to continue.")
+    st.button("Log in", on_click=st.login, type="primary")
+    st.stop()
+
 inject_style()
 render_masthead("SC Analysis - Lending" if is_lending else "SC Analysis - Rental & Subscription")
 render_cover(
