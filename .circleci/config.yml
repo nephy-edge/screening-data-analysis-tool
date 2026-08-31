@@ -1,0 +1,191 @@
+##############################################################################
+# Build, verify and deploy this app to the ECS Express environment.
+#
+# Infrastructure lives in lendableio/terraform under ecs-express/.
+# Full runbook: ecs-express/RUNBOOK-screening-tool.md in that repo.
+#
+# ---------------------------------------------------------------------------
+# `verify` runs on every branch and needs no credentials at all.
+# `deploy` runs only on main and assumes an AWS role via OIDC -- there are no
+# static AWS keys anywhere in this pipeline.
+#
+# BEFORE deploy CAN WORK, all of these must be true:
+#   1. This file is on main. CircleCI will not even create the project without
+#      a config on the default branch.
+#   2. `circleci_project_id` is set in ecs-express/sandbox.tf and applied, so
+#      the deploy role exists. While it is empty the module creates NO role and
+#      the assume-role step below fails at AssumeRoleWithWebIdentity. Get the
+#      id with, from the terraform repo's ecs-express directory:
+#        ./scripts/circleci_pin.py lendableio/screening-data-analysis-tool --create
+#   3. The context below exists and is restricted to this project. IAM cannot
+#      pin a CircleCI context, so that restriction is the only control there --
+#      it is not defence in depth.
+#
+#   Context `lendable-ecs-express-deploy` must provide:
+#     AWS_ROLE_ARN        terraform output -raw circleci_deploy_role_arn
+#     ECR_REPOSITORY_URL  terraform output -raw ecr_repository_url
+#     ECS_SERVICE_ARN     terraform output -raw ecs_service_arn
+#
+# There is deliberately no migrations step: this app has no database. The RDS
+# instance in that environment is not used by it.
+##############################################################################
+version: 2.1
+
+commands:
+  build_and_healthcheck:
+    description: Build the image and prove it serves Streamlit's health endpoint.
+    steps:
+      - run:
+          name: Build image
+          command: |
+            set -euo pipefail
+            # linux/amd64 is not optional: ECS Express task definitions are
+            # X86_64, and an arm64 image pulls fine and then fails to start.
+            docker build --platform linux/amd64 -t app:ci .
+      - run:
+          name: Health check
+          command: |
+            set -euo pipefail
+            docker rm -f app-ci >/dev/null 2>&1 || true
+            docker run -d --name app-ci app:ci
+            # The Docker daemon is remote under setup_remote_docker, so a
+            # published port is not reachable from this job's container. Probe
+            # from INSIDE the container instead. Kept on one line so the YAML
+            # indentation cannot leak into the Python source.
+            PROBE="import urllib.request as u; print(u.urlopen('http://localhost:8501/_stcore/health', timeout=3).read().decode())"
+            for _ in $(seq 1 30); do
+              if docker exec app-ci python -c "$PROBE" 2>/dev/null | grep -q '^ok'; then
+                echo "health OK"
+                docker rm -f app-ci >/dev/null
+                exit 0
+              fi
+              sleep 3
+            done
+            echo "app never became healthy; last 60 lines of container log:"
+            docker logs app-ci 2>&1 | tail -60
+            docker rm -f app-ci >/dev/null
+            exit 1
+
+jobs:
+  ############################################################################
+  # Every branch. No credentials, so this also catches a dependency pin that
+  # cannot resolve -- the failure mode a linter cannot see.
+  ############################################################################
+  verify:
+    docker:
+      - image: cimg/python:3.11
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Compile-check the Python
+          command: python -m compileall -q app.py theme.py scripts/ && echo ok
+      - build_and_healthcheck
+
+  ############################################################################
+  # main only. Builds again (the layer cache makes this cheap), then rolls the
+  # Express service.
+  ############################################################################
+  deploy:
+    docker:
+      - image: cimg/aws:2024.03
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - build_and_healthcheck
+
+      - run:
+          name: Assume the deploy role via OIDC
+          command: |
+            set -euo pipefail
+            CREDS=$(aws sts assume-role-with-web-identity \
+              --role-arn "$AWS_ROLE_ARN" \
+              --role-session-name "circleci-${CIRCLE_WORKFLOW_ID}" \
+              --web-identity-token "$CIRCLE_OIDC_TOKEN_V2" \
+              --duration-seconds 3600 \
+              --query Credentials --output json)
+            {
+              echo "export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .AccessKeyId)"
+              echo "export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .SecretAccessKey)"
+              echo "export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .SessionToken)"
+              echo "export AWS_DEFAULT_REGION=us-west-2"
+            } >> "$BASH_ENV"
+            . "$BASH_ENV"
+            aws sts get-caller-identity
+
+      - run:
+          name: Push to ECR
+          command: |
+            set -euo pipefail
+            SHA_TAG="sha-$(git rev-parse --short HEAD)-${CIRCLE_BUILD_NUM}"
+            echo "export SHA_TAG=$SHA_TAG" >> "$BASH_ENV"
+            aws ecr get-login-password \
+              | docker login --username AWS --password-stdin "${ECR_REPOSITORY_URL%%/*}"
+            docker tag app:ci "$ECR_REPOSITORY_URL:$SHA_TAG"
+            docker tag app:ci "$ECR_REPOSITORY_URL:latest"
+            docker push "$ECR_REPOSITORY_URL:$SHA_TAG"
+            docker push "$ECR_REPOSITORY_URL:latest"
+
+      - run:
+          name: Roll the Express service
+          command: |
+            set -euo pipefail
+            # ------------------------------------------------------------------
+            # READ-MODIFY-WRITE, and it matters.
+            #
+            # --primary-container replaces the container specification
+            # WHOLESALE. Sending a bare {"image": ...} would drop every
+            # environment variable and injected secret, so the app would lose
+            # APP_BASE_URL and all the Cognito values -- crash-looping at best,
+            # and at worst starting with authentication silently disabled.
+            #
+            # Verify the jq path against a real describe response the first
+            # time this runs; the Express Mode API is new.
+            # ------------------------------------------------------------------
+            CURRENT=$(aws ecs describe-express-gateway-service \
+              --service-arn "$ECS_SERVICE_ARN")
+            PRIMARY=$(echo "$CURRENT" | jq -c \
+              --arg img "$ECR_REPOSITORY_URL:$SHA_TAG" \
+              '.service.primaryContainer | .image = $img')
+            if [ -z "$PRIMARY" ] || [ "$PRIMARY" = "null" ]; then
+              echo "could not read the current primaryContainer; refusing to deploy"
+              echo "$CURRENT" | jq '.' | head -40
+              exit 1
+            fi
+            aws ecs update-express-gateway-service \
+              --service-arn "$ECS_SERVICE_ARN" \
+              --primary-container "$PRIMARY"
+
+      - run:
+          name: Wait for the canary to settle
+          command: |
+            set -euo pipefail
+            for _ in $(seq 1 60); do
+              STATUS=$(aws ecs describe-express-gateway-service \
+                --service-arn "$ECS_SERVICE_ARN" \
+                --query 'service.status.statusCode' --output text)
+              echo "status=$STATUS"
+              if [ "$STATUS" = "ACTIVE" ]; then exit 0; fi
+              sleep 20
+            done
+            echo "service did not reach ACTIVE within 20 minutes"
+            exit 1
+
+workflows:
+  build-and-deploy:
+    jobs:
+      - verify
+
+      - deploy:
+          requires:
+            - verify
+          context:
+            - lendable-ecs-express-deploy
+          filters:
+            branches:
+              # MUST match circleci_protected_branch in ecs-express/sandbox.tf,
+              # which pins refs/heads/main. A mismatch means the job runs but
+              # cannot assume the role.
+              only: main

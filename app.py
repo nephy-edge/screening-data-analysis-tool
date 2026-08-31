@@ -131,6 +131,24 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# Access gate. When the container is given Cognito credentials (the ECS Express
+# deployment), require a login before anything renders. Without them - a local
+# run - this block is skipped entirely and behaviour is unchanged.
+if os.environ.get("COGNITO_CLIENT_ID"):
+    # st.user only gains is_logged_in once an [auth] block exists in
+    # secrets.toml, which docker-entrypoint.sh renders from the environment.
+    # If it is absent, reading the attribute raises AttributeError - so fail
+    # CLOSED here rather than let the exception fall through and leave an
+    # internet-facing app serving with no gate at all.
+    if not hasattr(st.user, "is_logged_in"):
+        st.error("Authentication is misconfigured - refusing to serve.")
+        st.stop()
+    if not st.user.is_logged_in:
+        st.info("Sign in with your Lendable account to continue.")
+        st.button("Log in", on_click=st.login, type="primary")
+        st.stop()
+
 inject_style()
 render_masthead("SC Analysis - Lending" if is_lending else "SC Analysis - Rental & Subscription")
 render_cover(
