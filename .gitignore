@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Streamlit secrets (never commit API keys)
+.streamlit/secrets.toml
+
+# Local environment variables (never commit API keys)
+.env
+
+# Certificates / credentials
+*.pem
+*.key
+*.crt
+
+# Local session/state
+PROGRESS.md
+
+# Streamlit / IDE
+.streamlit/*.toml.bak
+.idea/
+.vscode/
+
+# Local tooling (not part of the deployed app)
+.kilo/
+.claude/
+.devcontainer/
+certs/
+
+# Client/source workbooks — contains raw Astranova portfolio data; do not publish
+docs/
