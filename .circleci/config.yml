@@ -148,7 +148,7 @@ jobs:
               --service-arn "$ECS_SERVICE_ARN")
             PRIMARY=$(echo "$CURRENT" | jq -c \
               --arg img "$ECR_REPOSITORY_URL:$SHA_TAG" \
-              '.service.primaryContainer | .image = $img')
+              '(.service.activeConfigurations | sort_by(.createdAt) | last | .primaryContainer) | .image = $img')
             if [ -z "$PRIMARY" ] || [ "$PRIMARY" = "null" ]; then
               echo "could not read the current primaryContainer; refusing to deploy"
               echo "$CURRENT" | jq '.' | head -40
