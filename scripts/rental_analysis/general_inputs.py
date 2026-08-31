@@ -16,6 +16,7 @@ class GeneralInputs:
         self.months_since_default = overrides.get("months_since_default", 3)
         self.min_loans_per_cohort = overrides.get("min_loans_per_cohort", 20)
         self.useful_life_years = overrides.get("useful_life_years", 3.0)
+        self.churn_stress_multiplier = overrides.get("churn_stress_multiplier", 1.7)
         self.status_map = overrides.get("status_map", DEFAULT_STATUS_MAP)
         self.open_label = overrides.get("open_label", "Open")
         self.closed_label = overrides.get("closed_label", "Closed")
@@ -28,6 +29,7 @@ class GeneralInputs:
             "Months since default": self.months_since_default,
             "Minimum loans per cohort": self.min_loans_per_cohort,
             "Useful life of asset (years)": self.useful_life_years,
+            "Churn stress multiplier": self.churn_stress_multiplier,
             "Status used for active": self.open_label,
             "Status used for canceled": self.closed_label,
             "Status used for paid-off": self.paidoff_label,
@@ -41,6 +43,7 @@ class GeneralInputs:
             "months_since_default": self.months_since_default,
             "min_loans_per_cohort": self.min_loans_per_cohort,
             "useful_life_years": self.useful_life_years,
+            "churn_stress_multiplier": self.churn_stress_multiplier,
             "status_map": self.status_map,
             "open_label": self.open_label,
             "closed_label": self.closed_label,

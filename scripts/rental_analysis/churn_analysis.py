@@ -10,6 +10,7 @@ class ChurnAnalysis:
     def __init__(self, cohorts, gi):
         self.cohorts = cohorts
         self.gi = gi
+        self.stress_multiplier = gi.get("churn_stress_multiplier", 1.7)
         self._eligible = cohorts[cohorts["active_leases_in_month"] > gi["min_loans_per_cohort"]]
 
     def pctile_95(self):
@@ -20,10 +21,10 @@ class ChurnAnalysis:
 
     def stress_churn(self):
         # A genuine 95th-percentile churn near 100% (a small eligible cohort
-        # that fully defaulted in one month) would push the 1.7x-stressed rate
+        # that fully defaulted in one month) would push the stressed rate
         # above 1.0, which makes (1-c) negative and the survival multipliers
         # below oscillate in sign - churn can't exceed 100% of a month's pool.
-        return min(1.7 * self.pctile_95(), 1.0)
+        return min(self.stress_multiplier * self.pctile_95(), 1.0)
 
     def _multiplier(self, months):
         c = self.stress_churn()

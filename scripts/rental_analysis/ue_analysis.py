@@ -54,8 +54,8 @@ class UeAnalysis:
 
     def pct_collected_historical(self):
         df = self.df
-        matured = df[df["original_asset_reached_term"]]
-        denom = df[df["first_asset_lease"] & df["reached_t"]]["cost_of_asset"].sum()
+        matured = df[df["reached_t"]]
+        denom = df[df["first_asset_lease"] & df["original_asset_reached_term"]]["cost_of_asset"].sum()
         if not denom:
             return np.nan
         return (matured["total_paid"].sum() + matured["recovery_amount"].fillna(0).sum()) / denom
