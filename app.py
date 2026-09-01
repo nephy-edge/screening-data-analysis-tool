@@ -1,17 +1,12 @@
-"""Streamlit SC Analysis tool, covering two models via a selector:
+"""Streamlit SC Analysis tool for the Lending model.
 
-- Rental & Subscription (asset-lease variant): reproduces the SC Analysis
-  for LTV and UE workbook for lease/rental contracts.
-- Lending (loan-tape variant): reproduces the same tool's generic lending
-  template, ported from the Lending/ project in this monorepo (itself
-  derived from github.com/nephy-edge/screening-data-analysis-tool).
+Reproduces the SC Analysis for LTV and UE workbook's generic lending
+template (port of the Lending/ project in this monorepo, itself derived
+from github.com/nephy-edge/screening-data-analysis-tool).
 
-Shared infra (CA-bundle handling, the DeepInfra AI-suggestion call, the
-mapping-cache read/write, the derived-column builder, the custom chart
-builder, formatting) is unified; each model keeps its own schema, General
-Inputs knobs, calc pipeline (scripts/rental_analysis vs
-scripts/template_analysis), and tab rendering, since lease and loan
-economics are different domains.
+The Rental & Subscription (asset-lease) model was removed from the app and
+moved to the rental_and_subscription/ folder - see git history for the
+previously unified two-model version of this file.
 """
 
 import io
@@ -41,21 +36,6 @@ load_dotenv()
 from theme import inject_style, render_cover, render_masthead
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
-
-from rental_analysis.general_inputs import GeneralInputs, DEFAULT_STATUS_MAP
-from rental_analysis.data_questionnaire import QUESTIONS
-from rental_analysis.data_input import (
-    REQUIRED_COLUMNS, OPTIONAL_COLUMNS, apply_fallbacks, process_data_input,
-)
-from rental_analysis.asset_view import build_asset_view, count_missing_asset_id_rows
-from rental_analysis.repayment_curve import build_repayment_curve
-from rental_analysis.lease_cohorts import build_cohorts, count_unparsed_cohort_rows
-from rental_analysis.cohorts_for_x_or_more_loans import filter_cohorts
-from rental_analysis.churn_analysis import ChurnAnalysis
-from rental_analysis.ue_analysis import UeAnalysis
-from rental_analysis.ltv_analysis import LtvAnalysis
-from rental_analysis.ts_covenants import build_ts_covenants
-from rental_analysis.general_analysis import describe as general_analysis
 
 from template_analysis.general_inputs import GeneralInputs as LendingGeneralInputs
 from template_analysis.data_questionnaire import QUESTIONS as LENDING_QUESTIONS
@@ -134,44 +114,24 @@ def _send_slack_feedback(message: str, model: str, user: str = "") -> tuple[bool
         return False, str(e)
 
 
-# Read before set_page_config so the page title reflects the model chosen on
-# a prior run (the selectbox widget itself is created further down).
-is_lending = st.session_state.get("model_key", "rental") == "lending"
+# The app is Lending-only; the Rental & Subscription model was removed and
+# moved to the rental_and_subscription/ folder (see git history).
+is_lending = True
 
 st.set_page_config(
-    page_title="SC Analysis - Lending" if is_lending else "SC Analysis - LTV & UE",
+    page_title="SC Analysis - Lending",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 inject_style()
-render_masthead("SC Analysis - Lending" if is_lending else "SC Analysis - Rental & Subscription")
+render_masthead("SC Analysis - Lending")
 render_cover(
     "Structured Credit Analysis - LTV & Unit Economics",
     "Upload loan-level portfolio data, map your columns to the Data Input "
-    "template, and the analysis is computed automatically across all sheets."
-    if is_lending else
-    "Upload contract-level lease/rental data, map your columns to the Data Input "
     "template, and the analysis is computed automatically across all sheets.",
 )
 
-MODEL_LABELS = {"rental": "Rental & Subscription", "lending": "Lending"}
-_default_model = st.session_state.get("model_key", "rental")
-model_col, feedback_col = st.columns([5, 1], vertical_alignment="bottom")
-with model_col:
-    model_key = st.selectbox(
-        "Select model", options=list(MODEL_LABELS.keys()),
-        format_func=lambda k: MODEL_LABELS[k],
-        index=list(MODEL_LABELS.keys()).index(_default_model) if _default_model in MODEL_LABELS else 0,
-        key="model_key",
-    )
-if st.session_state.get("_active_model") != model_key:
-    st.session_state["_active_model"] = model_key
-    for k in ("uploaded_file_id", "analysis_ran", "analysis_mapping", "analysis_mapping_warnings",
-              "analysis_gi_overrides", "derived_columns", "dc_ai_suggestion",
-              "custom_chart_cards", "custom_chart_next_id", "export_charts",
-              "context_files", "context_documents", "context_doc_ids"):
-        st.session_state.pop(k, None)
-is_lending = model_key == "lending"
+feedback_col = st.columns([5, 1], vertical_alignment="bottom")[1]
 
 with feedback_col:
     with st.popover("💬 Feedback"):
@@ -203,7 +163,7 @@ with feedback_col:
                 st.warning("Please enter some feedback first.")
             else:
                 ok, err = _send_slack_feedback(
-                    fb_text, MODEL_LABELS[model_key], fb_user
+                    fb_text, "Lending", fb_user
                 )
                 if ok:
                     st.session_state["fb_form_version"] = fb_form_version + 1
@@ -212,24 +172,6 @@ with feedback_col:
                 else:
                     st.error(f"Could not send feedback: {err}")
 
-RENTAL_CONFIG = dict(
-    id_field="contract_id",
-    input_columns=[(c, True) for c in REQUIRED_COLUMNS] + [(c, False) for c in OPTIONAL_COLUMNS],
-    date_fields={"start_date", "expected_end_date", "closed_date", "asset_recovery_date", "recovery_date"},
-    numeric_fields={
-        "downpayment", "total_contract_value", "monthly_expected_payment",
-        "amount_expected_to_date", "total_paid", "cost_of_asset",
-        "current_asset_value", "recovery_amount",
-    },
-    dayfirst=False,
-    primary_date_field="start_date",
-    mapping_cache_path=os.path.join(os.path.expanduser("~"), ".rental_sc_analysis_column_mappings.json"),
-    needs_status_map=True,
-    domain_hint="rental/lease contract-level dataset",
-    derived_hint="If your file provides separate schedule fields but not amount_expected_to_date, "
-                 "combine them here; the result becomes selectable in the mapping below.",
-    derived_placeholder="For example, amount expected to date, calculated from monthly payment and months elapsed",
-)
 LENDING_CONFIG = dict(
     id_field="Loan ID",
     input_columns=[
@@ -253,13 +195,12 @@ LENDING_CONFIG = dict(
                  "here; the result becomes selectable in the mapping below.",
     derived_placeholder="For example, Expected Interest, calculated as Total GBV minus Principal Value",
 )
-active_cfg = LENDING_CONFIG if is_lending else RENTAL_CONFIG
+active_cfg = LENDING_CONFIG
 INPUT_COLUMNS = active_cfg["input_columns"]
 DATE_FIELDS = active_cfg["date_fields"]
 NUMERIC_FIELDS = active_cfg["numeric_fields"]
 REQUIRED_FIELDS = {t for t, required in INPUT_COLUMNS if required}
 MAPPING_CACHE_PATH = active_cfg["mapping_cache_path"]
-STATUS_CACHE_PATH = os.path.join(os.path.expanduser("~"), ".rental_sc_analysis_status_mappings.json")
 
 
 def _cache_key(values) -> str:
@@ -444,12 +385,10 @@ def _validate_mapping(
 
 
 def _step2_data_quality_checks(raw: pd.DataFrame, config: dict) -> list[dict]:
-    """Model-agnostic Step 2 checks from the screening briefing: duplicate IDs,
-    field completion below 80%, portfolio size above 5,000 rows, and history
-    below 12 months. Driven entirely by the active model's config dict
-    (LENDING_CONFIG / RENTAL_CONFIG - id_field, input_columns,
-    primary_date_field), so every model gets these checks by construction
-    rather than needing its own copy. Each check is a dict with "level"
+    """Step 2 checks from the screening briefing: duplicate IDs, field
+    completion below 80%, portfolio size above 5,000 rows, and history
+    below 12 months. Driven entirely by the LENDING_CONFIG dict (id_field,
+    input_columns, primary_date_field). Each check is a dict with "level"
     ("warning"/"info"), "message", an optional "detail" DataFrame, and an
     optional "detail_expander" title (if absent but "detail" is set, the
     table is shown directly, not collapsed)."""
@@ -695,36 +634,6 @@ def _cohort_threshold_check(gi, cohorts: pd.DataFrame, filtered: pd.DataFrame) -
                 "loss/churn-rate percentiles are being computed from a small, filtered slice of "
                 "the portfolio. Check the file's own General Inputs value if you have it, or "
                 "lower the number in the form above and re-run."
-            ),
-        })
-    return checks
-
-
-def _useful_life_sanity_check(gi, ue_data: dict) -> list[dict]:
-    """Flags when 'Useful life of asset (years)' looks far off from this
-    file's own average lease tenor. Also a per-deal Excel assumption
-    (confirmed to range 3-5+ years across real files) that can't be inferred
-    automatically - a mismatch distorts the repayment curve's cohort buckets
-    and everything computed from it (LTV, UE), silently."""
-    checks: list[dict] = []
-    tenor_m = (ue_data or {}).get("lease_tenor_m")
-    if tenor_m is None or pd.isna(tenor_m) or tenor_m <= 0:
-        return checks
-    if not gi.useful_life_years or gi.useful_life_years <= 0:
-        return checks
-    tenor_years = tenor_m / 12
-    ratio = tenor_years / gi.useful_life_years
-    if ratio < 0.5 or ratio > 2.0:
-        checks.append({
-            "level": "warning",
-            "check_id": "useful_life_mismatch",
-            "message": (
-                f"**Useful life of asset ({gi.useful_life_years:.1f}yr) looks far from this "
-                f"file's own average lease tenor ({tenor_years:.1f}yr)** - this is a per-deal "
-                "Excel assumption (real files range from 3 to 5+ years), not something derived "
-                "from the data. A mismatch here distorts the repayment curve's cohort buckets and "
-                "the LTV/Unit Economics figures built on top of it. Confirm the intended asset "
-                "life for this deal and adjust it in the General Inputs form above if needed."
             ),
         })
     return checks
@@ -983,22 +892,6 @@ _FIELD_ALIASES = {
     "Term (days)": ["term (days)", "term", "tenor", "tenor (days)", "loan term", "term in days", "loan tenor"],
     "Payment per Period": ["payment per period", "payment", "installment", "instalment", "monthly payment", "periodic payment"],
     "Payment Frequency": ["payment frequency", "frequency", "payment terms", "repayment frequency"],
-    "contract_id": ["contract_id", "contract id", "contract no", "agreement id"],
-    "asset_id": ["asset_id", "asset id", "asset no", "vin", "serial number"],
-    "start_date": ["start_date", "start date", "contract start", "commencement date"],
-    "status": ["status", "status label", "contract status", "stage", "status name"],
-    "downpayment": ["downpayment", "down payment", "initial payment", "deposit"],
-    "monthly_expected_payment": ["monthly_expected_payment", "monthly payment", "monthly rent", "monthly_rent", "expected monthly payment"],
-    "total_paid": ["total_paid", "total paid", "amount paid"],
-    "cost_of_asset": ["cost_of_asset", "cost of asset", "asset cost", "purchase price", "cost of the asset"],
-    "expected_end_date": ["expected_end_date", "expected end date", "maturity date", "end date"],
-    "closed_date": ["closed_date", "closed date", "close date", "cancellation date"],
-    "asset_recovery_date": ["asset_recovery_date", "asset recovery date"],
-    "total_contract_value": ["total_contract_value", "total contract value", "contract value"],
-    "amount_expected_to_date": ["amount_expected_to_date", "amount expected to date", "expected to date"],
-    "current_asset_value": ["current_asset_value", "current asset value", "asset value", "current value"],
-    "recovery_date": ["recovery_date", "recovery date"],
-    "recovery_amount": ["recovery_amount", "recovery amount"],
 }
 
 _LENDING_EXTRA_FIELDS = {
@@ -1041,11 +934,9 @@ def _normalize_columns(raw: pd.DataFrame, fields) -> pd.DataFrame:
 
 
 def _format_normalize(raw: pd.DataFrame, date_fields, numeric_fields, model_fields=()) -> pd.DataFrame:
-    # model_fields must be scoped to the active model only (not the union of
-    # Lending + Rental canonical names) - several aliases collide across the
-    # two models (e.g. "status", "start date", "total paid"), and since the
-    # lookup table is built by iterating a set, an unscoped union would let
-    # the collision winner change randomly between process runs.
+    # model_fields is scoped to the Lending canonical names so aliases that
+    # overlap between fields resolve deterministically rather than by set
+    # iteration order.
     raw = _normalize_columns(raw, set(date_fields) | set(numeric_fields) | set(model_fields))
     for col in date_fields:
         if col in raw.columns and raw[col].dtype != "datetime64[ns]":
@@ -1170,23 +1061,6 @@ FIELD_DESCRIPTIONS = {
     "Total Due": "total amount owed (principal + interest + fees)",
     "Loan Status": "loan/account status label (e.g. active, closed, paid off)",
     "Days Late": "number of days the loan is past due",
-    # Rental & Subscription
-    "contract_id": "unique contract/lease identifier",
-    "asset_id": "asset/device identifier",
-    "start_date": "date the contract started",
-    "status": "contract status label",
-    "downpayment": "initial down-payment amount",
-    "monthly_expected_payment": "expected monthly payment amount",
-    "total_paid": "total amount paid to date",
-    "cost_of_asset": "cost of the asset",
-    "expected_end_date": "expected end/maturity date",
-    "closed_date": "date the contract was closed",
-    "asset_recovery_date": "date the asset was recovered",
-    "total_contract_value": "total contract value",
-    "amount_expected_to_date": "amount expected to have been paid to date",
-    "current_asset_value": "current value of the asset",
-    "recovery_date": "date of recovery",
-    "recovery_amount": "recovery amount",
 }
 
 
@@ -1318,10 +1192,10 @@ def _render_variance_escalation(
     detail: "pd.DataFrame", metric_label: str, model_name: str, button_key: str,
     uploaded_name: str,
 ) -> None:
-    """Shared by the Lending and Rental & Subscription unexplained-variance
-    checks: renders the "escalate to analytics" button, drafts an AI write-up
-    from the flagged cohort facts (falling back to a plain summary if the AI
-    call fails), and sends it to the existing Slack feedback webhook.
+    """Shared by the Lending unexplained-variance check: renders the
+    "escalate to analytics" button, drafts an AI write-up from the flagged
+    cohort facts (falling back to a plain summary if the AI call fails), and
+    sends it to the existing Slack feedback webhook.
     `detail` must have columns Cohort, <metric_label>, 'Swing vs Prior Cohort
     (pp)', 'Likely Contributing Factor(s)'."""
     if st.session_state.pop("dq_just_escalated", False):
@@ -1394,99 +1268,6 @@ def _render_data_quality_checks(
                 _render_variance_escalation(
                     detail, variance_metric_label, model_name, button_key, uploaded_name,
                 )
-
-
-def _rental_variance_check(cohorts: "pd.DataFrame") -> list:
-    """Step 4 anomaly diagnostics for Rental & Subscription, mirroring the
-    Lending unexplained-variance check: flags cohort-to-cohort churn-rate
-    swings above 5 percentage points, with likely contributing factors
-    diagnosed from signals already in the lease_cohorts table (small
-    active-lease sample size, active-lease-count swings, average-lease-value
-    shifts, PvD shifts)."""
-    checks: list = []
-    if cohorts is None or "churn_rate" not in cohorts.columns:
-        return checks
-
-    by_month = cohorts.dropna(subset=["churn_rate"]).sort_values("cohort")
-    deltas = by_month["churn_rate"].diff()
-    flagged = by_month.loc[deltas.abs() > 0.05]
-    if flagged.empty:
-        return checks
-
-    flagged_deltas = deltas.loc[flagged.index]
-    active_pct = by_month["active_leases_in_month"].pct_change().loc[flagged.index]
-    avg_lease_value = by_month["value_of_leases"] / by_month["new_leases"].where(
-        by_month["new_leases"] > 0
-    )
-    avg_lease_value_pct = avg_lease_value.pct_change().loc[flagged.index]
-    pvd_delta = (
-        by_month["pvd"].diff().loc[flagged.index] if "pvd" in by_month.columns else None
-    )
-
-    def _diagnose(idx):
-        causes = []
-        active = flagged.loc[idx, "active_leases_in_month"]
-        if pd.notna(active) and active < 10:
-            causes.append(
-                f"small active-lease sample ({int(active)} contracts) - swing may be noise"
-            )
-        ap = active_pct.loc[idx]
-        if pd.notna(ap) and abs(ap) > 0.5:
-            causes.append(
-                f"active leases {'dropped' if ap < 0 else 'grew'} {abs(ap):.0%} vs "
-                "prior cohort - check for missing loads or a status-mapping issue"
-            )
-        alv = avg_lease_value_pct.loc[idx]
-        if pd.notna(alv) and abs(alv) > 0.5:
-            causes.append(
-                f"average lease value {'dropped' if alv < 0 else 'grew'} {abs(alv):.0%} "
-                "vs prior cohort - possible portfolio mix change"
-            )
-        if pvd_delta is not None:
-            pvd = pvd_delta.loc[idx]
-            if pd.notna(pvd) and abs(pvd) > 0.10:
-                causes.append(
-                    f"PvD ratio shifted {pvd * 100:+.0f}pp vs prior cohort - "
-                    "possible collections/servicing change"
-                )
-        return "; ".join(causes) if causes else (
-            "No obvious data-driven cause - likely a genuine portfolio "
-            "event, escalate to Borrower"
-        )
-
-    detail = pd.DataFrame({
-        "Cohort": pd.to_datetime(flagged["cohort"]).dt.strftime("%b %Y"),
-        "Churn Rate (%)": (flagged["churn_rate"] * 100).round(1).values,
-        "Swing vs Prior Cohort (pp)": (flagged_deltas * 100).round(1).values,
-        "Likely Contributing Factor(s)": [_diagnose(i) for i in flagged.index],
-    })
-    checks.append({
-        "level": "warning",
-        "check_id": "unexplained_variance",
-        "message": (
-            f"**Unexplained variance** - {len(detail)} cohort(s) show a churn-rate "
-            "swing of more than 5 percentage points versus the prior cohort. Likely "
-            "contributing factors are diagnosed below from active-lease-count, "
-            "sample-size, and lease-value signals already in the data - verify "
-            "before relying on these cohorts."
-        ),
-        "detail": detail,
-    })
-    return checks
-
-
-def _rental_data_quality_checks(
-    raw: pd.DataFrame, cohorts: pd.DataFrame, gi=None, filtered: pd.DataFrame = None, ue_data: dict = None
-) -> list:
-    """Rental & Subscription: Step 2 checks (shared) + Step 4 churn-rate
-    variance diagnosis + General Inputs sanity checks (min loans/cohort and
-    useful life vs this file's own data)."""
-    checks = _step2_data_quality_checks(raw, RENTAL_CONFIG) + _rental_variance_check(cohorts)
-    if gi is not None and filtered is not None:
-        checks += _cohort_threshold_check(gi, cohorts, filtered)
-    if gi is not None and ue_data is not None:
-        checks += _useful_life_sanity_check(gi, ue_data)
-    return checks
 
 
 def _add_reference_line(chart, value, label, color="#d62728", x_anchor=None):
@@ -1846,53 +1627,6 @@ def _build_lending_chat_context(
         + fmt(ue_model_ai_data["net_ue_simple"]),
         "'IRR of cash flow' and the workbook's true cash-flow-basis 'Net Unit Economics' are NOT "
         "computed by this app - they'd need a full monthly repayment/loss/cost schedule.",
-    ]
-    if user_context.strip():
-        lines += ["", "## User-provided context about this dataset", user_context.strip()]
-    if dq_checks:
-        lines += ["", "## Data quality checks flagged"]
-        lines += [f"- ({c.get('level', 'info')}) {c.get('message', '')}" for c in dq_checks]
-    return "\n".join(lines)
-
-
-def _build_rental_chat_context(
-    gi, df: pd.DataFrame, av: pd.DataFrame, cohorts: pd.DataFrame, ue_data: dict,
-    ltv_data: dict, ca_data: dict, dq_checks: list, user_context: str = "",
-) -> str:
-    lines = [
-        "## Rental & Subscription portfolio - summary statistics",
-        f"Contracts: {len(df):,}. Unique assets: {len(av):,}. Mapped/computed columns: "
-        + ", ".join(map(str, df.columns)) + ".",
-        f"Data extraction date: {gi.extraction_date.date()}. Useful life of asset (years): "
-        + str(gi.useful_life_years),
-        f"Minimum loans (contracts) per cohort: {gi.min_loans_per_cohort}.",
-        "",
-        "## Unit Economics",
-        f"Downpayment %: {fmt(ue_data['downpayment_pct'])}. Lease Tenor (m): "
-        + fmt(ue_data["lease_tenor_m"], "{:.1f}"),
-        f"Margin: {fmt(ue_data['margin'])}. Utilisation Rate: {fmt(ue_data['utilisation_rate'])}.",
-        f"PvD: {fmt(ue_data['pvd'])}. Historical % Collected on Principal: "
-        + fmt(ue_data["historical_pct_collected_on_principal"]),
-        "",
-        "## Churn Analysis",
-        f"95th %ile monthly churn: {fmt(ca_data['pctile_95'], '{:.2%}')}. Average monthly churn: "
-        + fmt(ca_data["avg_churn"], "{:.2%}"),
-        f"Stressed churn (1.7x): {fmt(ca_data['stress_churn'], '{:.2%}')}.",
-        f"1/2/3-year and total residual multiples: {fmt(ca_data['multiplier_1y'], '{:.2f}')} / "
-        f"{fmt(ca_data['multiplier_2y'], '{:.2f}')} / {fmt(ca_data['multiplier_3y'], '{:.2f}')} / "
-        + fmt(ca_data["multiplier_total"], "{:.2f}"),
-        "",
-        "## LTV Analysis",
-        f"Average Useful Life (m): {fmt(ltv_data['avg_useful_life_m'], '{:.1f}')}. "
-        f"Defaulted contracts > 3mo: {fmt(ltv_data['n_defaulted_gt_3m'], '{:.0f}')}.",
-        f"% recovered: {fmt(ltv_data['pct_recovered'])}. Loss (non-recoverability): "
-        + fmt(ltv_data["loss_non_recoverability"]),
-        f"MRR Multiplier (3y): {fmt(ltv_data['mrr_multiplier'], '{:.2f}')}. MRR: "
-        + fmt(ltv_data["mrr"], "{:,.0f}"),
-        "",
-        "## Cohorts",
-        f"{len(cohorts)} monthly cohorts. Columns: {', '.join(cohorts.columns)}.",
-        cohorts.to_csv(index=False),
     ]
     if user_context.strip():
         lines += ["", "## User-provided context about this dataset", user_context.strip()]
@@ -2352,7 +2086,7 @@ file_name = None
 gdrive_pick = None
 if data_source == "Local file":
     uploaded = st.file_uploader(
-        "Choose a CSV or Excel file", type=["csv", "xlsx"], key=f"uploader_{model_key}"
+        "Choose a CSV or Excel file", type=["csv", "xlsx"], key="uploader"
     )
     if not uploaded:
         st.info("Upload a contract-level file to begin.")
@@ -2414,7 +2148,7 @@ except Exception as e:
 if raw.empty or not len(raw.columns):
     st.error(f"'{file_name}' has no data to read.")
     st.stop()
-_active_model_fields = {c for c, _ in INPUT_COLUMNS} | (_LENDING_EXTRA_FIELDS if is_lending else set())
+_active_model_fields = {c for c, _ in INPUT_COLUMNS} | _LENDING_EXTRA_FIELDS
 raw = _format_normalize(raw, DATE_FIELDS, NUMERIC_FIELDS, _active_model_fields)
 
 st.success(f"Loaded {len(raw):,} rows - {len(raw.columns)} columns.")
@@ -2563,7 +2297,7 @@ if cached_mapping:
     st.caption("A saved mapping was found for a file with these same column headers - pre-filled below.")
 
 # AI auto-fill: guess the best column mapping for this file's headers (per model).
-guess_key = f"ai_mapping_guess_{model_key}_{_cache_key(raw.columns)}"
+guess_key = f"ai_mapping_guess_{_cache_key(raw.columns)}"
 if guess_key not in st.session_state:
     if _get_deepinfra_api_key():
         try:
@@ -2627,61 +2361,24 @@ with st.form("column_mapping"):
             default_extraction = parsed_primary.max()
 
     st.subheader("General Inputs")
-    if is_lending:
-        gc1, gc2, gc3 = st.columns(3)
-        with gc1:
-            extraction_date = st.date_input(
-                "Date of extraction", value=default_extraction.date(),
-                help="The max date in the loan tape. Used to identify which loans have reached their maturity.",
-            )
-        with gc2:
-            days_after_term = st.number_input(
-                "Days after term", value=90, min_value=0,
-                help="Days after term used to compute loss rate (default 90 = Term + 3 months). "
-                     "Modify only if the company has significant repayments after 3 months from term.",
-            )
-        with gc3:
-            min_loans_per_cohort = st.number_input(
-                "Minimum loans per cohort", value=10, min_value=0,
-                help="Affects the cohort stressed loss rate: requires a minimum number of observations to "
-                     "include a cohort in the cohort loss rate distribution (default 10).",
-            )
-    else:
-        gc1, gc2, gc3 = st.columns(3)
-        with gc1:
-            extraction_date = st.date_input(
-                "Date of extraction", value=default_extraction.date(),
-                help="The max date in the loan tape. Used to identify which loans have reached their maturity.",
-            )
-            days_after_term = st.number_input(
-                "Days after term", value=0, min_value=0,
-                help="Days after term used to compute loss rate (default 90 = Term + 3 months). "
-                     "Modify only if the company has significant repayments after 3 months from term.",
-            )
-        with gc2:
-            months_since_default = st.number_input("Months since default", value=3, min_value=0)
-            min_loans_per_cohort = st.number_input(
-                "Minimum loans per cohort", value=20, min_value=0,
-                help="Affects the cohort stressed loss rate: requires a minimum number of observations to "
-                     "include a cohort in the cohort loss rate distribution (default 10).",
-            )
-        with gc3:
-            useful_life_years = st.number_input("Useful life of asset (years)", value=3.0, min_value=0.1)
-            churn_stress_multiplier = st.number_input(
-                "Churn stress multiplier", value=1.7, min_value=1.0,
-                help="Multiplies the 95th-percentile monthly churn rate to get the stressed churn used "
-                     "in the MRR multiple (default 1.7x per the template; some deals use a higher stress, "
-                     "e.g. 2.0x).",
-            )
-
-        st.subheader("Lendable status labels")
-        lc1, lc2, lc3 = st.columns(3)
-        with lc1:
-            open_label = st.text_input("Status used for active", value="Open")
-        with lc2:
-            closed_label = st.text_input("Status used for canceled", value="Closed")
-        with lc3:
-            paidoff_label = st.text_input("Status used for paid-off", value="Paid-off")
+    gc1, gc2, gc3 = st.columns(3)
+    with gc1:
+        extraction_date = st.date_input(
+            "Date of extraction", value=default_extraction.date(),
+            help="The max date in the loan tape. Used to identify which loans have reached their maturity.",
+        )
+    with gc2:
+        days_after_term = st.number_input(
+            "Days after term", value=90, min_value=0,
+            help="Days after term used to compute loss rate (default 90 = Term + 3 months). "
+                 "Modify only if the company has significant repayments after 3 months from term.",
+        )
+    with gc3:
+        min_loans_per_cohort = st.number_input(
+            "Minimum loans per cohort", value=10, min_value=0,
+            help="Affects the cohort stressed loss rate: requires a minimum number of observations to "
+                 "include a cohort in the cohort loss rate distribution (default 10).",
+        )
 
     submitted = st.form_submit_button("Run analysis")
 
@@ -2712,15 +2409,6 @@ if submitted:
         "days_after_term": days_after_term,
         "min_loans_per_cohort": min_loans_per_cohort,
     }
-    if not is_lending:
-        overrides.update({
-            "months_since_default": months_since_default,
-            "useful_life_years": useful_life_years,
-            "churn_stress_multiplier": churn_stress_multiplier,
-            "open_label": open_label,
-            "closed_label": closed_label,
-            "paidoff_label": paidoff_label,
-        })
     st.session_state["analysis_gi_overrides"] = overrides
     st.session_state["analysis_ran"] = True
     _save_cache(MAPPING_CACHE_PATH, _cache_key(raw.columns), mapping)
@@ -2749,14 +2437,6 @@ for col in NUMERIC_FIELDS:
     if col in raw.columns and raw[col].dtype != "float64":
         raw[col] = pd.to_numeric(_clean_numeric(raw[col]), errors="coerce")
 
-if not is_lending:
-    # The workbooks name the asset recovery sale/proceeds column "recovery_value",
-    # while the template/calculation field is "recovery_amount". Auto-alias so a
-    # workbook-named file still feeds recoveries into the recovery-based metrics
-    # (% collected on principal, LTV recovery) without the user having to map it.
-    if "recovery_amount" not in raw.columns and "recovery_value" in raw.columns:
-        raw["recovery_amount"] = raw["recovery_value"]
-
 unmapped = [t for t, _ in INPUT_COLUMNS if t not in raw.columns]
 if unmapped:
     st.warning("Not mapped (optional) - related metrics will be unavailable: " + ", ".join(unmapped))
@@ -2768,208 +2448,97 @@ if mapping_warnings:
 if st.session_state.get("dedupe_loan_ids") and active_cfg["id_field"] in raw.columns:
     raw = raw.drop_duplicates(subset=active_cfg["id_field"], keep="first")
 
-if active_cfg["needs_status_map"]:
-    raw_statuses = sorted(raw["status"].dropna().unique().tolist(), key=str)
-    status_key = _cache_key(raw_statuses)
-    cached_status_map = _load_cache(STATUS_CACHE_PATH, status_key) or {}
-    seed = [
-        {"Client status": s, "Lendable status": cached_status_map.get(s, DEFAULT_STATUS_MAP.get(s, ""))}
-        for s in raw_statuses
-    ]
-    st.subheader("Status mapping")
-    st.caption("Map each raw status value in your file to a standardised Lendable status.")
-    status_map_df = st.data_editor(pd.DataFrame(seed), hide_index=True, width="stretch", key="status_map_editor")
-    status_map = dict(zip(status_map_df["Client status"], status_map_df["Lendable status"]))
-
-    unmapped_statuses = [s for s, v in status_map.items() if not v]
-    if unmapped_statuses:
-        st.warning("Unmapped status value(s), fill these in above: " + ", ".join(unmapped_statuses))
-        st.stop()
-    _save_cache(STATUS_CACHE_PATH, status_key, status_map)
-else:
-    status_map = None
-
 gi_overrides = dict(st.session_state["analysis_gi_overrides"])
-if is_lending:
-    gi = LendingGeneralInputs(raw, **gi_overrides)
-else:
-    gi_overrides["status_map"] = status_map
-    gi = GeneralInputs(raw, **gi_overrides)
+gi = LendingGeneralInputs(raw, **gi_overrides)
 
 with st.spinner("Running analysis..."):
-    if is_lending:
-        term_supplied = "Term (days)" in raw.columns
-        df = lending_process_data_input(raw, gi.extraction_date, gi.days_after_term)
-        cohorts = lending_build_cohorts(df, min_matured=gi.min_loans_per_cohort)
-        filtered = lending_filter_cohorts(cohorts, gi.min_loans_per_cohort)
-        st.caption(f"Mapped & computed columns: {', '.join(df.columns)}")
-        if "Total Due" not in df.columns:
-            st.warning("No 'Total Due' or payment schedule mapped - loss rate proxy and PvD ratio will be unavailable.")
-        ltv = LendingLtvAnalysis(df, filtered)
-        ue = LendingUeAnalysis(df)
-        ue_data, ltv_data = ue.as_dict(), ltv.as_dict()
-        lending_chart_data = cohorts.dropna(subset=["Loss Rate"]).copy()
-        if not lending_chart_data.empty:
-            lending_chart_data["Fee %"] = lending_chart_data["Total Fee"] / lending_chart_data["Total Principal"]
-            lending_chart_data["Interest %"] = lending_chart_data["Total Interest"] / lending_chart_data["Total Principal"]
-    else:
-        fallback_df, fallback_notes = apply_fallbacks(raw, gi.useful_life_years, gi.extraction_date)
-        df = process_data_input(fallback_df, gi.as_calc_dict())
-        av = build_asset_view(df, gi.as_calc_dict())
-        curve = build_repayment_curve(av, gi.as_calc_dict())
-        # Kept separate from fallback_notes (routine, usually-benign inferences)
-        # since these mean rows are silently dropped from every downstream
-        # number - surfaced as an un-collapsed warning below instead of buried
-        # in the same collapsed expander as routine notes.
-        exclusion_notes = []
-        n_missing_asset_id = count_missing_asset_id_rows(df)
-        if n_missing_asset_id:
-            pct = n_missing_asset_id / len(df) if len(df) else 0
-            exclusion_notes.append(
-                f"{n_missing_asset_id:,} row(s) ({pct:.0%} of the file) have a blank asset ID and "
-                "are excluded entirely from Asset View (and everything downstream of it)."
-            )
-        n_unparsed_cohort = count_unparsed_cohort_rows(df)
-        if n_unparsed_cohort:
-            pct = n_unparsed_cohort / len(df) if len(df) else 0
-            exclusion_notes.append(
-                f"{n_unparsed_cohort:,} row(s) ({pct:.0%} of the file) have an unparseable start "
-                "date and are excluded entirely from Lease Cohorts (and everything downstream of it)."
-            )
-        cohorts = build_cohorts(df, gi.as_calc_dict())
-        filtered = filter_cohorts(cohorts, gi.min_loans_per_cohort)
-        churn = ChurnAnalysis(cohorts, gi.as_calc_dict())
-        ue = UeAnalysis(df, av, curve, gi.as_calc_dict())
-        ltv = LtvAnalysis(df, churn, gi.as_calc_dict())
-        ts = build_ts_covenants(ue.as_dict(), ltv.as_dict(), curve)
-        st.caption(f"Mapped & computed columns: {', '.join(df.columns)}")
-        ue_data, ltv_data, ca_data = ue.as_dict(), ltv.as_dict(), churn.as_dict()
+    term_supplied = "Term (days)" in raw.columns
+    df = lending_process_data_input(raw, gi.extraction_date, gi.days_after_term)
+    cohorts = lending_build_cohorts(df, min_matured=gi.min_loans_per_cohort)
+    filtered = lending_filter_cohorts(cohorts, gi.min_loans_per_cohort)
+    st.caption(f"Mapped & computed columns: {', '.join(df.columns)}")
+    if "Total Due" not in df.columns:
+        st.warning("No 'Total Due' or payment schedule mapped - loss rate proxy and PvD ratio will be unavailable.")
+    ltv = LendingLtvAnalysis(df, filtered)
+    ue = LendingUeAnalysis(df)
+    ue_data, ltv_data = ue.as_dict(), ltv.as_dict()
+    lending_chart_data = cohorts.dropna(subset=["Loss Rate"]).copy()
+    if not lending_chart_data.empty:
+        lending_chart_data["Fee %"] = lending_chart_data["Total Fee"] / lending_chart_data["Total Principal"]
+        lending_chart_data["Interest %"] = lending_chart_data["Total Interest"] / lending_chart_data["Total Principal"]
 
-if not is_lending and exclusion_notes:
-    st.warning(
-        "**Rows excluded from this analysis:**\n\n"
-        + "\n\n".join(f"- {note}" for note in exclusion_notes)
-    )
-if not is_lending and fallback_notes:
-    with st.expander(f"Data quality: {len(fallback_notes)} fallback rule(s) applied"):
-        for note in fallback_notes:
-            st.write("-", note)
+dq_checks = _lending_data_quality_checks(raw, cohorts, gi, filtered)
 
-dq_checks = _lending_data_quality_checks(raw, cohorts, gi, filtered) if is_lending else []
-dq_checks_rental = (
-    _rental_data_quality_checks(raw, cohorts, gi, filtered, ue_data) if not is_lending else []
-)
-
-if is_lending:
-    tab_names = [
-        "Summary", "Data Checks",
-        "Cohorts", "LTV Analysis",
-        "Unit Economics Analysis",
-        "Custom Visualizations", "Ask AI",
-    ]
-else:
-    tab_names = [
-        "Summary", "Data Checks", "Asset View",
-        "Unit Economics Analysis", "Churn Analysis", "LTV Analysis", "TS Covenants",
-        "General Analysis", "Custom Visualizations", "Ask AI",
-    ]
+tab_names = [
+    "Summary", "Data Checks",
+    "Cohorts", "LTV Analysis",
+    "Unit Economics Analysis",
+    "Custom Visualizations", "Ask AI",
+]
 tabs = st.tabs(tab_names)
 
 with tabs[0]:
     st.subheader("Summary")
-    if is_lending:
-        if "Loan Status" in df.columns:
-            status = df["Loan Status"].astype(str).str.strip().str.lower()
-            gbv_df = df[status == "active"]
-        else:
-            gbv_df = df.iloc[0:0]
-        if gbv_df.empty:
-            outstanding_gbv = None
-        else:
-            principal = gbv_df["Principal Value"].sum()
-            interest = gbv_df["Expected Interest"].sum()
-            fees = gbv_df["Expected Fee"].sum()
-            paid = gbv_df["Total Paid"].sum()
-            outstanding_gbv = principal + interest + fees - paid
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric(
-            "Data up to", str(gi.extraction_date.date()),
-            help="As-of date of the loan tape (the most recent disbursement date in the data).",
-        )
-        c2.metric(
-            "Outstanding GBV",
-            f"{outstanding_gbv:,.0f}" if outstanding_gbv is not None else "n/a",
-            help="Principal + expected interest + expected fees - amount paid, "
-                 "for loans with status 'active' only. n/a when no active loans.",
-        )
-        c3.metric(
-            "Loss Rate", fmt(ue_data["Average Loss"]),
-            help="Average loss rate across matured loans: (owed - paid) / owed.",
-        )
-        c4.metric(
-            "95th %ile Loss Rate", fmt(ltv_data["95th Percentile Losses"]),
-            help="The 95th percentile of cohort loss rates - a stressed view of how "
-                 "bad loss could get for the worst cohorts.",
-        )
-        c5.metric(
-            "Interest Rate", fmt(ue_data["Average Interest %"]),
-            help="Total expected interest as a share of total principal across all loans.",
-        )
-
-        st.markdown("---")
-        st.subheader("Portfolio Snapshot")
-        date_range = (
-            f"{df['Disbursement Date'].min().date()} to {gi.extraction_date.date()}"
-        )
-        snapshot_rows = [
-            ("Date Range", date_range, "From the earliest disbursement date to the tape as-of date."),
-            ("Loans", f"{len(df):,}", "Total number of loan records in the tape."),
-            ("Value of Principal Disbursed", f"${df['Principal Value'].sum():,.0f}",
-             "Total principal amount lent across all loans."),
-            ("Total Collected", f"${df['Total Paid'].sum():,.0f}",
-             "Total cash collected from borrowers to date."),
-            ("Avg Fee", fmt(ue_data["Average Fee %"]),
-             "Total expected fees as a share of total principal."),
-            ("Avg Loan Value", f"${ue_data['Average Principal Amount']:,.0f}",
-             "Average principal amount per loan."),
-            ("Avg Loan Term", fmt(ue_data["Average Expected Term"], "{:,.1f} days"),
-             "Principal-weighted average loan term (days)."),
-            ("Avg Total Revenue", fmt(ltv_data["Average Total Revenue %"]),
-             "Expected interest + fees as a share of total principal."),
-        ]
-        _render_snapshot_table(snapshot_rows)
+    if "Loan Status" in df.columns:
+        status = df["Loan Status"].astype(str).str.strip().str.lower()
+        gbv_df = df[status == "active"]
     else:
-        st.metric(
-            "MRR Multiplier (3y)", fmt(ltv_data["mrr_multiplier"], "{:.2f}"),
-            help="Expected 3-year MRR relative to acquisition cost. The single number that "
-                 "answers whether this asset-lease product is economically viable after churn "
-                 "and recoveries.",
-        )
-        st.markdown("---")
-        open_contracts = int((df["status_mapping"] == gi.open_label).sum())
-        closed_contracts = int((df["status_mapping"] == gi.closed_label).sum())
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Contracts", f"{len(av):,}")
-        s2.metric("MRR", fmt(ltv_data["mrr"], "{:,.0f}"))
-        s3.metric(
-            "Avg MRR per Active Contract",
-            f"{ltv_data['mrr'] / open_contracts:,.0f}" if open_contracts else "n/a",
-            help="MRR divided by currently-open contracts. A quick sanity check on revenue per unit.",
-        )
-        s4.metric("Average Useful Life (m)", fmt(ltv_data["avg_useful_life_m"], "{:.1f}"))
-        r1, r2, r3, r4, r5 = st.columns(5)
-        r1.metric("95th %ile Churn", fmt(ltv_data["pctile_95_churn"], "{:.2%}"))
-        r2.metric("Stressed Churn", fmt(ltv_data["stressed_churn"], "{:.2%}"))
-        r3.metric(
-            "Contracts Churned", fmt(closed_contracts / len(df)) if len(df) else "n/a",
-            help="Share of contracts closed (terminated) rather than paid off or still active.",
-        )
-        r4.metric("Defaulted contracts > 3mo", fmt(ltv_data["n_defaulted_gt_3m"], "{:.0f}"))
-        r5.metric("% recovered", fmt(ltv_data["pct_recovered"]))
-        y1, y2, y3 = st.columns(3)
-        y1.metric("Loss (non-recoverability)", fmt(ltv_data["loss_non_recoverability"]))
-        y2.metric("MRR / average cost", fmt(ltv_data["mrr_over_avg_cost"], "{:.2%}"))
-        y3.metric("Average Collection Rate", fmt(ltv_data["avg_collection_rate"]))
+        gbv_df = df
+    if gbv_df.empty:
+        outstanding_gbv = None
+    else:
+        principal = gbv_df["Principal Value"].sum()
+        interest = gbv_df["Expected Interest"].sum()
+        fees = gbv_df["Expected Fee"].sum()
+        paid = gbv_df["Total Paid"].sum()
+        outstanding_gbv = principal + interest + fees - paid
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric(
+        "Data up to", str(gi.extraction_date.date()),
+        help="As-of date of the loan tape (the most recent disbursement date in the data).",
+    )
+    c2.metric(
+        "Outstanding GBV",
+        f"{outstanding_gbv:,.0f}" if outstanding_gbv is not None else "n/a",
+        help="Principal + expected interest + expected fees - amount paid, "
+             "for loans with status 'active' only. n/a when no active loans.",
+    )
+    c3.metric(
+        "Loss Rate", fmt(ue_data["Average Loss"]),
+        help="Average loss rate across matured loans: (owed - paid) / owed.",
+    )
+    c4.metric(
+        "95th %ile Loss Rate", fmt(ltv_data["95th Percentile Losses"]),
+        help="The 95th percentile of cohort loss rates - a stressed view of how "
+             "bad loss could get for the worst cohorts.",
+    )
+    c5.metric(
+        "Interest Rate", fmt(ue_data["Average Interest %"]),
+        help="Total expected interest as a share of total principal across all loans.",
+    )
+
+    st.markdown("---")
+    st.subheader("Portfolio Snapshot")
+    date_range = (
+        f"{df['Disbursement Date'].min().date()} to {gi.extraction_date.date()}"
+    )
+    snapshot_rows = [
+        ("Date Range", date_range, "From the earliest disbursement date to the tape as-of date."),
+        ("Loans", f"{len(df):,}", "Total number of loan records in the tape."),
+        ("Value of Principal Disbursed", f"${df['Principal Value'].sum():,.0f}",
+         "Total principal amount lent across all loans."),
+        ("Total Collected", f"${df['Total Paid'].sum():,.0f}",
+         "Total cash collected from borrowers to date."),
+        ("Avg Fee", fmt(ue_data["Average Fee %"]),
+         "Total expected fees as a share of total principal."),
+        ("Avg Loan Value", f"${ue_data['Average Principal Amount']:,.0f}",
+         "Average principal amount per loan."),
+        ("Avg Loan Term", fmt(ue_data["Average Expected Term"], "{:,.1f} days"),
+         "Principal-weighted average loan term (days)."),
+        ("Avg Total Revenue", fmt(ltv_data["Average Total Revenue %"]),
+         "Expected interest + fees as a share of total principal."),
+    ]
+    _render_snapshot_table(snapshot_rows)
 
 if is_lending:
     with tabs[2]:
@@ -3008,15 +2577,14 @@ if is_lending:
 
         c_metric_1, c_metric_2 = st.columns(2)
         c_metric_1.metric(
-            "95th %ile Loss Rate",
-            fmt(ltv_data["95th Percentile Losses"]),
-            help="= PERCENTILE(Loss Rate, 0.95) over the auto-filtered cohorts "
-                 f"(Loan Count >= {gi.min_loans_per_cohort}), matching the Excel template. "
-                 "Not affected by the filters above.",
+            "Total Cohorts available",
+            f"{len(display_cohorts)}",
+            help="All monthly cohorts in the analysis - not affected by the "
+                 "minimum-loans filter above.",
         )
         c_metric_2.metric(
             "Cohorts shown", f"{len(cohort_view)}",
-            help="Cohorts matching the filter above, out of "
+            help="Cohorts matching the 'Minimum loans per cohort' filter above, out of "
                  f"{len(display_cohorts)} monthly cohorts.",
         )
 
@@ -3313,153 +2881,20 @@ if is_lending:
         )
         _render_ai_chat_tab(chat_context)
 
-else:
-    with tabs[2]:
-        st.subheader("Asset View")
-        st.caption(f"{len(av):,} unique assets")
-        st.dataframe(av, width="stretch", height=400)
-
-    with tabs[3]:
-        st.subheader("Unit Economics Analysis")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Downpayment %", fmt(ue_data["downpayment_pct"]))
-        c2.metric("Lease Tenor (m)", fmt(ue_data["lease_tenor_m"], "{:.1f}"))
-        c3.metric("Margin", fmt(ue_data["margin"]))
-        c4.metric("Utilisation Rate", fmt(ue_data["utilisation_rate"]))
-        c1, c2, c3 = st.columns(3)
-        c1.metric("PvD", fmt(ue_data["pvd"]))
-        c2.metric("Historical % Collected on Principal", fmt(ue_data["historical_pct_collected_on_principal"]))
-        c3.metric("Monthly Observed Repayment", fmt(ue_data["monthly_observed_repayment"], "{:.2%}"))
-        curve_chart = curve.dropna(subset=["pct_avg_collection"])
-        if not curve_chart.empty:
-            st.altair_chart(
-                alt.Chart(curve_chart).mark_line(point=True).encode(
-                    x=alt.X("mob:Q", title="Month on Books"),
-                    y=alt.Y("pct_avg_collection:Q", title="% Avg collection", axis=alt.Axis(format="%")),
-                    tooltip=["mob", alt.Tooltip("pct_avg_collection:Q", format=".2%")],
-                ).properties(title="High level repayment curve", height=350),
-                width="stretch",
-            )
-        st.dataframe(curve, width="stretch", height=300)
-
-    with tabs[4]:
-        st.subheader("Churn Analysis")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("95th %ile monthly churn", fmt(ca_data["pctile_95"], "{:.2%}"))
-        c2.metric("Average monthly churn", fmt(ca_data["avg_churn"], "{:.2%}"))
-        c3.metric("Stressed churn (1.7x)", fmt(ca_data["stress_churn"], "{:.2%}"))
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("1-year multiple", fmt(ca_data["multiplier_1y"], "{:.2f}"))
-        c2.metric("2-year multiple", fmt(ca_data["multiplier_2y"], "{:.2f}"))
-        c3.metric("3-year multiple", fmt(ca_data["multiplier_3y"], "{:.2f}"))
-        c4.metric("Total multiple", fmt(ca_data["multiplier_total"], "{:.2f}"))
-        st.altair_chart(
-            alt.Chart(ca_data["residual_curve"]).mark_line().encode(
-                x=alt.X("month:Q", title="Month"),
-                y=alt.Y("residual_value:Q", title="Residual portfolio"),
-                tooltip=["month", alt.Tooltip("residual_value:Q", format=".2%")],
-            ).properties(title="Expected residual portfolio by month", height=300),
-            width="stretch",
-        )
-        churn_chart = cohorts.dropna(subset=["churn_rate"])
-        if not churn_chart.empty:
-            st.altair_chart(
-                alt.Chart(churn_chart).mark_line(point=True).encode(
-                    x=alt.X("cohort:T", title="Cohort"),
-                    y=alt.Y("churn_rate:Q", title="Churn Rate", axis=alt.Axis(format="%")),
-                    tooltip=["cohort:T", alt.Tooltip("churn_rate:Q", format=".2%")],
-                ).properties(title="Churn Rate per Cohort", height=300),
-                width="stretch",
-            )
-        st.markdown("**Lease Cohorts**")
-        st.dataframe(cohorts, width="stretch", height=300)
-        st.markdown(f"**Cohorts for X or more loans (>= {gi.min_loans_per_cohort} new leases)**")
-        st.dataframe(filtered, width="stretch", height=200)
-
-    with tabs[5]:
-        st.subheader("LTV Analysis")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Asset Analysis**")
-            st.metric("Average Useful Life (m)", fmt(ltv_data["avg_useful_life_m"], "{:.1f}"))
-            st.metric("Defaulted contracts > 3mo", fmt(ltv_data["n_defaulted_gt_3m"], "{:.0f}"))
-            st.metric("% recovered", fmt(ltv_data["pct_recovered"]))
-            st.metric("Loss (non-recoverability)", fmt(ltv_data["loss_non_recoverability"]))
-            st.metric("MRR Multiplier (3y)", fmt(ltv_data["mrr_multiplier"], "{:.2f}"))
-            st.metric("MRR / average cost", fmt(ltv_data["mrr_over_avg_cost"], "{:.2%}"))
-        with col2:
-            st.markdown("**Cash Flow Analysis (MRR)**")
-            st.metric("MRR", fmt(ltv_data["mrr"], "{:,.0f}"))
-            st.metric("Average Monthly Churn", fmt(ltv_data["avg_monthly_churn"], "{:.2%}"))
-            st.metric("Average Collection Rate", fmt(ltv_data["avg_collection_rate"]))
-            st.metric("95th %ile Churn", fmt(ltv_data["pctile_95_churn"], "{:.2%}"))
-            st.metric("Stressed Churn", fmt(ltv_data["stressed_churn"], "{:.2%}"))
-
-    with tabs[6]:
-        st.subheader("TS Covenants")
-        st.markdown("**Performance Covenants**")
-        for m in (6, 12, 24):
-            val = ts[f"paid_at_{m}m_over_cost"]
-            suffix = fmt(val) if pd.notna(val) else "n/a (insufficient data)"
-            st.write(f"Paid at {m} months over asset acquisition cost: {suffix}")
-        st.metric("Option 2 - Avg Monthly Paid over Avg Cost of Asset", fmt(ts["option2_observed"], "{:.2%}"))
-        st.markdown("**Recoverability Covenants**")
-        st.metric("Recovery Rate (observed loss)", fmt(ts["recovery_rate_observed"]))
-
-    with tabs[7]:
-        st.subheader("General Analysis")
-        summary = general_analysis(df)
-        st.write(f"**Shape:** {summary['shape'][0]:,} rows x {summary['shape'][1]} columns")
-        st.write("**Columns:**", ", ".join(summary["columns"]))
-        orig = cohorts[["cohort", "value_of_leases"]].dropna()
-        if not orig.empty:
-            st.altair_chart(
-                alt.Chart(orig).mark_bar().encode(
-                    x=alt.X("cohort:T", title="Cohort"),
-                    y=alt.Y("value_of_leases:Q", title="Value of Leases"),
-                    tooltip=["cohort:T", alt.Tooltip("value_of_leases:Q", format=",.0f")],
-                ).properties(title="New lease value per month", height=350),
-                width="stretch",
-            )
-
-    with tabs[8]:
-        _render_custom_visualizations_tab({
-            "Data Input": df, "Asset View": av, "Lease Cohorts": cohorts,
-            "Cohorts for X or more loans": filtered, "Repayment Curve": curve,
-            "Churn Residual Curve": ca_data["residual_curve"],
-        })
-
-    with tabs[9]:
-        chat_context = _build_rental_chat_context(
-            gi, df, av, cohorts, ue_data, ltv_data, ca_data, dq_checks_rental,
-            user_context=_ai_context_text(max_chars=60000, per_doc=15000),
-        )
-        _render_ai_chat_tab(chat_context)
-
 with tabs[1]:
     st.subheader("Data Checks")
     checks_tab, data_tab = st.tabs(["Checks", "Data Input"])
     with checks_tab:
-        if is_lending:
-            _render_data_quality_checks(
-                dq_checks, "Loss Rate (%)", MODEL_LABELS[model_key],
-                "escalate_variance", file_name,
-            )
-        else:
-            _render_data_quality_checks(
-                dq_checks_rental, "Churn Rate (%)", MODEL_LABELS[model_key],
-                "escalate_variance_rental", file_name,
-            )
+        _render_data_quality_checks(
+            dq_checks, "Loss Rate (%)", "Lending",
+            "escalate_variance", file_name,
+        )
     with data_tab:
-        if is_lending:
-            st.caption(
-                f"{len(raw):,} rows x {len(raw.columns)} columns uploaded. "
-                f"Computed columns (Cohort, Term, Reached T+3?) used in downstream sheets."
-            )
-            st.dataframe(raw, width="stretch", height=400)
-        else:
-            st.caption(f"{len(df):,} rows x {len(df.columns)} columns. Includes all Lendable-derived columns.")
-            st.dataframe(df, width="stretch", height=400)
+        st.caption(
+            f"{len(raw):,} rows x {len(raw.columns):,} columns uploaded. "
+            f"Computed columns (Cohort, Term, Reached T+3?) used in downstream sheets."
+        )
+        st.dataframe(raw, width="stretch", height=400)
 
 st.markdown("---")
 
@@ -3585,109 +3020,6 @@ def _build_lending_export_workbook(
     return buf.getvalue()
 
 
-def _build_export_workbook():
-    export_col_order = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
-    data_input_export = df[export_col_order + [c for c in df.columns if c not in export_col_order]]
-
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        gs = writer.book.create_sheet("General Inputs", 0)
-        # start_date is the 3rd column (C) in the fixed Data Input export order below.
-        for r, label, val, note in [
-            (2, "Inputs", None, None),
-            (3, "Date of extraction", "=MAX('Data Input'!C:C)", "Defaults to most recent contract start date"),
-            (4, "Days after term", gi.days_after_term, "Ignore any contracts for loss rates that are less than this number of days after term"),
-            (5, "Months since default", gi.months_since_default, "Includes only contracts that defaulted over this many months ago"),
-            (6, "Minimum loans per cohort", gi.min_loans_per_cohort, "Ignore any cohorts for loss rates that are less than this number of contracts"),
-            (7, "Useful life of asset (years)", gi.useful_life_years, "Assumed Useful Life of Asset"),
-        ]:
-            if label:
-                gs.cell(row=r, column=2, value=label)
-            if val is not None:
-                gs.cell(row=r, column=3, value=val)
-            if note:
-                gs.cell(row=r, column=4, value=note)
-
-        q_df = pd.DataFrame([(i, q) for i, q in enumerate(QUESTIONS, 1)], columns=["#", "Question"])
-        q_df.to_excel(writer, sheet_name="Data Questionnaire", index=False)
-
-        data_input_export.to_excel(writer, sheet_name="Data Input", index=False, header=True)
-
-        av.to_excel(writer, sheet_name="Asset View", index=False)
-
-        ue_df = pd.DataFrame(list(ue_data.items()), columns=["Metric", "Value"])
-        ue_df = ue_df[ue_df["Metric"] != "residual_curve"]
-        ue_df.to_excel(writer, sheet_name="Unit Economics Analysis", index=False)
-        ue_ws = writer.sheets["Unit Economics Analysis"]
-        curve_export = curve.dropna(subset=["pct_avg_collection"])
-        if not curve_export.empty:
-            curve_export[["mob", "pct_avg_collection"]].to_excel(
-                writer, sheet_name="Unit Economics Analysis", startrow=len(ue_df) + 2, index=False,
-            )
-            sr = len(ue_df) + 3
-            lr = sr + len(curve_export) - 1
-            c = LineChart()
-            c.title = "High level repayment curve"
-            c.y_axis.numFmt = "0.00%"
-            c.height, c.width = 14, 24
-            data = Reference(ue_ws, min_col=1, min_row=sr - 1, max_col=2, max_row=lr)
-            cats = Reference(ue_ws, min_col=1, min_row=sr, max_row=lr)
-            c.add_data(data, titles_from_data=True)
-            c.set_categories(cats)
-            ue_ws.add_chart(c, f"D{sr - 1}")
-
-        ca_export = {k: v for k, v in ca_data.items() if k != "residual_curve"}
-        ca_df = pd.DataFrame(list(ca_export.items()), columns=["Metric", "Value"])
-        ca_df.to_excel(writer, sheet_name="Churn Analysis", index=False)
-        ca_ws = writer.sheets["Churn Analysis"]
-        residual = ca_data["residual_curve"]
-        if not residual.empty:
-            residual.to_excel(writer, sheet_name="Churn Analysis", startrow=len(ca_df) + 2, index=False)
-            sr = len(ca_df) + 3
-            lr = sr + len(residual) - 1
-            c = LineChart()
-            c.title = "Expected residual portfolio by month"
-            c.height, c.width = 14, 24
-            data = Reference(ca_ws, min_col=1, min_row=sr - 1, max_col=2, max_row=lr)
-            cats = Reference(ca_ws, min_col=1, min_row=sr, max_row=lr)
-            c.add_data(data, titles_from_data=True)
-            c.set_categories(cats)
-            ca_ws.add_chart(c, f"D{sr - 1}")
-
-        ltv_df = pd.DataFrame(list(ltv_data.items()), columns=["Metric", "Value"])
-        ltv_df.to_excel(writer, sheet_name="LTV Analysis", index=False)
-
-        ts_df = pd.DataFrame(list(ts.items()), columns=["Metric", "Value"])
-        ts_df.to_excel(writer, sheet_name="TS Covenants", index=False)
-
-        ga_summary = general_analysis(df)
-        ga_df = pd.DataFrame([
-            ("Shape", f"{ga_summary['shape'][0]:,} rows x {ga_summary['shape'][1]} cols"),
-            ("Columns", ", ".join(ga_summary["columns"])),
-        ], columns=["Property", "Value"])
-        ga_df.to_excel(writer, sheet_name="General Analysis", index=False)
-        ga_ws = writer.sheets["General Analysis"]
-        orig_source = cohorts[["cohort", "value_of_leases"]].dropna()
-        if not orig_source.empty:
-            orig_source.to_excel(writer, sheet_name="General Analysis", startrow=4, index=False)
-            c = BarChart()
-            c.title = "New lease value per month"
-            c.height, c.width = 14, 24
-            data = Reference(ga_ws, min_col=1, min_row=5, max_col=2, max_row=4 + len(orig_source))
-            cats = Reference(ga_ws, min_col=1, min_row=6, max_row=4 + len(orig_source))
-            c.add_data(data, titles_from_data=True)
-            c.set_categories(cats)
-            ga_ws.add_chart(c, "D6")
-
-        cohorts.to_excel(writer, sheet_name="Lease Cohorts", index=False)
-        filtered.to_excel(writer, sheet_name="Cohorts for X or more loans", index=False)
-
-        _write_custom_charts_sheet(writer, st.session_state.get("export_charts", []))
-
-    buf.seek(0)
-    return buf
-
-
 if is_lending:
     buf = _build_lending_export_workbook(
         df, cohorts, filtered, gi.days_after_term, gi.min_loans_per_cohort,
@@ -3695,9 +3027,6 @@ if is_lending:
         term_supplied,
     )
     file_name = f"SC_Analysis_Lending_{pd.Timestamp.now():%Y-%m-%d}.xlsx"
-else:
-    buf = _build_export_workbook()
-    file_name = f"SC_Analysis_Rental_{pd.Timestamp.now():%Y-%m-%d}.xlsx"
 
 st.download_button(
     "Download full workbook as Excel",

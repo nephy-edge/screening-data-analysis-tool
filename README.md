@@ -1,8 +1,11 @@
-# Rental & Subscription — LTV / Unit Economics Analysis
+# Lending — LTV / Unit Economics Analysis
 
 Streamlit re-implementation of the Lendable **SC Analysis for LTV and UE** workbook
-(Rental & Subscription / asset-lease variant), verified against the workbook
-calculation engine.
+(Lending / loan-tape variant), verified against the workbook calculation engine.
+
+The Rental & Subscription (asset-lease) model was removed from this app; its code
+lives unlinked in the `rental_and_subscription/` folder (see git history for the
+previously unified two-model version of the app).
 
 ## Run locally
 
