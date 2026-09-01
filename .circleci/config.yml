@@ -97,6 +97,28 @@ jobs:
       - build_and_healthcheck
 
       - run:
+          name: Install a current AWS CLI
+          command: |
+            set -euo pipefail
+            # cimg/aws:2024.03 ships aws-cli 2.15.25, which PREDATES ECS Express
+            # Mode (Nov 2025) and has zero express-gateway-service operations.
+            # The deploy fails with a 40-line "Invalid choice" usage dump.
+            # Upgrading in-job rather than chasing image tags, because this API
+            # is new and still moving.
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q -o /tmp/awscliv2.zip -d /tmp
+            sudo /tmp/aws/install --update >/dev/null
+            hash -r
+            aws --version
+            # Fail fast and legibly if the operation still is not there.
+            # NOTE: probe with --generate-cli-skeleton, NOT `help` -- `aws help`
+            # needs groff, which the image lacks, so a help-based check is a
+            # false negative.
+            aws ecs describe-express-gateway-service --generate-cli-skeleton >/dev/null 2>&1 || {
+              echo "AWS CLI has no express-gateway-service operations; deploy cannot proceed"
+              exit 1
+            }
+      - run:
           name: Assume the deploy role via OIDC
           command: |
             set -euo pipefail
