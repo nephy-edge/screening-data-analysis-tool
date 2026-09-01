@@ -12,6 +12,9 @@ env/
 # Local environment variables (never commit API keys)
 .env
 
+# Google Drive OAuth refresh token (local persistence; never commit)
+.google_drive_token.json
+
 # Certificates / credentials
 *.pem
 *.key
@@ -33,3 +36,10 @@ certs/
 
 # Client/source workbooks — contains raw Astranova portfolio data; do not publish
 docs/
+
+# Client portfolio data files (workbooks, exports, raw dumps) — never publish
+*.xlsx
+*.xls
+*.csv
+scripts/*.txt
+scripts/*.xml
