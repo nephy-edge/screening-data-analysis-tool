@@ -21,8 +21,8 @@ def _num(series) -> pd.Series:
 def compute_loan_rates(df: pd.DataFrame) -> pd.DataFrame:
     """Per-loan implied APR (nominal) and EAR (compounded), solving the standard
     amortization equation for the periodic rate that turns Principal Value into
-    the full amount owed (Total Due, or Principal + Interest + Fee when Total
-    Due isn't available) via a series of installments.
+    the full amount owed (Principal + Interest + Fee) via a series of
+    installments.
 
     Uses the loan's real installment (Payment per Period, at the cadence given
     by Payment Frequency) when available, deriving how many installments that
@@ -38,12 +38,20 @@ def compute_loan_rates(df: pd.DataFrame) -> pd.DataFrame:
     principal = _num(df["Principal Value"])
     term_days = _num(df["Term (days)"])
 
-    if "Total Due" in df.columns and df["Total Due"].notna().any():
-        owed = _num(df["Total Due"])
-    else:
-        interest = _num(df["Expected Interest"]).fillna(0) if "Expected Interest" in df.columns else 0.0
-        fee = _num(df["Expected Fee"]).fillna(0) if "Expected Fee" in df.columns else 0.0
-        owed = principal + interest + fee
+    # Deliberately never uses "Total Due" even when mapped, only Principal +
+    # Interest + Fee - mirrors cohorts.py's build_cohorts(), which made the
+    # same call for the same reason. "Total Due" fields are frequently a
+    # to-date collections snapshot (e.g. a column literally named "Total EMI
+    # due till date", paired with "Total Collection till date"/Total Paid for
+    # a Paid-vs-Due ratio) rather than the full lifetime payoff amount this
+    # amortization solve needs. Confirmed on a real file: Total Due averaged
+    # LESS than Principal Value alone (before adding any interest/fees) on
+    # 86% of loans - mathematically impossible for a genuine total-owed
+    # figure - which forced numpy_financial.rate() to solve deeply negative
+    # implied rates instead of raising or flagging the mismatch.
+    interest = _num(df["Expected Interest"]).fillna(0) if "Expected Interest" in df.columns else 0.0
+    fee = _num(df["Expected Fee"]).fillna(0) if "Expected Fee" in df.columns else 0.0
+    owed = principal + interest + fee
 
     if "Payment Frequency" in df.columns:
         periods_per_year = (
@@ -110,7 +118,6 @@ def principal_weighted_average_rates(df: pd.DataFrame) -> dict:
     total_weight = weights.sum()
     n_total = len(df)
     n_solved = int(rates["APR"].notna().sum())
-    has_total_due = "Total Due" in df.columns and df["Total Due"].notna().any()
     n_real_pmt = int(
         (_num(df["Payment per Period"]) > 0).sum()
         if "Payment per Period" in df.columns else 0
@@ -123,7 +130,7 @@ def principal_weighted_average_rates(df: pd.DataFrame) -> dict:
     return {
         "APR": apr, "EAR": ear,
         "n_total": n_total, "n_solved": n_solved,
-        "has_total_due": has_total_due, "n_real_pmt": n_real_pmt,
+        "n_real_pmt": n_real_pmt,
         "n_valid_inputs": rates.attrs.get("n_valid_inputs"),
         "n_converged": rates.attrs.get("n_converged"),
     }

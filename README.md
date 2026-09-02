@@ -15,6 +15,36 @@ previously unified two-model version of the app).
 
 App opens at `http://localhost:8501` (unless overridden in `.streamlit/config.toml`).
 
+## Development
+
+Install runtime + dev dependencies into the project venv:
+
+```powershell
+.venv\Scripts\pip.exe install -r requirements.txt -r requirements-dev.txt
+```
+
+Lint and format (via [Ruff](https://docs.astral.sh/ruff/)):
+
+```powershell
+.venv\Scripts\ruff.exe check .
+.venv\Scripts\ruff.exe format .
+```
+
+Run tests:
+
+```powershell
+.venv\Scripts\pytest.exe
+```
+
+Optionally enable pre-commit hooks so lint/format run automatically on `git commit`:
+
+```powershell
+.venv\Scripts\pre-commit.exe install
+```
+
+CI (`.github/workflows/ci.yml`) runs `ruff check`, `ruff format --check`, and `pytest`
+on every push and pull request.
+
 ## Deploy to Streamlit Community Cloud
 
 Free hosting from a GitHub repo — no server to manage.

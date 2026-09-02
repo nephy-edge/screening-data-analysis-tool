@@ -22,9 +22,11 @@ from urllib.parse import quote
 
 import altair as alt
 import certifi
+import numpy_financial as npf
 import pandas as pd
 import requests
 import streamlit as st
+from openpyxl import load_workbook
 from openpyxl.chart import AreaChart, BarChart, LineChart, Reference, ScatterChart, Series
 from openpyxl.utils import get_column_letter
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
@@ -60,8 +62,10 @@ from template_analysis.ltv_calculator import (
     TENORS as LTV_CALC_TENORS, FX_DEVAL_TABLE as LTV_CALC_FX_DEVAL_TABLE,
 )
 
-DEEPINFRA_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
-DEEPINFRA_CHAT_URL = "https://api.deepinfra.com/v1/openai/chat/completions"
+import config as app_config
+
+DEEPINFRA_MODEL = app_config.AI["model"]
+DEEPINFRA_CHAT_URL = app_config.AI["chat_url"]
 _EXTRA_CA_PEM = os.path.join(os.path.dirname(__file__), "certs", "corporate_root.pem")
 
 
@@ -80,6 +84,86 @@ def _ca_bundle_path() -> str:
     tmp.write(bundle)
     tmp.close()
     return tmp.name
+
+
+# ISO 4217 currencies covered by the open.er-api.com free FX endpoint - kept
+# in sync with that API's own currency set (checked via its /latest/USD
+# response) so every option in the picker below is actually convertible.
+CURRENCY_NAMES = {
+    "AED": "UAE Dirham", "AFN": "Afghan Afghani", "ALL": "Albanian Lek",
+    "AMD": "Armenian Dram", "ANG": "Netherlands Antillean Guilder", "AOA": "Angolan Kwanza",
+    "ARS": "Argentine Peso", "AUD": "Australian Dollar", "AWG": "Aruban Florin",
+    "AZN": "Azerbaijani Manat", "BAM": "Bosnia-Herzegovina Convertible Mark", "BBD": "Barbadian Dollar",
+    "BDT": "Bangladeshi Taka", "BGN": "Bulgarian Lev", "BHD": "Bahraini Dinar",
+    "BIF": "Burundian Franc", "BMD": "Bermudan Dollar", "BND": "Brunei Dollar",
+    "BOB": "Bolivian Boliviano", "BRL": "Brazilian Real", "BSD": "Bahamian Dollar",
+    "BTN": "Bhutanese Ngultrum", "BWP": "Botswanan Pula", "BYN": "Belarusian Ruble",
+    "BZD": "Belize Dollar", "CAD": "Canadian Dollar", "CDF": "Congolese Franc",
+    "CHF": "Swiss Franc", "CLF": "Chilean Unit of Account (UF)", "CLP": "Chilean Peso",
+    "CNH": "Chinese Yuan (Offshore)", "CNY": "Chinese Yuan", "COP": "Colombian Peso",
+    "CRC": "Costa Rican Colon", "CUP": "Cuban Peso", "CVE": "Cape Verdean Escudo",
+    "CZK": "Czech Koruna", "DJF": "Djiboutian Franc", "DKK": "Danish Krone",
+    "DOP": "Dominican Peso", "DZD": "Algerian Dinar", "EGP": "Egyptian Pound",
+    "ERN": "Eritrean Nakfa", "ETB": "Ethiopian Birr", "EUR": "Euro",
+    "FJD": "Fijian Dollar", "FKP": "Falkland Islands Pound", "FOK": "Faroese Krona",
+    "GBP": "British Pound", "GEL": "Georgian Lari", "GGP": "Guernsey Pound",
+    "GHS": "Ghanaian Cedi", "GIP": "Gibraltar Pound", "GMD": "Gambian Dalasi",
+    "GNF": "Guinean Franc", "GTQ": "Guatemalan Quetzal", "GYD": "Guyanaese Dollar",
+    "HKD": "Hong Kong Dollar", "HNL": "Honduran Lempira", "HRK": "Croatian Kuna",
+    "HTG": "Haitian Gourde", "HUF": "Hungarian Forint", "IDR": "Indonesian Rupiah",
+    "ILS": "Israeli New Shekel", "IMP": "Isle of Man Pound", "INR": "Indian Rupee",
+    "IQD": "Iraqi Dinar", "IRR": "Iranian Rial", "ISK": "Icelandic Krona",
+    "JEP": "Jersey Pound", "JMD": "Jamaican Dollar", "JOD": "Jordanian Dinar",
+    "JPY": "Japanese Yen", "KES": "Kenyan Shilling", "KGS": "Kyrgystani Som",
+    "KHR": "Cambodian Riel", "KID": "Kiribati Dollar", "KMF": "Comorian Franc",
+    "KRW": "South Korean Won", "KWD": "Kuwaiti Dinar", "KYD": "Cayman Islands Dollar",
+    "KZT": "Kazakhstani Tenge", "LAK": "Laotian Kip", "LBP": "Lebanese Pound",
+    "LKR": "Sri Lankan Rupee", "LRD": "Liberian Dollar", "LSL": "Lesotho Loti",
+    "LYD": "Libyan Dinar", "MAD": "Moroccan Dirham", "MDL": "Moldovan Leu",
+    "MGA": "Malagasy Ariary", "MKD": "Macedonian Denar", "MMK": "Myanmar Kyat",
+    "MNT": "Mongolian Tugrik", "MOP": "Macanese Pataca", "MRU": "Mauritanian Ouguiya",
+    "MUR": "Mauritian Rupee", "MVR": "Maldivian Rufiyaa", "MWK": "Malawian Kwacha",
+    "MXN": "Mexican Peso", "MYR": "Malaysian Ringgit", "MZN": "Mozambican Metical",
+    "NAD": "Namibian Dollar", "NGN": "Nigerian Naira", "NIO": "Nicaraguan Cordoba",
+    "NOK": "Norwegian Krone", "NPR": "Nepalese Rupee", "NZD": "New Zealand Dollar",
+    "OMR": "Omani Rial", "PAB": "Panamanian Balboa", "PEN": "Peruvian Sol",
+    "PGK": "Papua New Guinean Kina", "PHP": "Philippine Peso", "PKR": "Pakistani Rupee",
+    "PLN": "Polish Zloty", "PYG": "Paraguayan Guarani", "QAR": "Qatari Riyal",
+    "RON": "Romanian Leu", "RSD": "Serbian Dinar", "RUB": "Russian Ruble",
+    "RWF": "Rwandan Franc", "SAR": "Saudi Riyal", "SBD": "Solomon Islands Dollar",
+    "SCR": "Seychellois Rupee", "SDG": "Sudanese Pound", "SEK": "Swedish Krona",
+    "SGD": "Singapore Dollar", "SHP": "Saint Helena Pound", "SLE": "Sierra Leonean Leone",
+    "SLL": "Sierra Leonean Leone (old)", "SOS": "Somali Shilling", "SRD": "Surinamese Dollar",
+    "SSP": "South Sudanese Pound", "STN": "Sao Tome & Principe Dobra", "SYP": "Syrian Pound",
+    "SZL": "Swazi Lilangeni", "THB": "Thai Baht", "TJS": "Tajikistani Somoni",
+    "TMT": "Turkmenistani Manat", "TND": "Tunisian Dinar", "TOP": "Tongan Pa'anga",
+    "TRY": "Turkish Lira", "TTD": "Trinidad & Tobago Dollar", "TVD": "Tuvaluan Dollar",
+    "TWD": "New Taiwan Dollar", "TZS": "Tanzanian Shilling", "UAH": "Ukrainian Hryvnia",
+    "UGX": "Ugandan Shilling", "USD": "US Dollar", "UYU": "Uruguayan Peso",
+    "UZS": "Uzbekistani Som", "VES": "Venezuelan Bolivar", "VND": "Vietnamese Dong",
+    "VUV": "Vanuatu Vatu", "WST": "Samoan Tala", "XAF": "Central African CFA Franc",
+    "XCD": "East Caribbean Dollar", "XCG": "Caribbean Guilder", "XDR": "IMF Special Drawing Rights",
+    "XOF": "West African CFA Franc", "XPF": "CFP Franc", "YER": "Yemeni Rial",
+    "ZAR": "South African Rand", "ZMW": "Zambian Kwacha", "ZWG": "Zimbabwe Gold",
+    "ZWL": "Zimbabwean Dollar",
+}
+# The subset of NUMERIC_FIELDS that are actually money (as opposed to day
+# counts) - only these get rescaled when converting to USD.
+CURRENCY_FIELDS = {"Principal Value", "Expected Interest", "Expected Fee", "Total Paid", "Total Due"}
+_FX_API_URL = app_config.FX["api_url"]
+
+
+@st.cache_data(ttl=app_config.FX["cache_ttl_seconds"])
+def _fetch_usd_fx_rates() -> dict:
+    """Live USD exchange rates from a free, keyless, open API (open.er-api.com).
+    Returns {currency_code: units of that currency per 1 USD}; cached for an
+    hour so repeated reruns/uploads don't hammer the endpoint."""
+    resp = requests.get(_FX_API_URL, timeout=app_config.FX["request_timeout_seconds"], verify=_ca_bundle_path())
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("result") != "success":
+        raise ValueError(f"FX API returned {data.get('result', 'an error')}")
+    return data["rates"]
 
 
 def _get_slack_webhook_url():
@@ -696,6 +780,41 @@ def _render_snapshot_table(rows: list) -> None:
     st.markdown(html, unsafe_allow_html=True)
 
 
+def _render_big_number_card(label: str, value: float, value_fmt: str = "{:.1%}", help_text: str = None) -> None:
+    """A metric-style card matching stMetric's card look (see theme.py), but
+    with the big number colored green/red by sign - stMetric itself only
+    colors its delta, not the primary value, so a plain st.metric can't do
+    this."""
+    if pd.isna(value):
+        display, color = "n/a", "#16312E"
+    else:
+        display = value_fmt.format(value)
+        color = "#2ca02c" if value >= 0 else "#d62728"
+    tip = f'<span class="q">?<span class="tip">{_esc(help_text)}</span></span>' if help_text else ""
+    st.markdown(
+        f"""
+        <style>
+        div.big-number-card{{background:#fff;border:1px solid #D8DEE5;border-radius:7px;padding:18px 22px;}}
+        div.big-number-card .lbl{{font-size:.58rem;text-transform:uppercase;letter-spacing:.11em;color:#666666;
+            font-family:"Inter",sans-serif;font-weight:600;}}
+        div.big-number-card .val{{font-size:1.9rem;font-family:"Inter",sans-serif;font-weight:700;margin-top:2px;}}
+        div.big-number-card .q{{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;
+            margin-left:6px;border-radius:50%;background:#D8DEE5;color:#16312E;font-size:.7rem;font-weight:700;
+            cursor:help;position:relative;vertical-align:middle;}}
+        div.big-number-card .tip{{display:none;position:absolute;left:0;top:100%;width:230px;margin-top:6px;padding:8px 10px;
+            background:#16312E;color:#EDF3F1;font-size:.72rem;font-weight:400;font-family:"Inter",sans-serif;
+            text-transform:none;letter-spacing:normal;border-radius:6px;z-index:50;line-height:1.4;}}
+        div.big-number-card .q:hover .tip{{display:block;}}
+        </style>
+        <div class="big-number-card">
+            <div class="lbl">{_esc(label)}{tip}</div>
+            <div class="val" style="color:{color};">{_esc(display)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _ue_model_badge(text: str, bg: str, fg: str) -> None:
     st.markdown(
         f'<span style="background:{bg};color:{fg};padding:2px 8px;border-radius:4px;'
@@ -749,35 +868,85 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
         "matured-loan GBV (matching the Derived section below), financing % as per annum; 0 if not "
         "applicable."
     )
-    m1, m2, m3 = st.columns(3)
+    _cost_defaults = app_config.UE_MODEL_COST_DEFAULTS
+    m1, m2 = st.columns(2)
     upfront_cost_pct = m1.number_input(
-        "Upfront variable costs (% of matured-loan GBV)", min_value=0.0, value=0.0, step=0.1,
+        "Upfront variable costs (% of matured-loan GBV)", min_value=0.0,
+        value=_cost_defaults["upfront_cost_pct"], step=0.1,
         format="%.2f", key="ue_ai_upfront_cost",
     ) / 100
     ongoing_cost_pct = m2.number_input(
-        "Ongoing variable costs (% of matured-loan GBV)", min_value=0.0, value=0.0, step=0.1,
+        "Ongoing variable costs (% of matured-loan GBV)", min_value=0.0,
+        value=_cost_defaults["ongoing_cost_pct"], step=0.1,
         format="%.2f", key="ue_ai_ongoing_cost",
-    ) / 100
-    extra_origination_fee_pct = m3.number_input(
-        "Origination fee not already in interest (% of matured-loan GBV)", min_value=0.0, value=0.0, step=0.1,
-        format="%.2f", key="ue_ai_extra_fee",
     ) / 100
     m4, m5, m6 = st.columns(3)
     financing_cost_pct = m4.number_input(
-        "Financing cost (% p.a.)", min_value=0.0, value=0.0, step=0.1,
+        "Financing cost (% p.a.)", min_value=0.0,
+        value=_cost_defaults["financing_cost_pct"], step=0.1,
         format="%.2f", key="ue_ai_financing_cost",
     ) / 100
     facility_fee_pct = m5.number_input(
-        "Facility fee - annualised (% p.a.)", min_value=0.0, value=0.0, step=0.1,
+        "Facility fee - annualised (% p.a.)", min_value=0.0,
+        value=_cost_defaults["facility_fee_pct"], step=0.1,
         format="%.2f", key="ue_ai_facility_fee",
     ) / 100
     hedge_cost_pct = m6.number_input(
-        "Hedge cost - annualised (% p.a.)", min_value=0.0, value=0.0, step=0.1,
+        "Hedge cost - annualised (% p.a.)", min_value=0.0,
+        value=_cost_defaults["hedge_cost_pct"], step=0.1,
         format="%.2f", key="ue_ai_hedge_cost",
     ) / 100
 
-    variable_costs_pct = upfront_cost_pct + ongoing_cost_pct + extra_origination_fee_pct
+    n_matured = len(matured)
+    avg_principal_matured = matured_principal / n_matured if n_matured else float("nan")
+    avg_fee_matured = matured_origination_income / n_matured if n_matured else float("nan")
+    avg_gbv_matured = matured_owed / n_matured if n_matured and matured_owed else float("nan")
+    n_periods = int(round(matured_term_m)) + 3 if pd.notna(matured_term_m) and matured_term_m > 0 else None
+
+    gross_irr = float("nan")
+    if n_periods and pd.notna(avg_principal_matured) and pd.notna(avg_gbv_matured) and pd.notna(losses_dollar) \
+            and matured_owed:
+        loss_rate = losses_dollar / matured_owed
+        cf0 = -avg_principal_matured + avg_fee_matured - (upfront_cost_pct * avg_principal_matured)
+        monthly_cf = (
+            (avg_gbv_matured / n_periods) * (1 - loss_rate)
+            - (ongoing_cost_pct * avg_principal_matured / n_periods)
+        )
+        cashflows = [cf0] + [monthly_cf] * n_periods
+        try:
+            monthly_irr = npf.irr(cashflows)
+        except Exception:
+            monthly_irr = float("nan")
+        if pd.notna(monthly_irr):
+            gross_irr = (1 + monthly_irr) ** 12 - 1
+
     cost_of_finance_pct = financing_cost_pct + facility_fee_pct + hedge_cost_pct
+    net_irr = gross_irr - cost_of_finance_pct if pd.notna(gross_irr) else float("nan")
+
+    st.markdown("")
+    irr1, irr2 = st.columns(2)
+    with irr1:
+        _render_big_number_card(
+            "Gross IRR",
+            gross_irr,
+            help_text=(
+                "The annualized return on an average matured loan before cost of finance: what you pay "
+                "out to fund it versus what you collect back over its life, net of losses and variable "
+                "costs. A simplified straight-line estimate, not the workbook's full cash-flow schedule."
+            ),
+        )
+    with irr2:
+        _render_big_number_card(
+            "Net IRR",
+            net_irr,
+            help_text=(
+                "Gross IRR minus Cost of Finance (Financing cost + Facility fee + Hedge cost, % p.a.) - "
+                "the return after what it costs to fund the book, not just the loan itself."
+            ),
+        )
+    st.markdown("")
+
+    variable_costs_pct = upfront_cost_pct + ongoing_cost_pct
 
     # Cost of Finance is a per-annum rate, but Product Margin is cumulative over the matured
     # loans' own life - subtracting the raw annual rate from it would mix units. Gross it up by
@@ -803,18 +972,19 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
     st.markdown("")
     _ue_model_badge("Auto-calculated from your data", "#2ca02c", "#fff")
     _render_snapshot_table([
-        ("Revenue (interest)", f"${revenue:,.0f}", "Total expected interest income across all loans."),
-        ("Origination Income", f"${origination_income:,.0f}", "Total expected fee income across all loans."),
-        ("Implied Interest (annualized)", fmt(implied_interest),
+        ("Product Interest Rate", fmt(ue_data["Average Interest %"]),
+         "Total expected interest income as a % of total principal disbursed, across all loans - "
+         "the stated interest on the product, not the solved-for APR below."),
+        ("Origination Income %", fmt(ue_data["Average Fee %"]),
+         "Total expected fee income as a % of total principal disbursed, across all loans."),
+        ("Implied Interest (APR) %", fmt(implied_interest),
          "Nominal APR: principal-weighted average implied rate, same figure as the Cohorts Stats tab."),
-        ("Interest Rate (m)", fmt(implied_interest / 12), "Implied interest divided by 12."),
-        ("Losses", f"${losses_dollar:,.0f}" if pd.notna(losses_dollar) else "n/a",
-         "Owed - paid across matured loans (Reached T+3? = True)."),
-        ("Losses (% of GBV)", fmt(losses_pct_of_gbv),
+        ("Implied Monthly Interest %", fmt(implied_interest / 12), "Implied interest divided by 12."),
+        ("Loss %", fmt(losses_pct_of_gbv),
          "Losses in dollars divided by total Principal Value disbursed across the whole book - a "
          "literal % of GBV (not the Summary tab's Loss Rate, which divides by matured owed instead "
          "and is scoped to a much smaller base)."),
-        ("Term (m)", fmt(term_m, "{:,.1f}"), "Principal-weighted average term, in months."),
+        ("Term", fmt(term_m, "{:,.1f} months"), "Principal-weighted average term."),
     ])
     st.caption(
         f"{len(matured):,} of {len(df):,} loans have matured (Reached T+3? = True), "
@@ -828,33 +998,30 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
         "Losses' scope - not the full-book totals shown above."
     )
     _render_snapshot_table([
-        ("Income (net losses)", f"${income_net_losses:,.0f}" if pd.notna(income_net_losses) else "n/a",
-         "Matured-only Revenue + Origination Income - Losses."),
-        ("Income (net losses) Margin", fmt(income_net_losses_margin),
-         "Income (net losses) as a % of matured-loan GBV."),
+        ("Income (net losses)", fmt(income_net_losses_margin),
+         "Matured-only Revenue + Origination Income - Losses, as a % of matured-loan GBV."),
         ("Variable costs", f"${variable_costs_dollar:,.0f}" if pd.notna(variable_costs_dollar) else "n/a",
-         "(Upfront + ongoing + extra origination fee %) x matured-loan GBV."),
-        ("Variable costs (% of GBV)", fmt(variable_costs_pct), "Sum of the three cost %s entered above."),
-        ("Product contribution", f"${product_contribution:,.0f}" if pd.notna(product_contribution) else "n/a",
-         "Income (net losses) - Variable costs."),
-        ("Product Margin", fmt(product_margin),
-         "Product contribution as a % of matured-loan GBV - the workbook's 'simple' "
-         "(non-time-value-of-money) unit economics basis, computed only on the subset of the book "
-         "that's actually matured."),
+         "(Upfront + ongoing costs %) x matured-loan GBV."),
+        ("Variable costs (% of GBV)", fmt(variable_costs_pct), "Sum of the two cost %s entered above."),
+        ("Product contribution", fmt(product_margin),
+         "Income (net losses) - Variable costs, as a % of matured-loan GBV - the workbook's "
+         "'simple' (non-time-value-of-money) unit economics basis, computed only on the subset "
+         "of the book that's actually matured."),
         ("Cost of Finance (% p.a.)", fmt(cost_of_finance_pct),
          "Financing cost + Facility fee + Hedge cost, as entered (per annum)."),
         ("Cost of Finance (over loan life)", fmt(cost_of_finance_over_term),
          f"Cost of Finance (% p.a.) x matured loans' own weighted term ({fmt(matured_term_m, '{:,.1f}')} "
          "months) / 12 - not the full-book Term (m) above, which covers a different, longer-duration "
-         "population. Grossed up so it's comparable to Product Margin before being netted below."),
+         "population. Grossed up so it's comparable to Product contribution before being netted below."),
         ("Net Unit Economics (simplified)", fmt(net_ue_simple),
-         "Product Margin - Cost of Finance (over loan life). A single-period proxy for the workbook's "
-         "cash-flow-basis Net Unit Economics - see the caption below."),
+         "Product contribution - Cost of Finance (over loan life). A single-period proxy for the "
+         "workbook's cash-flow-basis Net Unit Economics - see the caption below."),
     ])
     st.caption(
         "Not replicated: 'IRR of cash flow' and 'Net Unit Economics (Cash Flow)'. Both need a full "
         "monthly repayment + loss + cost cash-flow schedule (XIRR/XNPV at WACC), which this app "
-        "doesn't build - 'Net Unit Economics (simplified)' above is a proxy, not that figure."
+        "doesn't build - 'Net Unit Economics (simplified)' above is a proxy, not that figure, and "
+        "'Net IRR' at the top of this tab is a straight-line approximation, not that schedule either."
     )
     return {
         "revenue": revenue, "origination_income": origination_income,
@@ -864,7 +1031,7 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
         "matured_gbv_pct": matured_principal / principal if principal else float("nan"),
         "income_net_losses": income_net_losses, "income_net_losses_margin": income_net_losses_margin,
         "product_margin": product_margin, "cost_of_finance_pct": cost_of_finance_pct,
-        "net_ue_simple": net_ue_simple,
+        "net_ue_simple": net_ue_simple, "gross_irr": gross_irr, "net_irr": net_irr,
     }
 
 
@@ -998,25 +1165,12 @@ def _suggest_derived_column(
         raise RuntimeError("No DEEPINFRA_API_KEY found. Add it to Streamlit secrets or the environment.")
 
     ops = list(DERIVED_OPS.keys())
-    system_prompt = (
-        f"You help map a {domain_hint}'s raw columns to a derived column. "
-        "You can only combine exactly two existing columns with one of these operators: "
-        f"{', '.join(ops)} (division). "
-        "Pick the two columns and operator that best satisfy the user's request. "
-        "If the request truly needs more than two columns or a non-arithmetic transform, "
-        "still return your best two-column approximation and say so in the explanation.\n\n"
-        f"Available columns (use these exact names): {', '.join(columns)}\n"
-        f"Available operators (use exactly one of these characters): {', '.join(ops)}\n\n"
-        "Respond with ONLY a JSON object, no markdown fences, matching this shape:\n"
-        '{"name": "<short column name>", "col_a": "<one of the available columns>", '
-        '"op": "<one of the available operators>", "col_b": "<one of the available columns>", '
-        '"explanation": "<one sentence>"}'
-    )
+    system_prompt = app_config.render_prompt(
+        app_config.AI_PROMPTS["derived_column_suggestion"],
+        domain_hint=domain_hint, ops=", ".join(ops), columns=", ".join(columns),
+    ).strip()
     if context.strip():
-        system_prompt += (
-            "\n\nUser-provided documentation about this dataset - prefer it when deciding "
-            "what a column means or how a metric should be calculated:\n" + context.strip()
-        )
+        system_prompt += app_config.AI_PROMPTS["derived_column_context_suffix"] + context.strip()
 
     resp = requests.post(
         DEEPINFRA_CHAT_URL,
@@ -1028,9 +1182,9 @@ def _suggest_derived_column(
                 {"role": "user", "content": user_request},
             ],
             "response_format": {"type": "json_object"},
-            "max_tokens": 512,
+            "max_tokens": app_config.AI["derived_column_max_tokens"],
         },
-        timeout=30,
+        timeout=app_config.AI["request_timeout_seconds"],
         verify=_ca_bundle_path(),
     )
     resp.raise_for_status()
@@ -1079,25 +1233,12 @@ def _suggest_mapping(columns: list, input_columns: list, context: str = "") -> d
         f"- {target} ({'required' if required else 'optional'}): {FIELD_DESCRIPTIONS.get(target, '')}"
         for target, required in input_columns
     )
-    system_prompt = (
-        "You are mapping a model's raw column names to a fixed set of template "
-        "fields. For each template field below, choose the single raw column "
-        "that best matches its meaning.\n\n"
-        f"Available raw columns (use these exact names, or null if none fit): "
-        f"{', '.join(columns)}\n\n"
-        "Template fields to fill:\n"
-        f"{fields}\n\n"
-        "Respond with ONLY a JSON object, no markdown fences, mapping each "
-        "template field to a raw column name (exact string) or null when no "
-        "column plausibly matches. Example:\n"
-        '{"Loan ID": "account_id", "Disbursement Date": "funded_at", '
-        '"Total Due": null}'
-    )
+    system_prompt = app_config.render_prompt(
+        app_config.AI_PROMPTS["mapping_suggestion"],
+        columns=", ".join(columns), fields=fields,
+    ).strip()
     if context.strip():
-        system_prompt += (
-            "\n\nUser-provided documentation about this dataset - prefer it when deciding "
-            "which raw column corresponds to which template field:\n" + context.strip()
-        )
+        system_prompt += app_config.AI_PROMPTS["mapping_suggestion_context_suffix"] + context.strip()
 
     resp = requests.post(
         DEEPINFRA_CHAT_URL,
@@ -1109,9 +1250,9 @@ def _suggest_mapping(columns: list, input_columns: list, context: str = "") -> d
                 {"role": "user", "content": "Guess the best mapping for these columns."},
             ],
             "response_format": {"type": "json_object"},
-            "max_tokens": 512,
+            "max_tokens": app_config.AI["mapping_suggestion_max_tokens"],
         },
-        timeout=30,
+        timeout=app_config.AI["request_timeout_seconds"],
         verify=_ca_bundle_path(),
     )
     resp.raise_for_status()
@@ -1140,30 +1281,10 @@ def _suggest_escalation_writeup(filename: str, facts: list, model_name: str) -> 
     if not api_key:
         return {}
 
-    system_prompt = (
-        "You help draft a Slack message escalating a data-quality anomaly from "
-        f"a {model_name} portfolio screening tool to the analytics team.\n\n"
-        f"Uploaded file name: {filename}\n\n"
-        "Flagged cohort facts:\n" + "\n".join(facts) + "\n\n"
-        "1. Guess the borrower/company name from the file name (strip file "
-        "extensions, dates, and generic words like 'template' or 'loan tape'). "
-        'If you can\'t tell, use "Unknown Borrower".\n'
-        "2. Rewrite the flagged cohort facts into a clear, well organized Slack "
-        "message (Slack mrkdwn: *bold*, bullet points with '-') for an analyst "
-        "who hasn't seen the data, summarizing what's flagged and the likely "
-        "causes. Do not invent facts not present above.\n"
-        "3. For any fact whose likely cause is \"No obvious data-driven cause\", "
-        "add a short *Possible lines of inquiry (hypotheses to verify with the "
-        f"Borrower - not conclusions)* section with 2-3 plausible external "
-        f"explanations common to a {model_name} business (e.g. underwriting/"
-        "recovery policy changes, a servicing or system migration, a "
-        "regulatory change, a one-off portfolio sale or write-off). Make clear "
-        "these are hypotheses to ask about, not established facts - never state "
-        "them as the actual cause. Omit this section entirely if every fact "
-        "already has a data-driven cause.\n\n"
-        "Respond with ONLY a JSON object, no markdown fences:\n"
-        '{"borrower_name": "<name>", "message": "<Slack mrkdwn write-up>"}'
-    )
+    system_prompt = app_config.render_prompt(
+        app_config.AI_PROMPTS["escalation_writeup"],
+        model_name=model_name, filename=filename, facts="\n".join(facts),
+    ).strip()
 
     resp = requests.post(
         DEEPINFRA_CHAT_URL,
@@ -1175,9 +1296,9 @@ def _suggest_escalation_writeup(filename: str, facts: list, model_name: str) -> 
                 {"role": "user", "content": "Draft the escalation."},
             ],
             "response_format": {"type": "json_object"},
-            "max_tokens": 700,
+            "max_tokens": app_config.AI["escalation_writeup_max_tokens"],
         },
-        timeout=30,
+        timeout=app_config.AI["request_timeout_seconds"],
         verify=_ca_bundle_path(),
     )
     resp.raise_for_status()
@@ -1354,8 +1475,45 @@ def _column_stats_tooltip(series: pd.Series, numeric: bool) -> str:
     )
 
 
+# ag-grid valueFormatters for the cohorts table columns. These must be
+# JsCode (JS functions), NOT Python functions - st_aggrid serialises
+# gridOptions to JSON and only converts JsCode objects to JS when
+# allow_unsafe_jscode=True; a raw Python function in the column defs
+# makes Streamlit's component-args JSON serialization fail with
+# "Object of type function is not JSON serializable".
+_FMT_MONEY_JS = JsCode(
+    "params => params.value == null ? '' : '$' + params.value.toLocaleString('en-US', {maximumFractionDigits: 0})"
+)
+_FMT_INT_JS = JsCode(
+    "params => params.value == null ? '' : params.value.toLocaleString('en-US', {maximumFractionDigits: 0})"
+)
+_FMT_PCT1_JS = JsCode(
+    "params => params.value == null ? '' : (params.value * 100).toFixed(1) + '%'"
+)
+
+
+# Display formatting applied to the cohorts table columns. Keys are exact
+# column names produced by build_cohorts(); each maps to an ag-grid
+# valueFormatter so the raw number stays numeric (sort/filter/histogram)
+# while the cell renders the requested human format.
 def _render_cohorts_grid(df: pd.DataFrame, bins: int = 10, height: int = 420):
-    """Snowflake-style table: distribution histogram, hover stats, and a filter per column header."""
+    """Snowflake-style table: distribution histogram, hover stats, and a filter per column header.
+
+    Copies `df` before handing it to AgGrid - st_aggrid mutates its `data`
+    argument in place (converts every datetime64 column to ISO strings for
+    JSON transport, with no defensive copy of its own), which would silently
+    downgrade the caller's own DataFrame - e.g. turning a Cohort column from
+    datetime64 into plain strings for every consumer downstream, not just
+    this grid."""
+    df = df.copy()
+    money_cols = {"Total Principal", "Total Interest", "Total Fee", "Total Due", "Total Paid"}
+    term_cols = {"Avg Term (days)", "Weighted Avg Term"}
+    pct_cols = {"PvD Ratio", "Loss Rate"}
+    column_formatters = {
+        **{c: _FMT_MONEY_JS for c in money_cols},
+        **{c: _FMT_INT_JS for c in term_cols},
+        **{c: _FMT_PCT1_JS for c in pct_cols},
+    }
     gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_default_column(
         resizable=True, sortable=True, filter=True, floatingFilter=True,
@@ -1371,13 +1529,15 @@ def _render_cohorts_grid(df: pd.DataFrame, bins: int = 10, height: int = 420):
             pd.cut(series, bins=bins).value_counts(sort=False).tolist()
             if series.nunique() > 1 else []
         )
-        gb.configure_column(
-            col,
+        kwargs = dict(
             headerComponent=_HISTOGRAM_HEADER_JS,
             headerComponentParams={"histogram": counts},
             headerTooltip=tooltip,
             filter="agNumberColumnFilter",
         )
+        if col in column_formatters:
+            kwargs["valueFormatter"] = column_formatters[col]
+        gb.configure_column(col, **kwargs)
     grid_options = gb.build()
     grid_options["headerHeight"] = 54
     grid_options["tooltipShowDelay"] = 200
@@ -1388,18 +1548,65 @@ def _render_cohorts_grid(df: pd.DataFrame, bins: int = 10, height: int = 420):
     )
 
 
-def _render_custom_visualizations_tab(data_sources: dict):
-    """Generic ad-hoc chart builder shared by both models. `data_sources` maps
-    a display name to the DataFrame it plots from for the active model."""
-    st.subheader("Custom Visualizations")
-    st.caption("Build your own charts from the mapped and computed data. Add as many chart cards as you like.")
+_CURRENCY_NAME_HINTS = ("principal", "interest", "fee", "paid", "due", "revenue", "gbv", "amount")
+_RATIO_NAME_HINTS = ("rate", "ratio", "%", "pct")
 
-    if "custom_chart_cards" not in st.session_state:
-        st.session_state["custom_chart_cards"] = [0]
-        st.session_state["custom_chart_next_id"] = 1
+
+def _smart_quant_format(col_name: str, max_abs) -> tuple:
+    """Infer a sensible (axis, tooltip_format) pair for a quantitative field
+    from its name and the actual magnitude of the values being plotted:
+    money-like names get a "$"+comma tooltip, rate/ratio-like names get a
+    percentage, and any large-magnitude field (>= 1000, regardless of name)
+    gets a short SI-style axis (k/M/B) - never hardcoded to one field, since
+    it's re-derived from whatever's actually plotted each rerun. Shared
+    between the primary Y encoding and an optional secondary line series in
+    the chart builder below."""
+    name_lower = col_name.lower()
+    is_ratio_like = any(h in name_lower for h in _RATIO_NAME_HINTS)
+    is_currency_like = not is_ratio_like and any(h in name_lower for h in _CURRENCY_NAME_HINTS)
+    is_large = pd.notna(max_abs) and max_abs >= 1000
+
+    if is_ratio_like:
+        axis = alt.Axis(format="%")
+    elif is_large:
+        axis = alt.Axis(format="~s", labelExpr="replace(datum.label, 'G', 'B')")
+    else:
+        axis = alt.Undefined
+    if is_currency_like:
+        tooltip_format = "$,.0f"
+    elif is_ratio_like:
+        tooltip_format = ".1%"
+    elif is_large:
+        tooltip_format = ",.0f"
+    else:
+        tooltip_format = alt.Undefined
+    return axis, tooltip_format
+
+
+def _render_custom_visualizations_tab(
+    data_sources: dict, key_prefix: str = "cv", header: bool = True, simple: bool = False,
+):
+    """Generic ad-hoc chart builder shared by both models. `data_sources` maps
+    a display name to the DataFrame it plots from for the active model - the
+    first entry is the data source pre-selected when a chart card is first
+    added. `key_prefix` namespaces all widget/session-state keys so this can
+    be embedded in more than one place (e.g. the Cohorts tab) on the same
+    page run without colliding with another instance's state. `simple=True`
+    drops the multi-card/Excel-export machinery (per-card header, "add to
+    export"/"remove card"/"add another chart" buttons, the export queue) for
+    a single-chart embedding like the Cohorts tab's."""
+    if header:
+        st.subheader("Custom Visualizations")
+        st.caption("Build your own charts from the mapped and computed data. Add as many chart cards as you like.")
+
+    cards_state_key = f"{key_prefix}_chart_cards"
+    next_id_state_key = f"{key_prefix}_chart_next_id"
+    if cards_state_key not in st.session_state:
+        st.session_state[cards_state_key] = [0]
+        st.session_state[next_id_state_key] = 1
 
     def _render_chart_card(card_id):
-        k = lambda name: f"cv_{name}_{card_id}"
+        k = lambda name: f"{key_prefix}_{name}_{card_id}"
         cv1, cv2 = st.columns([1, 1])
         with cv1:
             source_name = st.selectbox("Data source", options=list(data_sources.keys()), key=k("source"))
@@ -1431,9 +1638,8 @@ def _render_custom_visualizations_tab(data_sources: dict):
         )
         y_options = numeric_cols if numeric_cols else all_cols
         default_y = _pick(numeric_cols, ["principal"], y_options[0])
-        default_agg = "Sum" if default_x in datetime_cols and default_y in numeric_cols else "(none - raw rows)"
         chart_options = ["Line", "Bar", "Scatter", "Area"]
-        default_kind = "Bar" if default_agg == "Sum" else "Line"
+        default_kind = "Bar" if default_x in datetime_cols and default_y in numeric_cols else "Line"
 
         with cv2:
             chart_kind = st.selectbox("Chart type", options=chart_options, index=chart_options.index(default_kind), key=k("kind"))
@@ -1446,25 +1652,45 @@ def _render_custom_visualizations_tab(data_sources: dict):
         with cv5:
             color_col = st.selectbox("Group / color by (optional)", options=["(none)"] + [c for c in categorical_cols if c != x_col], key=k("color"))
         with cv6:
-            agg_options = ["(none - raw rows)", "Sum", "Mean", "Count", "Median", "Min", "Max"]
-            agg_func = st.selectbox("Aggregate Y by X (optional)", options=agg_options, index=agg_options.index(default_agg), key=k("agg"))
+            # A secondary metric line (e.g. Loss Rate alongside a Principal
+            # bar chart) reads its own axis on the right - more useful here
+            # than a Sum/Mean/etc. picker, which was a no-op on data that's
+            # already one row per X (like the Cohorts table: aggregating a
+            # single value any way you slice it just returns that value).
+            line_options = ["(none)"] + [c for c in numeric_cols if c not in (x_col, y_col)]
+            default_line = "Loss Rate" if "Loss Rate" in line_options else "(none)"
+            line_choice = st.selectbox(
+                "Add a line (optional)", options=line_options,
+                index=line_options.index(default_line), key=k("line"),
+                help="Overlay a second metric (e.g. Loss Rate) as a line with its own axis, "
+                     "aggregated by the mean of X (and Group/color by, if set).",
+            )
+        line_col = None if line_choice == "(none)" else line_choice
 
         base_cols = [c for c in {x_col, y_col, color_col} if c in source_df.columns]
         plot_df = source_df[base_cols].dropna(subset=[x_col, y_col])
+        group_cols = [x_col] + ([color_col] if color_col != "(none)" else [])
 
-        if agg_func != "(none - raw rows)" and not plot_df.empty:
-            group_cols = [x_col] + ([color_col] if color_col != "(none)" else [])
-            agg_name_map = {"Sum": "sum", "Mean": "mean", "Count": "count", "Median": "median", "Min": "min", "Max": "max"}
-            if agg_func == "Count":
-                agg_series = plot_df.groupby(group_cols, dropna=False)[y_col].count()
-            else:
-                agg_series = plot_df.groupby(group_cols, dropna=False)[y_col].agg(agg_name_map[agg_func])
-            # y_col can be the same column as x_col or color_col (e.g. "sum of
-            # Principal Value by Principal Value") - reset_index() would then
-            # try to insert the aggregated value under a name that's already
-            # a group-key column and raise. Give it its own column name in
+        line_df = None
+        if line_col:
+            line_cols = [c for c in {x_col, line_col} if c in source_df.columns]
+            line_df = source_df[line_cols].dropna(subset=[x_col, line_col])
+            if not line_df.empty:
+                line_df = line_df.groupby(x_col, dropna=False)[line_col].mean().reset_index()
+
+        # Auto-sum whenever the X (+ Group/color) selection doesn't already
+        # uniquely identify each row - e.g. loan-level data has many rows per
+        # Cohort, so "Total Principal by Cohort" needs a sum to be
+        # meaningful. Data that's already one row per X (like the Cohorts
+        # table) is left as-is, since summing a single value is a no-op.
+        if not plot_df.empty and plot_df.duplicated(subset=group_cols).any():
+            agg_series = plot_df.groupby(group_cols, dropna=False)[y_col].sum()
+            # y_col can be the same column as x_col or color_col (e.g. "Total
+            # Principal by Principal Value") - reset_index() would then try
+            # to insert the aggregated value under a name that's already a
+            # group-key column and raise. Give it its own column name in
             # that case (and point y_col at it for the rest of the chart).
-            value_col = f"{y_col} ({agg_func})" if y_col in group_cols else y_col
+            value_col = f"{y_col} (Sum)" if y_col in group_cols else y_col
             plot_df = agg_series.rename(value_col).reset_index()
             y_col = value_col
 
@@ -1480,19 +1706,57 @@ def _render_custom_visualizations_tab(data_sources: dict):
             "Area": alt.Chart(plot_df).mark_area(opacity=0.6),
         }
         base = mark_map[chart_kind]
-        y_title = f"{agg_func} of {y_col}" if agg_func != "(none - raw rows)" else y_col
-        chart_title = f"{y_title} by {x_col}" + (f" ({color_col})" if color_col != "(none)" else "")
+        chart_title = f"{y_col} by {x_col}" + (f" ({color_col})" if color_col != "(none)" else "")
+        if line_col:
+            chart_title += f" & {line_col}"
+
+        x_axis = (
+            # "Mon YYYY" per tick so a multi-year monthly axis doesn't repeat
+            # "June, August, ..." with no way to tell which June is which.
+            # A plain D3 format string (not a custom labelExpr) so Vega-Lite
+            # can still pre-measure label width and auto-thin overlapping
+            # ticks itself - true two-line (month/year-on-its-own-row) axis
+            # labels aren't reliably supported by Vega's SVG axis renderer,
+            # which collapses an embedded newline back to a single line.
+            # tickCount="month" pins ticks to calendar-month boundaries -
+            # without it, Vega's default continuous-time tick picker can
+            # choose a sub-monthly interval (e.g. every ~15 days), which
+            # under this format shows the same "Mon YYYY" label twice in a
+            # row for two ticks landing in the same month.
+            alt.Axis(format="%b %Y", tickCount="month") if x_type == "T" else alt.Undefined
+        )
+        y_max_abs = plot_df[y_col].abs().max() if not plot_df.empty else 0
+        y_axis, y_tooltip_format = _smart_quant_format(y_col, y_max_abs)
 
         encode_kwargs = dict(
-            x=alt.X(f"{x_col}:{x_type}", title=x_col),
-            y=alt.Y(f"{y_col}:Q", title=y_title),
-            tooltip=[x_col, y_col] + ([color_col] if color_col != "(none)" else []),
+            x=alt.X(f"{x_col}:{x_type}", title=x_col, axis=x_axis),
+            y=alt.Y(f"{y_col}:Q", title=y_col, axis=y_axis),
+            tooltip=[x_col, alt.Tooltip(f"{y_col}:Q", title=y_col, format=y_tooltip_format)]
+            + ([color_col] if color_col != "(none)" else []),
         )
         if color_col != "(none)":
             encode_kwargs["color"] = alt.Color(f"{color_col}:N", title=color_col)
 
-        custom_chart = base.encode(**encode_kwargs).properties(title=chart_title, height=400)
+        primary_chart = base.encode(**encode_kwargs)
+
+        if line_df is not None and not line_df.empty:
+            line_max_abs = line_df[line_col].abs().max()
+            line_axis, line_tooltip_format = _smart_quant_format(line_col, line_max_abs)
+            line_chart = alt.Chart(line_df).mark_line(point=True, color="#E8632A", strokeWidth=2.5).encode(
+                x=alt.X(f"{x_col}:{x_type}", axis=x_axis),
+                y=alt.Y(f"{line_col}:Q", title=line_col, axis=line_axis),
+                tooltip=[x_col, alt.Tooltip(f"{line_col}:Q", title=line_col, format=line_tooltip_format)],
+            )
+            custom_chart = alt.layer(primary_chart, line_chart).resolve_scale(y="independent").properties(
+                title=chart_title, height=400,
+            )
+        else:
+            custom_chart = primary_chart.properties(title=chart_title, height=400)
+
         st.altair_chart(custom_chart, width="stretch")
+
+        if simple:
+            return
 
         bc1, bc2 = st.columns([1, 1])
         with bc1:
@@ -1500,24 +1764,29 @@ def _render_custom_visualizations_tab(data_sources: dict):
                 export_charts = st.session_state.setdefault("export_charts", [])
                 export_charts.append({
                     "title": chart_title, "kind": chart_kind, "x_col": x_col, "y_col": y_col,
-                    "color_col": None if color_col == "(none)" else color_col, "y_title": y_title,
+                    "color_col": None if color_col == "(none)" else color_col, "y_title": y_col,
                     "data": plot_df[[c for c in {x_col, y_col, color_col} if c in plot_df.columns]].copy(),
                 })
                 st.success(f"Added '{chart_title}' to the Excel export queue.")
         with bc2:
-            if len(st.session_state["custom_chart_cards"]) > 1:
+            if len(st.session_state[cards_state_key]) > 1:
                 if st.button("Remove this chart card", key=k("remove_card")):
-                    st.session_state["custom_chart_cards"].remove(card_id)
+                    st.session_state[cards_state_key].remove(card_id)
                     st.rerun()
 
-    for i, card_id in enumerate(st.session_state["custom_chart_cards"]):
-        st.markdown(f"#### Chart {i + 1}")
+    for i, card_id in enumerate(st.session_state[cards_state_key]):
+        if not simple:
+            st.markdown(f"#### Chart {i + 1}")
         _render_chart_card(card_id)
-        st.markdown("---")
+        if not simple:
+            st.markdown("---")
 
-    if st.button("Add another chart", key="cv_add_card"):
-        st.session_state["custom_chart_cards"].append(st.session_state["custom_chart_next_id"])
-        st.session_state["custom_chart_next_id"] += 1
+    if simple:
+        return
+
+    if st.button("Add another chart", key=f"{key_prefix}_add_card"):
+        st.session_state[cards_state_key].append(st.session_state[next_id_state_key])
+        st.session_state[next_id_state_key] += 1
         st.rerun()
 
     export_charts = st.session_state.get("export_charts", [])
@@ -1526,10 +1795,10 @@ def _render_custom_visualizations_tab(data_sources: dict):
         for i, ec in enumerate(export_charts):
             qc1, qc2 = st.columns([5, 1])
             qc1.write(f"{i + 1}. {ec['title']} ({ec['kind']})")
-            if qc2.button("Remove", key=f"cv_remove_{i}"):
+            if qc2.button("Remove", key=f"{key_prefix}_remove_{i}"):
                 export_charts.pop(i)
                 st.rerun()
-        if st.button("Clear all queued charts", key="cv_clear_export"):
+        if st.button("Clear all queued charts", key=f"{key_prefix}_clear_export"):
             st.session_state["export_charts"] = []
             st.rerun()
 
@@ -1543,17 +1812,7 @@ def _ask_data_chatbot(question: str, context: str, history: list) -> str:
     if not api_key:
         raise RuntimeError("No DEEPINFRA_API_KEY found. Add it to Streamlit secrets or the environment.")
 
-    system_prompt = (
-        "You are a data analyst assistant embedded in a lending/leasing portfolio "
-        "screening tool. Answer questions about the user's uploaded portfolio using "
-        "ONLY the summary statistics and methodology notes below - you do not have "
-        "access to individual loan rows, only these already-computed aggregates. "
-        "If a question needs a number that isn't in the summary (e.g. a specific "
-        "loan ID, or a breakdown not listed), say so plainly rather than guessing "
-        "or inventing a figure. Be concise and precise; use the exact terminology "
-        "and caveats given below rather than simplifying them away.\n\n"
-        f"{context}"
-    )
+    system_prompt = app_config.AI_PROMPTS["chat_assistant"].strip() + "\n\n" + context
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(history)
     messages.append({"role": "user", "content": question})
@@ -1561,8 +1820,8 @@ def _ask_data_chatbot(question: str, context: str, history: list) -> str:
     resp = requests.post(
         DEEPINFRA_CHAT_URL,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"model": DEEPINFRA_MODEL, "messages": messages, "max_tokens": 800},
-        timeout=30,
+        json={"model": DEEPINFRA_MODEL, "messages": messages, "max_tokens": app_config.AI["chat_assistant_max_tokens"]},
+        timeout=app_config.AI["request_timeout_seconds"],
         verify=_ca_bundle_path(),
     )
     resp.raise_for_status()
@@ -2073,6 +2332,26 @@ def _read_tabular_file(uploaded) -> pd.DataFrame:
     return df
 
 
+def _detect_restored_session(file_bytes: bytes, name: str) -> dict | None:
+    """If `file_bytes` is a workbook previously produced by 'Download full
+    workbook as Excel' (i.e. it carries the hidden '_App Session' sheet
+    written by _build_lending_export_workbook), return its embedded mapping/
+    currency/GI-overrides/derived-columns config so the upload flow can
+    pre-fill the mapping form to reproduce that run. Returns None for any
+    other file, or if the sheet is present but unreadable - this must never
+    block a normal upload."""
+    if not name or not name.lower().endswith(".xlsx"):
+        return None
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True)
+        if "_App Session" not in wb.sheetnames:
+            return None
+        raw_cfg = wb["_App Session"]["A1"].value
+        return json.loads(raw_cfg) if raw_cfg else None
+    except Exception:
+        return None
+
+
 data_source = st.radio(
     "Data source",
     ["Local file", "Google Sheets / Drive link", "My Google Drive"],
@@ -2148,6 +2427,20 @@ except Exception as e:
 if raw.empty or not len(raw.columns):
     st.error(f"'{file_name}' has no data to read.")
     st.stop()
+
+if st.session_state.get("restored_session_checked_id") != file_id:
+    st.session_state["restored_session_checked_id"] = file_id
+    if data_source == "Local file":
+        _source_bytes = _read_uploaded_bytes(uploaded)
+    elif data_source == "Google Sheets / Drive link":
+        _source_bytes = st.session_state.get("gs_bytes")
+    else:
+        _source_bytes = gdrive_pick["data"] if gdrive_pick else None
+    restored = _detect_restored_session(_source_bytes, file_name) if _source_bytes else None
+    st.session_state["restored_session"] = restored
+    if restored and restored.get("derived_columns"):
+        st.session_state["derived_columns"] = restored["derived_columns"]
+
 _active_model_fields = {c for c, _ in INPUT_COLUMNS} | _LENDING_EXTRA_FIELDS
 raw = _format_normalize(raw, DATE_FIELDS, NUMERIC_FIELDS, _active_model_fields)
 
@@ -2312,6 +2605,13 @@ if guess_key not in st.session_state:
     else:
         st.session_state[guess_key] = {}
 ai_guess = st.session_state.get(guess_key) or {}
+restored_session = st.session_state.get("restored_session")
+restored_gi = (restored_session or {}).get("gi_overrides", {})
+if restored_session:
+    st.info(
+        "This file was exported from a previous session - mapping and inputs below have "
+        "been pre-filled to match it. Review and click 'Run analysis' to reproduce it."
+    )
 
 with st.form("column_mapping"):
     st.subheader("Map your columns to the Data Input template")
@@ -2321,8 +2621,11 @@ with st.form("column_mapping"):
     fillna_zero = {}
     for target, required in INPUT_COLUMNS:
         options = ["(not provided)"] + [c for c in raw.columns if c not in used]
-        # Precedence: saved mapping > AI guess > "(not provided)".
-        default_choice = cached_mapping.get(target) or ai_guess.get(target)
+        # Precedence: restored session (re-uploaded export) > saved mapping > AI guess > "(not provided)".
+        default_choice = (
+            (restored_session or {}).get("mapping", {}).get(target)
+            or cached_mapping.get(target) or ai_guess.get(target)
+        )
         default_index = options.index(default_choice) if default_choice in options else 0
         chosen = st.selectbox(
             f"Map to **{target}** ({'required' if required else 'optional'})",
@@ -2349,6 +2652,20 @@ with st.form("column_mapping"):
         if checked and mapping.get(target):
             raw[mapping[target]] = raw[mapping[target]].fillna(0)
 
+    st.subheader("Currency")
+    _currency_options = ["USD"] + sorted(c for c in CURRENCY_NAMES if c != "USD")
+    _restored_currency = (restored_session or {}).get("currency")
+    _currency_index = _currency_options.index(_restored_currency) if _restored_currency in _currency_options else 0
+    portfolio_currency = st.selectbox(
+        "Portfolio currency",
+        options=_currency_options,
+        format_func=lambda c: f"{c} - {CURRENCY_NAMES[c]}",
+        index=_currency_index,
+        help="The currency the mapped monetary columns (Principal Value, Expected Interest, "
+             "Expected Fee, Total Paid, Total Due) are denominated in. If not USD, every one of "
+             "those columns is converted to USD using a live exchange rate before analysis runs.",
+    )
+
     # Date of extraction defaults to the max of whichever raw column the user
     # just mapped to the primary date field (Disbursement Date / start_date) -
     # not a guess at the raw header's name, since that column could be called
@@ -2359,6 +2676,8 @@ with st.form("column_mapping"):
         parsed_primary = _detect_date(raw[primary_col])
         if parsed_primary.notna().any():
             default_extraction = parsed_primary.max()
+    elif restored_gi.get("extraction_date"):
+        default_extraction = pd.Timestamp(restored_gi["extraction_date"])
 
     st.subheader("General Inputs")
     gc1, gc2, gc3 = st.columns(3)
@@ -2369,13 +2688,17 @@ with st.form("column_mapping"):
         )
     with gc2:
         days_after_term = st.number_input(
-            "Days after term", value=90, min_value=0,
+            "Days after term",
+            value=restored_gi.get("days_after_term", app_config.GENERAL_INPUTS_DEFAULTS["days_after_term"]),
+            min_value=0,
             help="Days after term used to compute loss rate (default 90 = Term + 3 months). "
                  "Modify only if the company has significant repayments after 3 months from term.",
         )
     with gc3:
         min_loans_per_cohort = st.number_input(
-            "Minimum loans per cohort", value=10, min_value=0,
+            "Minimum loans per cohort",
+            value=restored_gi.get("min_loans_per_cohort", app_config.GENERAL_INPUTS_DEFAULTS["min_loans_per_cohort"]),
+            min_value=0,
             help="Affects the cohort stressed loss rate: requires a minimum number of observations to "
                  "include a cohort in the cohort loss rate distribution (default 10).",
         )
@@ -2395,6 +2718,7 @@ if submitted:
         st.stop()
     st.session_state["analysis_mapping"] = mapping
     st.session_state["analysis_mapping_warnings"] = mapping_warnings
+    st.session_state["analysis_currency"] = portfolio_currency
     # Date of extraction follows the workbook formula =MAX(primary date column)
     # (General Inputs C3 in the sheets), overriding the calendar default once
     # the primary-date-field mapping is known.
@@ -2436,6 +2760,26 @@ _coerce_dates(raw, DATE_FIELDS, active_cfg["dayfirst"])
 for col in NUMERIC_FIELDS:
     if col in raw.columns and raw[col].dtype != "float64":
         raw[col] = pd.to_numeric(_clean_numeric(raw[col]), errors="coerce")
+
+portfolio_currency = st.session_state.get("analysis_currency", "USD")
+if portfolio_currency != "USD":
+    fx_error, fx_rate = None, None
+    try:
+        fx_rate = _fetch_usd_fx_rates().get(portfolio_currency)
+        if fx_rate is None:
+            fx_error = f"No live rate available for {portfolio_currency} right now"
+    except Exception as e:
+        fx_error = f"Couldn't fetch a live {portfolio_currency}/USD exchange rate ({e})"
+    if fx_rate:
+        converted = [c for c in CURRENCY_FIELDS if c in raw.columns]
+        for col in converted:
+            raw[col] = raw[col] / fx_rate
+        st.caption(
+            f"Converted {', '.join(converted)} from {portfolio_currency} to USD at "
+            f"1 USD = {fx_rate:,.4f} {portfolio_currency} (live rate via open.er-api.com)."
+        )
+    else:
+        st.warning(f"{fx_error} - figures below are still in {portfolio_currency}, not converted.")
 
 unmapped = [t for t, _ in INPUT_COLUMNS if t not in raw.columns]
 if unmapped:
@@ -2518,27 +2862,92 @@ with tabs[0]:
     )
 
     st.markdown("---")
-    st.subheader("Portfolio Snapshot")
-    date_range = (
-        f"{df['Disbursement Date'].min().date()} to {gi.extraction_date.date()}"
-    )
-    snapshot_rows = [
-        ("Date Range", date_range, "From the earliest disbursement date to the tape as-of date."),
-        ("Loans", f"{len(df):,}", "Total number of loan records in the tape."),
-        ("Value of Principal Disbursed", f"${df['Principal Value'].sum():,.0f}",
-         "Total principal amount lent across all loans."),
-        ("Total Collected", f"${df['Total Paid'].sum():,.0f}",
-         "Total cash collected from borrowers to date."),
-        ("Avg Fee", fmt(ue_data["Average Fee %"]),
-         "Total expected fees as a share of total principal."),
-        ("Avg Loan Value", f"${ue_data['Average Principal Amount']:,.0f}",
-         "Average principal amount per loan."),
-        ("Avg Loan Term", fmt(ue_data["Average Expected Term"], "{:,.1f} days"),
-         "Principal-weighted average loan term (days)."),
-        ("Avg Total Revenue", fmt(ltv_data["Average Total Revenue %"]),
-         "Expected interest + fees as a share of total principal."),
-    ]
-    _render_snapshot_table(snapshot_rows)
+    snapshot_col, chart_col = st.columns([1, 1.3])
+    with snapshot_col:
+        st.subheader("Portfolio Snapshot")
+        date_range = (
+            f"{df['Disbursement Date'].min().date()} to {gi.extraction_date.date()}"
+        )
+        snapshot_rows = [
+            ("Date Range", date_range, "From the earliest disbursement date to the tape as-of date."),
+            ("Loans", f"{len(df):,}", "Total number of loan records in the tape."),
+            ("Value of Principal Disbursed", f"${df['Principal Value'].sum():,.0f}",
+             "Total principal amount lent across all loans."),
+            ("Total Collected", f"${df['Total Paid'].sum():,.0f}",
+             "Total cash collected from borrowers to date."),
+            ("Avg Fee", fmt(ue_data["Average Fee %"]),
+             "Total expected fees as a share of total principal."),
+            ("Avg Loan Value", f"${ue_data['Average Principal Amount']:,.0f}",
+             "Average principal amount per loan."),
+            ("Avg Loan Term", fmt(ue_data["Average Expected Term"], "{:,.1f} days"),
+             "Principal-weighted average loan term (days)."),
+            ("Avg Total Revenue", fmt(ltv_data["Average Total Revenue %"]),
+             "Expected interest + fees as a share of total principal."),
+        ]
+        _render_snapshot_table(snapshot_rows)
+
+    with chart_col:
+        st.subheader("Cohort Loss Rates")
+        summary_cohorts = lending_build_cohorts(
+            df, min_matured=gi.min_loans_per_cohort, matured_only=False
+        )
+        bars = alt.Chart(summary_cohorts).mark_bar(color="#B8BEC6").encode(
+            x=alt.X("Cohort:T", title="Cohort"),
+            y=alt.Y(
+                "Total Principal:Q", title="Principal Disbursed",
+                # "~s" gives short SI-style labels (k/M/G/T); swap D3's "G" (giga)
+                # for the more finance-familiar "B" (billion) - same magnitude, friendlier label.
+                axis=alt.Axis(format="~s", labelExpr="replace(datum.label, 'G', 'B')"),
+            ),
+            tooltip=[
+                alt.Tooltip("Cohort:T"),
+                alt.Tooltip("Total Principal:Q", format=",.0f", title="Principal Disbursed"),
+                alt.Tooltip("Loan Count:Q", title="Loans"),
+            ],
+        )
+        loss_data = summary_cohorts.dropna(subset=["Loss Rate"])
+        line = alt.Chart(loss_data).mark_line(point=True, color="#E8632A", strokeWidth=2.5).encode(
+            x=alt.X("Cohort:T"),
+            y=alt.Y("Loss Rate:Q", title="Loss Rate", axis=alt.Axis(format="%")),
+            tooltip=[
+                alt.Tooltip("Cohort:T"),
+                alt.Tooltip("Loss Rate:Q", format=".2%"),
+                alt.Tooltip("Matured Count:Q", title="Matured Loans"),
+            ],
+        )
+        if not loss_data.empty:
+            def _ref_layer(value, label, color, x_anchor):
+                if pd.isna(value):
+                    return None
+                ref = pd.DataFrame({"v": [value], "label": [label], "xa": [x_anchor]})
+                rule = alt.Chart(ref).mark_rule(color=color, strokeDash=[6, 6]).encode(y=alt.Y("v:Q"))
+                text = alt.Chart(ref).mark_text(
+                    color=color, dx=8, dy=-6, align="left", fontSize=11, fontWeight="bold"
+                ).encode(x="xa:T", y=alt.Y("v:Q"), text="label:N")
+                return rule + text
+
+            for ref in (
+                _ref_layer(
+                    ue_data["Average Loss"], f"Avg: {fmt(ue_data['Average Loss'])}",
+                    "#6B7280", loss_data["Cohort"].min(),
+                ),
+                _ref_layer(
+                    ltv_data["95th Percentile Losses"], f"95th %ile: {fmt(ltv_data['95th Percentile Losses'])}",
+                    "#d62728", loss_data["Cohort"].max(),
+                ),
+            ):
+                if ref is not None:
+                    line = line + ref
+        st.altair_chart(
+            alt.layer(bars, line).resolve_scale(y="independent").properties(
+                height=340, padding={"right": 95},
+            ),
+            width="stretch",
+        )
+        st.caption(
+            "Grey bars: principal disbursed per cohort (all loans). Orange line: cohort loss rate, "
+            f"shown only for cohorts with at least {gi.min_loans_per_cohort} matured loans."
+        )
 
 if is_lending:
     with tabs[2]:
@@ -2592,26 +3001,17 @@ if is_lending:
         with table_tab:
             _render_cohorts_grid(cohort_view)
 
-            chart_source = st.radio(
-                "Chart data",
-                options=["All cohorts", "Filtered table above"],
-                horizontal=True,
-                help="'All cohorts' plots every cohort shown above (before the Loan Count filter). "
-                     "'Filtered table above' plots only the cohorts currently passing that filter.",
+            st.markdown("#### Principal by Cohorts")
+            _render_custom_visualizations_tab(
+                {
+                    "Cohorts (table above)": cohort_view,
+                    "Cohorts (all, unfiltered)": display_cohorts,
+                    "Data Input (loan-level)": df,
+                },
+                key_prefix="cohorts_cv",
+                header=False,
+                simple=True,
             )
-            chart_cohorts = display_cohorts if chart_source == "All cohorts" else cohort_view
-            orig = chart_cohorts[["Cohort", "Total Principal"]].dropna()
-            if not orig.empty:
-                st.altair_chart(
-                    alt.Chart(orig).mark_bar().encode(
-                        x=alt.X("Cohort:T", title="Cohort"),
-                        y=alt.Y("Total Principal:Q", title="Total Principal"),
-                        tooltip=["Cohort:T", alt.Tooltip("Total Principal:Q", format=",.0f")],
-                    ).properties(title="Originations per month", height=350),
-                    width="stretch",
-                )
-            else:
-                st.caption("No cohorts to chart with the current filter.")
         with stats_tab:
             # Compare normalized calendar periods, not raw Cohort timestamps -
             # .isin() on datetime columns is fragile to subtle dtype mismatches
@@ -2643,7 +3043,8 @@ if is_lending:
                 f"APR/EAR solved for {solved_pct} loans in view "
                 f"({avg_rates['n_valid_inputs']} had usable inputs, "
                 f"{avg_rates['n_converged']} of those converged). "
-                f"Total Due column: {'present' if avg_rates['has_total_due'] else 'not mapped (using Principal + Interest + Fee)'}. "
+                "Amount owed is always Principal + Interest + Fee (never Total Due, which is "
+                "often a to-date collections figure rather than the full lifetime amount owed). "
                 f"Real Payment per Period available for {avg_rates['n_real_pmt']} loan(s) "
                 "(others use a synthetic owed/term estimate)."
             )
@@ -2659,142 +3060,129 @@ if is_lending:
         else:
             green_term_bucket = None
 
+        st.markdown("**Inputs**")
+        y1, y2, y3 = st.columns(3)
+        with y1:
+            calc_data_source = st.selectbox("Data Input Source", LTV_CALC_DATA_SOURCES, key="ltvcalc_data_source")
+            calc_country = st.selectbox("Alt Lender Country", LTV_CALC_COUNTRIES, key="ltvcalc_country")
+        with y2:
+            calc_macro_fx = st.selectbox("Macro FX Risk Rating", LTV_CALC_FX_RISK_RATINGS, key="ltvcalc_macro_fx")
+            calc_segmentation = st.selectbox("Segmentation", LTV_CALC_SEGMENTATIONS, key="ltvcalc_segmentation")
+        with y3:
+            calc_hedge_rate = st.number_input(
+                "Hedge Rate (0 if unhedged, else % OTM as a decimal)",
+                min_value=0.0, max_value=1.0, value=0.0, step=0.01, format="%.4f", key="ltvcalc_hedge_rate",
+            )
+            calc_rolled_hedge = st.selectbox("Rolled hedge?", LTV_CALC_HEDGE_TYPES, key="ltvcalc_rolled_hedge")
+
         result = None
-        summary_tab, calc_tab = st.tabs(["Summary", "Calculator"])
-        with calc_tab:
-            st.markdown("**Inputs**")
-            y1, y2, y3 = st.columns(3)
-            with y1:
-                calc_data_source = st.selectbox("Data Input Source", LTV_CALC_DATA_SOURCES, key="ltvcalc_data_source")
-                calc_country = st.selectbox("Alt Lender Country", LTV_CALC_COUNTRIES, key="ltvcalc_country")
-            with y2:
-                calc_macro_fx = st.selectbox("Macro FX Risk Rating", LTV_CALC_FX_RISK_RATINGS, key="ltvcalc_macro_fx")
-                calc_segmentation = st.selectbox("Segmentation", LTV_CALC_SEGMENTATIONS, key="ltvcalc_segmentation")
-            with y3:
-                calc_hedge_rate = st.number_input(
-                    "Hedge Rate (0 if unhedged, else % OTM as a decimal)",
-                    min_value=0.0, max_value=1.0, value=0.0, step=0.01, format="%.4f", key="ltvcalc_hedge_rate",
-                )
-                calc_rolled_hedge = st.selectbox("Rolled hedge?", LTV_CALC_HEDGE_TYPES, key="ltvcalc_rolled_hedge")
+        if pd.isna(green_interest) or pd.isna(green_loss) or green_term_bucket is None:
+            st.warning(
+                "Can't compute the LTV waterfall - one of the green inputs above is n/a for this portfolio."
+            )
+        else:
+            result = ltv_calculator_compute(
+                gross_interest=green_interest, term_months=green_term_bucket, loss_rate=green_loss,
+                country=calc_country, macro_fx_risk=calc_macro_fx, segmentation=calc_segmentation,
+                hedge_rate=calc_hedge_rate, rolled_hedge=calc_rolled_hedge, data_source=calc_data_source,
+            )
+            for note in result["notes"]:
+                st.info(note)
 
-            if pd.isna(green_interest) or pd.isna(green_loss) or green_term_bucket is None:
-                st.warning(
-                    "Can't compute the LTV waterfall - one of the green inputs above is n/a for this portfolio."
-                )
-            else:
-                result = ltv_calculator_compute(
-                    gross_interest=green_interest, term_months=green_term_bucket, loss_rate=green_loss,
-                    country=calc_country, macro_fx_risk=calc_macro_fx, segmentation=calc_segmentation,
-                    hedge_rate=calc_hedge_rate, rolled_hedge=calc_rolled_hedge, data_source=calc_data_source,
-                )
-                for note in result["notes"]:
-                    st.info(note)
+        if result is not None:
+            st.markdown("---")
+            st.markdown("#### Outputs - Suggested LTV")
 
-                st.markdown("---")
-                st.markdown("**LTGBV**")
-                _render_snapshot_table([
-                    ("No FX Adjustment", fmt(result["ltgbv_no_fx"]),
-                     "LTGBV before any FX adjustment: 1 minus the selected stress loss."),
-                    ("With FX Adjustment (High)", fmt(result["ltgbv_high"]),
-                     "LTGBV (no FX) divided by (1 + selected FX devaluation, high end)."),
-                    ("With FX Adjustment (Low)", fmt(result["ltgbv_low"]),
-                     "LTGBV (no FX) divided by (1 + selected FX devaluation, low end)."),
-                ])
+            st.subheader("LTGBV")
+            _render_snapshot_table([
+                ("No FX Adjustment", fmt(result["ltgbv_no_fx"]),
+                 "LTGBV before any FX adjustment: 1 minus the selected stress loss."),
+                ("With FX Adjustment (High)", fmt(result["ltgbv_high"]),
+                 "LTGBV (no FX) divided by (1 + selected FX devaluation, high end)."),
+                ("With FX Adjustment (Low)", fmt(result["ltgbv_low"]),
+                 "LTGBV (no FX) divided by (1 + selected FX devaluation, low end)."),
+            ])
 
-                st.markdown("**Advance on Principal (LTV)**")
-                _render_snapshot_table([
-                    ("No FX Adjustment", fmt(result["ltv_no_fx"]),
-                     "LTGBV (no FX) grossed up by (1 + weighted avg. gross interest)."),
-                    ("With FX Adjustment (High)", fmt(result["ltv_high"]),
-                     "LTGBV (FX high) grossed up by (1 + weighted avg. gross interest)."),
-                    ("With FX Adjustment (Low)", fmt(result["ltv_low"]),
-                     "LTGBV (FX low) grossed up by (1 + weighted avg. gross interest)."),
-                ])
-                st.caption("Both LTGBV and LTV limits must be complied with (source: Receivables sheet, cell C44).")
+            st.subheader("Advance on Principal (LTV)")
+            _render_snapshot_table([
+                ("No FX Adjustment", fmt(result["ltv_no_fx"]),
+                 "LTGBV (no FX) grossed up by (1 + weighted avg. gross interest)."),
+                ("With FX Adjustment (High)", fmt(result["ltv_high"]),
+                 "LTGBV (FX high) grossed up by (1 + weighted avg. gross interest)."),
+                ("With FX Adjustment (Low)", fmt(result["ltv_low"]),
+                 "LTGBV (FX low) grossed up by (1 + weighted avg. gross interest)."),
+            ])
+            st.caption("Both LTGBV and LTV limits must be complied with (source: Receivables sheet, cell C44).")
 
-                st.markdown("---")
-                st.markdown("**FX Stress Build Up**")
-                _render_snapshot_table([
-                    ("Utilized Historical FX Deval", fmt(result["utilized_fx_deval"]),
-                     "Historical FX devaluation actually used - the 6-month figure when the tenor is 6 "
-                     "months or less."),
-                    ("Stress FX Devaluation", fmt(result["stress_fx_deval"]),
-                     "Max(historical, utilized) FX devaluation, stressed by the FX stress factor (1.2x)."),
-                    ("Base FX Deval", fmt(result["base_fx_deval"]),
-                     "Stress FX devaluation, capped at the hedge rate when the deal is hedged."),
-                    ("FX Slippage Stress", fmt(result["fx_slippage"]),
-                     "FX basis-risk slippage for the selected country."),
-                    ("Selected FX Deval (High)", fmt(result["selected_fx_deval_high"]),
-                     "Base FX deval + slippage + high-end roll risk."),
-                    ("Selected FX Deval (Low)", fmt(result["selected_fx_deval_low"]),
-                     "Base FX deval + slippage + low-end roll risk."),
-                ])
+            st.markdown("---")
+            st.markdown("#### Back-Up")
 
-                st.markdown("**Credit Stress Build Up**")
-                _render_snapshot_table([
-                    ("Selected Stress Loss", fmt(result["selected_stress_loss"]),
-                     "Max(stress loss rate, minimum stress loss floor)."),
-                ])
+            st.subheader("FX Backup")
+            _render_snapshot_table([
+                ("Term", f"{green_term_bucket} months" if green_term_bucket else "n/a",
+                 "Weighted average receivable term, snapped to the nearest tenor bucket the "
+                 "workbook's dropdown allows."),
+                ("Historical Devaluation", fmt(result["historical_fx_deval"]),
+                 "99th-percentile historical FX devaluation for the selected country and tenor."),
+                ("Utilized Historical FX Deval", fmt(result["utilized_fx_deval"]),
+                 "Historical FX devaluation actually used - the 6-month figure when the tenor is 6 "
+                 "months or less."),
+                ("Stress FX Devaluation", fmt(result["stress_fx_deval"]),
+                 f"Max(historical, utilized) FX devaluation, stressed by the FX stress factor ({result['stress_fx_factor']:g}x)."),
+                ("Base FX Deval", fmt(result["base_fx_deval"]),
+                 "Stress FX devaluation, capped at the hedge rate when the deal is hedged."),
+                ("FX Slippage Stress", fmt(result["fx_slippage"]),
+                 "FX basis-risk slippage for the selected country."),
+                ("Selected FX Deval (High)", fmt(result["selected_fx_deval_high"]),
+                 "Base FX deval + slippage + high-end roll risk."),
+                ("Selected FX Deval (Low)", fmt(result["selected_fx_deval_low"]),
+                 "Base FX deval + slippage + low-end roll risk."),
+            ])
+            fx_country_data = pd.DataFrame({
+                "Tenor (months)": LTV_CALC_TENORS,
+                "Historical FX Devaluation": LTV_CALC_FX_DEVAL_TABLE[calc_country],
+            })
+            st.altair_chart(
+                _add_reference_line(
+                    alt.Chart(fx_country_data).mark_line(point=True, color="#1f77b4").encode(
+                        x=alt.X("Tenor (months):O", title="Tenor (months)"),
+                        y=alt.Y("Historical FX Devaluation:Q", title="99th %ile FX Devaluation",
+                                axis=alt.Axis(format="%")),
+                        tooltip=["Tenor (months):O", alt.Tooltip("Historical FX Devaluation:Q", format=".2%")],
+                    ),
+                    result["historical_fx_deval"],
+                    f"Selected tenor ({green_term_bucket}m): {result['historical_fx_deval']:.2%}",
+                    color="#d62728",
+                ).properties(title=f"99th %ile Historical FX Devaluation - {calc_country}", height=300),
+                width="stretch",
+            )
 
-        with summary_tab:
-            if result is None:
-                st.info("Fill in the required inputs in the Calculator tab to see the build-up summary.")
-            else:
-                st.markdown("**Inputs**")
-                _render_snapshot_table([
-                    ("Term Length", f"{green_term_bucket} months" if green_term_bucket else "n/a",
-                     "Weighted average receivable term, snapped to the nearest tenor bucket the "
-                     "workbook's dropdown allows."),
-                    ("Product Interest Rate", fmt(green_interest),
-                     "Weighted average gross interest rate, pulled from this analysis."),
-                ])
-
-                st.markdown("**Loss Build Up**")
-                _render_snapshot_table([
-                    ("95th %ile Loss", fmt(green_loss),
-                     "95th percentile loss rate at T+3, pulled from this analysis."),
-                    ("Stress Loss", fmt(result["stress_loss_rate"]),
-                     "Loss rate multiplied by the credit stress factor (1.7x)."),
-                    ("Minimum Loss Rate", fmt(result["minimum_stress_loss"]),
-                     "Sector-minimum stress loss floor for the selected segmentation and data source."),
-                ])
-                if not lending_chart_data.empty:
-                    st.altair_chart(
-                        _add_reference_line(
-                            alt.Chart(lending_chart_data).mark_line(point=True).encode(
-                                x=alt.X("Cohort:T", title="Cohort"),
-                                y=alt.Y("Loss Rate:Q", title="Loss Rate", axis=alt.Axis(format="%")),
-                                tooltip=["Cohort:T", alt.Tooltip("Loss Rate:Q", format=".2%")],
-                            ),
-                            green_loss,
-                            f"95th %ile: {green_loss:.2%}",
-                            color="#d62728",
-                            x_anchor=lending_chart_data["Cohort"].max(),
-                        ).properties(title="Loss per Cohort", height=300),
-                        width="stretch",
-                    )
-
-                st.markdown("**FX Build Up**")
-                _render_snapshot_table([
-                    ("Historical Devaluation", fmt(result["historical_fx_deval"]),
-                     "99th-percentile historical FX devaluation for the selected country and tenor."),
-                ])
-                fx_country_data = pd.DataFrame({
-                    "Tenor (months)": LTV_CALC_TENORS,
-                    "Historical FX Devaluation": LTV_CALC_FX_DEVAL_TABLE[calc_country],
-                })
+            st.subheader("Credit Stress Backup")
+            _render_snapshot_table([
+                ("Product Interest Rate", fmt(green_interest),
+                 "Weighted average gross interest rate, pulled from this analysis."),
+                ("95th %ile Loss", fmt(green_loss),
+                 "95th percentile loss rate at T+3, pulled from this analysis."),
+                ("Stress Loss", fmt(result["stress_loss_rate"]),
+                 f"Loss rate multiplied by the credit stress factor ({result['credit_stress_factor']:g}x)."),
+                ("Minimum Loss Rate", fmt(result["minimum_stress_loss"]),
+                 "Sector-minimum stress loss floor for the selected segmentation and data source."),
+                ("Selected Stress Loss", fmt(result["selected_stress_loss"]),
+                 "Max(stress loss rate, minimum stress loss floor)."),
+            ])
+            if not lending_chart_data.empty:
                 st.altair_chart(
                     _add_reference_line(
-                        alt.Chart(fx_country_data).mark_line(point=True, color="#1f77b4").encode(
-                            x=alt.X("Tenor (months):O", title="Tenor (months)"),
-                            y=alt.Y("Historical FX Devaluation:Q", title="99th %ile FX Devaluation",
-                                    axis=alt.Axis(format="%")),
-                            tooltip=["Tenor (months):O", alt.Tooltip("Historical FX Devaluation:Q", format=".2%")],
+                        alt.Chart(lending_chart_data).mark_line(point=True).encode(
+                            x=alt.X("Cohort:T", title="Cohort"),
+                            y=alt.Y("Loss Rate:Q", title="Loss Rate", axis=alt.Axis(format="%")),
+                            tooltip=["Cohort:T", alt.Tooltip("Loss Rate:Q", format=".2%")],
                         ),
-                        result["historical_fx_deval"],
-                        f"Selected tenor ({green_term_bucket}m): {result['historical_fx_deval']:.2%}",
+                        green_loss,
+                        f"95th %ile: {green_loss:.2%}",
                         color="#d62728",
-                    ).properties(title=f"99th %ile Historical FX Devaluation - {calc_country}", height=300),
+                        x_anchor=lending_chart_data["Cohort"].max(),
+                    ).properties(title="Loss per Cohort", height=300),
                     width="stretch",
                 )
 
@@ -2841,29 +3229,32 @@ if is_lending:
                     ).properties(title="Average Term per Cohort (days)", height=300),
                     width="stretch",
                 )
-                fee_int = lending_chart_data.melt(
-                    id_vars=["Cohort"], value_vars=["Fee %", "Interest %"],
-                    var_name="Metric", value_name="Pct",
+                st.altair_chart(
+                    _add_reference_line(
+                        alt.Chart(lending_chart_data).mark_line(point=True, color="#ff7f0e").encode(
+                            x=alt.X("Cohort:T", title="Cohort"),
+                            y=alt.Y("Interest %:Q", title="% of Principal", axis=alt.Axis(format="%")),
+                            tooltip=["Cohort:T", alt.Tooltip("Interest %:Q", format=".2%")],
+                        ),
+                        ue_data["Average Interest %"],
+                        f"Avg: {ue_data['Average Interest %']:.2%}",
+                        color="#ff7f0e",
+                        x_anchor=lending_chart_data["Cohort"].max(),
+                    ).properties(title="Average Product Interest Percent per Cohort", height=300),
+                    width="stretch",
                 )
                 st.altair_chart(
                     _add_reference_line(
-                        _add_reference_line(
-                            alt.Chart(fee_int).mark_line(point=True).encode(
-                                x=alt.X("Cohort:T", title="Cohort"),
-                                y=alt.Y("Pct:Q", title="% of Principal", axis=alt.Axis(format="%")),
-                                color="Metric:N",
-                                tooltip=["Cohort:T", "Metric:N", alt.Tooltip("Pct:Q", format=".2%")],
-                            ),
-                            ue_data["Average Fee %"],
-                            f"Fee avg: {ue_data['Average Fee %']:.2%}",
-                            color="#1f77b4",
-                            x_anchor=lending_chart_data["Cohort"].max(),
+                        alt.Chart(lending_chart_data).mark_line(point=True, color="#1f77b4").encode(
+                            x=alt.X("Cohort:T", title="Cohort"),
+                            y=alt.Y("Fee %:Q", title="% of Principal", axis=alt.Axis(format="%")),
+                            tooltip=["Cohort:T", alt.Tooltip("Fee %:Q", format=".2%")],
                         ),
-                        ue_data["Average Interest %"],
-                        f"Interest avg: {ue_data['Average Interest %']:.2%}",
-                        color="#ff7f0e",
+                        ue_data["Average Fee %"],
+                        f"Avg: {ue_data['Average Fee %']:.2%}",
+                        color="#1f77b4",
                         x_anchor=lending_chart_data["Cohort"].max(),
-                    ).properties(title="Average Fee and Interest Percent per Cohort", height=300),
+                    ).properties(title="Average Fee Percent per Cohort", height=300),
                     width="stretch",
                 )
         with ue_model_tab:
@@ -2903,6 +3294,7 @@ st.markdown("---")
 def _build_lending_export_workbook(
     df, cohorts, filtered, days_after_term, min_loans_per_cohort,
     ltv_data, ue_data, lending_chart_data, export_charts, term_supplied=False,
+    mapping=None, currency=None, derived_columns=None, extraction_date=None,
 ):
     """Cached on its inputs so it's only rebuilt when the analysis or queued
     custom charts actually change, rather than on every Streamlit rerun (e.g.
@@ -2974,19 +3366,21 @@ def _build_lending_export_workbook(
         if not lending_chart_data.empty:
             lending_chart_data[["Cohort", "Loss Rate"]].to_excel(writer, sheet_name="Unit Economics Analysis", startrow=10, index=False)
             lending_chart_data[["Cohort", "Weighted Avg Term"]].to_excel(writer, sheet_name="Unit Economics Analysis", startrow=10, startcol=4, index=False)
-            lending_chart_data[["Cohort", "Fee %", "Interest %"]].to_excel(writer, sheet_name="Unit Economics Analysis", startrow=10, startcol=8, index=False)
+            lending_chart_data[["Cohort", "Fee %"]].to_excel(writer, sheet_name="Unit Economics Analysis", startrow=10, startcol=8, index=False)
+            lending_chart_data[["Cohort", "Interest %"]].to_excel(writer, sheet_name="Unit Economics Analysis", startrow=10, startcol=11, index=False)
             sr = 11
             lr = sr + len(lending_chart_data) - 1
             for title, col, anchor in [
                 ("Loss per Cohort", (1, 2), "B29"),
                 ("Average Term per Cohort (days)", (5, 6), "B48"),
-                ("Average Fee and Interest Percent per Cohort", (9, 11), "B67"),
+                ("Average Fee Percent per Cohort", (9, 10), "B67"),
+                ("Average Product Interest Percent per Cohort", (12, 13), "B86"),
             ]:
                 c = LineChart()
                 c.title = title
                 c.height, c.width = 14, 24
                 if col[1] - col[0] == 1:
-                    c.y_axis.numFmt = "0.00%" if "Loss" in title else "0"
+                    c.y_axis.numFmt = "0.00%" if "Loss" in title or "Percent" in title else "0"
                 data = Reference(ue_ws, min_col=col[0], min_row=sr - 1, max_col=col[1], max_row=lr)
                 cats = Reference(ue_ws, min_col=col[0], min_row=sr, max_row=lr)
                 c.add_data(data, titles_from_data=True)
@@ -3016,6 +3410,26 @@ def _build_lending_export_workbook(
         cohorts.to_excel(writer, sheet_name="Cohorts", index=False)
         filtered.to_excel(writer, sheet_name="Cohorts for X or more loans", index=False)
 
+        # Embed the session config (mapping/currency/GI overrides/derived
+        # columns) as a hidden sheet so re-uploading this same file lets the
+        # app detect it and pre-fill the mapping form to reproduce this exact
+        # run, instead of the recipient re-mapping/re-tuning from scratch.
+        if mapping is not None:
+            session_cfg = {
+                "schema": 1,
+                "mapping": mapping,
+                "currency": currency,
+                "gi_overrides": {
+                    "extraction_date": extraction_date.isoformat() if extraction_date is not None else None,
+                    "days_after_term": days_after_term,
+                    "min_loans_per_cohort": min_loans_per_cohort,
+                },
+                "derived_columns": derived_columns or [],
+            }
+            cfg_ws = writer.book.create_sheet("_App Session")
+            cfg_ws["A1"] = json.dumps(session_cfg)
+            cfg_ws.sheet_state = "hidden"
+
     buf.seek(0)
     return buf.getvalue()
 
@@ -3025,6 +3439,10 @@ if is_lending:
         df, cohorts, filtered, gi.days_after_term, gi.min_loans_per_cohort,
         ltv_data, ue_data, lending_chart_data, st.session_state.get("export_charts", []),
         term_supplied,
+        mapping=st.session_state.get("analysis_mapping"),
+        currency=st.session_state.get("analysis_currency"),
+        derived_columns=st.session_state.get("derived_columns"),
+        extraction_date=gi.extraction_date,
     )
     file_name = f"SC_Analysis_Lending_{pd.Timestamp.now():%Y-%m-%d}.xlsx"
 
@@ -3033,4 +3451,8 @@ st.download_button(
     buf,
     file_name=file_name,
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+st.caption(
+    "Sharing this with a colleague? They can open it directly in Excel, or upload it back "
+    "into this app - column mapping and General Inputs will be pre-filled to match this run."
 )

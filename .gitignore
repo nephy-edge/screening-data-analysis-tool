@@ -43,3 +43,8 @@ docs/
 *.csv
 scripts/*.txt
 scripts/*.xml
+
+# Scratch scripts/dumps used during development — mixes throwaway tooling
+# with raw client workbook dumps (sheet contents, real file paths); never
+# publish
+scripts/archive/

@@ -41,8 +41,18 @@ HEDGE_TYPES = ["Roll", "Term"]
 # this same tenor axis.
 TENORS = [1, 2, 3, 6, 9, 12, 18, 24, 30, 36]
 
-FX_STRESS_FACTOR = 1.2
-CREDIT_STRESS_FACTOR = 1.7
+try:
+    # config.py lives at the repo root, alongside app.py - reachable when
+    # this module is imported as part of the running app (repo root is on
+    # sys.path), but not under the test suite (pythonpath = scripts only).
+    # Falling back to the same hardcoded defaults keeps this module usable
+    # standalone either way.
+    import config as _app_config
+    FX_STRESS_FACTOR = _app_config.CREDIT_STRESS["fx_stress_factor"]
+    CREDIT_STRESS_FACTOR = _app_config.CREDIT_STRESS["credit_stress_factor"]
+except Exception:
+    FX_STRESS_FACTOR = 1.2
+    CREDIT_STRESS_FACTOR = 1.7
 
 # 99th-percentile historical FX devaluation by country x tenor (decimal,
 # e.g. 0.2714 = 27.14%), extracted from Inputs!Z6:AJ39.
