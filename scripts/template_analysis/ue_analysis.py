@@ -13,7 +13,7 @@ class UeAnalysis:
         return product / total_principal
 
     def avg_loss(self):
-        matured = self.df[self.df["Reached T+3?"] == True]
+        matured = self.df[self.df["Reached T+3?"]]
         if matured.empty:
             return float("nan")
         owed = (

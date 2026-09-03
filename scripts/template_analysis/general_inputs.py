@@ -7,6 +7,7 @@ try:
     # Falling back to the same hardcoded defaults keeps this module usable
     # standalone either way.
     import config as _app_config
+
     _DEFAULTS = _app_config.GENERAL_INPUTS_DEFAULTS
 except Exception:
     _DEFAULTS = {"days_after_term": 90, "min_loans_per_cohort": 10}
@@ -15,11 +16,14 @@ except Exception:
 class GeneralInputs:
     def __init__(self, df: pd.DataFrame, **overrides):
         self.extraction_date = (
-            overrides["extraction_date"] if "extraction_date" in overrides
+            overrides["extraction_date"]
+            if "extraction_date" in overrides
             else df["Disbursement Date"].max()
         )
         self.days_after_term = overrides.get("days_after_term", _DEFAULTS["days_after_term"])
-        self.min_loans_per_cohort = overrides.get("min_loans_per_cohort", _DEFAULTS["min_loans_per_cohort"])
+        self.min_loans_per_cohort = overrides.get(
+            "min_loans_per_cohort", _DEFAULTS["min_loans_per_cohort"]
+        )
 
     def as_dict(self):
         return {

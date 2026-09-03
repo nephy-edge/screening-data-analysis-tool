@@ -5,3 +5,11 @@ include = ["app.py", "theme.py", "config.py", "scripts/template_analysis/**/*.py
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# app.py deliberately imports template_analysis after inserting scripts/ onto
+# sys.path, so E402 is skipped per-line with # noqa: E402. That deferred block
+# is incompatible with isort (I001), whose auto-sort would impose an
+# unmaintainable one-symbol-per-import layout, so isort is disabled for this
+# file and the import order is maintained by hand instead.
+"app.py" = ["I001"]

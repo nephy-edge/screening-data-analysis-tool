@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 
 
 def _num(series):
@@ -32,39 +31,39 @@ def build_cohorts(df: pd.DataFrame, min_matured: int | None = None, matured_only
     rather than the Excel-faithful matured-lagged view. Loss Rate is always
     computed from matured loans only regardless, since it's not meaningful
     any other way."""
-    matured = df[df["Reached T+3?"] == True]
+    matured = df[df["Reached T+3?"]]
     population = matured if matured_only else df
     grouped = population.groupby("Cohort", dropna=False)
 
     term_days = _num(population["Term (days)"])
     principal = _num(population["Principal Value"])
-    weighted_term_num = (term_days * principal).groupby(
-        population["Cohort"], dropna=False
-    ).sum()
+    weighted_term_num = (term_days * principal).groupby(population["Cohort"], dropna=False).sum()
     weighted_term_den = principal.groupby(population["Cohort"], dropna=False).sum()
-    weighted_avg_term = (weighted_term_num / weighted_term_den).where(
-        weighted_term_den != 0
-    ).reindex(grouped["Cohort"].first().index)
+    weighted_avg_term = (
+        (weighted_term_num / weighted_term_den)
+        .where(weighted_term_den != 0)
+        .reindex(grouped["Cohort"].first().index)
+    )
 
-    cohorts = pd.DataFrame({
-        "Cohort": grouped["Cohort"].first(),
-        "Loan Count": grouped["Loan ID"].count(),
-        "Total Principal": grouped["Principal Value"].sum(),
-        "Total Interest": grouped["Expected Interest"].sum(),
-        "Total Fee": grouped["Expected Fee"].sum(),
-        "Total Due": _agg(grouped, "Total Due"),
-        "Total Paid": grouped["Total Paid"].sum(),
-        "Avg Term (days)": grouped["Term (days)"].mean(),
-        "Weighted Avg Term": weighted_avg_term,
-    })
+    cohorts = pd.DataFrame(
+        {
+            "Cohort": grouped["Cohort"].first(),
+            "Loan Count": grouped["Loan ID"].count(),
+            "Total Principal": grouped["Principal Value"].sum(),
+            "Total Interest": grouped["Expected Interest"].sum(),
+            "Total Fee": grouped["Expected Fee"].sum(),
+            "Total Due": _agg(grouped, "Total Due"),
+            "Total Paid": grouped["Total Paid"].sum(),
+            "Avg Term (days)": grouped["Term (days)"].mean(),
+            "Weighted Avg Term": weighted_avg_term,
+        }
+    )
 
     if matured_only:
         cohorts["Matured Count"] = cohorts["Loan Count"]
     else:
         mat_grouped = matured.groupby("Cohort", dropna=False)
-        cohorts["Matured Count"] = mat_grouped["Loan ID"].count().reindex(
-            cohorts.index
-        ).fillna(0)
+        cohorts["Matured Count"] = mat_grouped["Loan ID"].count().reindex(cohorts.index).fillna(0)
 
     if not matured.empty and "Total Paid" in matured.columns:
         # Sum each column per cohort independently (via groupby().sum(), which

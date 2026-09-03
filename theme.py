@@ -3,6 +3,12 @@
 Mirrors the Lendable house style used across Lendable's internal tools.
 """
 
+# The CSS is kept as a single triple-quoted block of real CSS rules, so many
+# physical lines exceed the 100-char project limit and none can be reflowed
+# without altering the delivered CSS. E501 is therefore suppressed at file
+# level - the "violations" are string-content lines, not code.
+# ruff: noqa: E501
+
 from datetime import datetime
 
 STYLE_CSS = """
@@ -282,11 +288,13 @@ FONT_LINKS = (
 
 def inject_style():
     import streamlit as st
+
     st.html(f"{FONT_LINKS}<style>{STYLE_CSS}</style>")
 
 
 def render_masthead(doctype):
     import streamlit as st
+
     live_date = datetime.now().strftime("%d %b %Y")
     st.html(f"""
     <div class="masthead">
@@ -306,6 +314,7 @@ def render_masthead(doctype):
 
 def render_cover(title, sub):
     import streamlit as st
+
     st.html(f"""
     <div class="cover">
         <h1 class="cover-title">{title}</h1>

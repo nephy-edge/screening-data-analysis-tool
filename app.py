@@ -9,6 +9,13 @@ moved to the rental_and_subscription/ folder - see git history for the
 previously unified two-model version of this file.
 """
 
+# App.py is string-dominated: most physical lines that exceed the project's
+# 100-char limit are CSS/HTML/JavaScript emitted from render functions and
+# human-readable help/caption text - none can be reflowed without altering
+# the delivered markup or UI copy. E501 is suppressed at file level rather
+# than disabled project-wide, so logic-only files still enforce it.
+# ruff: noqa: E501
+
 import io
 import json
 import os
@@ -26,43 +33,51 @@ import numpy_financial as npf
 import pandas as pd
 import requests
 import streamlit as st
+from dotenv import load_dotenv
 from openpyxl import load_workbook
 from openpyxl.chart import AreaChart, BarChart, LineChart, Reference, ScatterChart, Series
 from openpyxl.utils import get_column_letter
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
-from dotenv import load_dotenv
+import config as app_config
+from theme import inject_style, render_cover, render_masthead
 
 load_dotenv()
 
-from theme import inject_style, render_cover, render_masthead
-
+# The template_analysis package lives under scripts/, which is not on
+# sys.path by default when the app is launched from the repo root - add it
+# before importing that package. The deferred import is deliberate, so the
+# block below is annotated to skip ruff's top-of-file import rule (E402).
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
-from template_analysis.general_inputs import GeneralInputs as LendingGeneralInputs
-from template_analysis.data_questionnaire import QUESTIONS as LENDING_QUESTIONS
-from template_analysis.data_input import process_data_input as lending_process_data_input
-from template_analysis.cohorts import build_cohorts as lending_build_cohorts
-from template_analysis.cohorts_for_x_or_more_loans import filter_cohorts as lending_filter_cohorts
-from template_analysis.ltv_analysis import LtvAnalysis as LendingLtvAnalysis
-from template_analysis.ue_analysis import UeAnalysis as LendingUeAnalysis
-from template_analysis.general_analysis import describe as lending_general_analysis
-from template_analysis.apr import principal_weighted_average_rates
-from template_analysis.date_detection import (
-    SLASHED_DATE_RE as _SLASHED_DATE_RE,
-    infer_dayfirst as _infer_dayfirst,
+from template_analysis.apr import principal_weighted_average_rates  # noqa: E402
+from template_analysis.cohorts import build_cohorts as lending_build_cohorts  # noqa: E402
+from template_analysis.cohorts_for_x_or_more_loans import (  # noqa: E402
+    filter_cohorts as lending_filter_cohorts,
+)
+from template_analysis.data_input import (  # noqa: E402
+    process_data_input as lending_process_data_input,
+)
+from template_analysis.data_questionnaire import QUESTIONS as LENDING_QUESTIONS  # noqa: E402
+from template_analysis.date_detection import (  # noqa: E402
     detect_date as _detect_date,
     mixed_parsed_and_text_warning as _mixed_parsed_and_text_warning,
 )
-from template_analysis.ltv_calculator import (
-    COUNTRIES as LTV_CALC_COUNTRIES, DATA_INPUT_SOURCES as LTV_CALC_DATA_SOURCES,
-    FX_RISK_RATINGS as LTV_CALC_FX_RISK_RATINGS, HEDGE_TYPES as LTV_CALC_HEDGE_TYPES,
-    SEGMENTATIONS as LTV_CALC_SEGMENTATIONS, compute_ltv as ltv_calculator_compute,
+from template_analysis.general_analysis import describe as lending_general_analysis  # noqa: E402
+from template_analysis.general_inputs import GeneralInputs as LendingGeneralInputs  # noqa: E402
+from template_analysis.ltv_analysis import LtvAnalysis as LendingLtvAnalysis  # noqa: E402
+from template_analysis.ltv_calculator import (  # noqa: E402
+    compute_ltv as ltv_calculator_compute,
+    COUNTRIES as LTV_CALC_COUNTRIES,
+    DATA_INPUT_SOURCES as LTV_CALC_DATA_SOURCES,
+    FX_DEVAL_TABLE as LTV_CALC_FX_DEVAL_TABLE,
+    FX_RISK_RATINGS as LTV_CALC_FX_RISK_RATINGS,
+    HEDGE_TYPES as LTV_CALC_HEDGE_TYPES,
     nearest_tenor_bucket as ltv_calculator_nearest_tenor,
-    TENORS as LTV_CALC_TENORS, FX_DEVAL_TABLE as LTV_CALC_FX_DEVAL_TABLE,
+    SEGMENTATIONS as LTV_CALC_SEGMENTATIONS,
+    TENORS as LTV_CALC_TENORS,
 )
-
-import config as app_config
+from template_analysis.ue_analysis import UeAnalysis as LendingUeAnalysis  # noqa: E402
 
 DEEPINFRA_MODEL = app_config.AI["model"]
 DEEPINFRA_CHAT_URL = app_config.AI["chat_url"]
@@ -76,9 +91,9 @@ def _ca_bundle_path() -> str:
     (e.g. Zscaler, Cisco Umbrella) without an env var set before launch."""
     if not os.path.exists(_EXTRA_CA_PEM):
         return certifi.where()
-    with open(certifi.where(), "r", encoding="utf-8") as f:
+    with open(certifi.where(), encoding="utf-8") as f:
         bundle = f.read()
-    with open(_EXTRA_CA_PEM, "r", encoding="utf-8") as f:
+    with open(_EXTRA_CA_PEM, encoding="utf-8") as f:
         bundle += "\n" + f.read()
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False, encoding="utf-8")
     tmp.write(bundle)
@@ -90,66 +105,182 @@ def _ca_bundle_path() -> str:
 # in sync with that API's own currency set (checked via its /latest/USD
 # response) so every option in the picker below is actually convertible.
 CURRENCY_NAMES = {
-    "AED": "UAE Dirham", "AFN": "Afghan Afghani", "ALL": "Albanian Lek",
-    "AMD": "Armenian Dram", "ANG": "Netherlands Antillean Guilder", "AOA": "Angolan Kwanza",
-    "ARS": "Argentine Peso", "AUD": "Australian Dollar", "AWG": "Aruban Florin",
-    "AZN": "Azerbaijani Manat", "BAM": "Bosnia-Herzegovina Convertible Mark", "BBD": "Barbadian Dollar",
-    "BDT": "Bangladeshi Taka", "BGN": "Bulgarian Lev", "BHD": "Bahraini Dinar",
-    "BIF": "Burundian Franc", "BMD": "Bermudan Dollar", "BND": "Brunei Dollar",
-    "BOB": "Bolivian Boliviano", "BRL": "Brazilian Real", "BSD": "Bahamian Dollar",
-    "BTN": "Bhutanese Ngultrum", "BWP": "Botswanan Pula", "BYN": "Belarusian Ruble",
-    "BZD": "Belize Dollar", "CAD": "Canadian Dollar", "CDF": "Congolese Franc",
-    "CHF": "Swiss Franc", "CLF": "Chilean Unit of Account (UF)", "CLP": "Chilean Peso",
-    "CNH": "Chinese Yuan (Offshore)", "CNY": "Chinese Yuan", "COP": "Colombian Peso",
-    "CRC": "Costa Rican Colon", "CUP": "Cuban Peso", "CVE": "Cape Verdean Escudo",
-    "CZK": "Czech Koruna", "DJF": "Djiboutian Franc", "DKK": "Danish Krone",
-    "DOP": "Dominican Peso", "DZD": "Algerian Dinar", "EGP": "Egyptian Pound",
-    "ERN": "Eritrean Nakfa", "ETB": "Ethiopian Birr", "EUR": "Euro",
-    "FJD": "Fijian Dollar", "FKP": "Falkland Islands Pound", "FOK": "Faroese Krona",
-    "GBP": "British Pound", "GEL": "Georgian Lari", "GGP": "Guernsey Pound",
-    "GHS": "Ghanaian Cedi", "GIP": "Gibraltar Pound", "GMD": "Gambian Dalasi",
-    "GNF": "Guinean Franc", "GTQ": "Guatemalan Quetzal", "GYD": "Guyanaese Dollar",
-    "HKD": "Hong Kong Dollar", "HNL": "Honduran Lempira", "HRK": "Croatian Kuna",
-    "HTG": "Haitian Gourde", "HUF": "Hungarian Forint", "IDR": "Indonesian Rupiah",
-    "ILS": "Israeli New Shekel", "IMP": "Isle of Man Pound", "INR": "Indian Rupee",
-    "IQD": "Iraqi Dinar", "IRR": "Iranian Rial", "ISK": "Icelandic Krona",
-    "JEP": "Jersey Pound", "JMD": "Jamaican Dollar", "JOD": "Jordanian Dinar",
-    "JPY": "Japanese Yen", "KES": "Kenyan Shilling", "KGS": "Kyrgystani Som",
-    "KHR": "Cambodian Riel", "KID": "Kiribati Dollar", "KMF": "Comorian Franc",
-    "KRW": "South Korean Won", "KWD": "Kuwaiti Dinar", "KYD": "Cayman Islands Dollar",
-    "KZT": "Kazakhstani Tenge", "LAK": "Laotian Kip", "LBP": "Lebanese Pound",
-    "LKR": "Sri Lankan Rupee", "LRD": "Liberian Dollar", "LSL": "Lesotho Loti",
-    "LYD": "Libyan Dinar", "MAD": "Moroccan Dirham", "MDL": "Moldovan Leu",
-    "MGA": "Malagasy Ariary", "MKD": "Macedonian Denar", "MMK": "Myanmar Kyat",
-    "MNT": "Mongolian Tugrik", "MOP": "Macanese Pataca", "MRU": "Mauritanian Ouguiya",
-    "MUR": "Mauritian Rupee", "MVR": "Maldivian Rufiyaa", "MWK": "Malawian Kwacha",
-    "MXN": "Mexican Peso", "MYR": "Malaysian Ringgit", "MZN": "Mozambican Metical",
-    "NAD": "Namibian Dollar", "NGN": "Nigerian Naira", "NIO": "Nicaraguan Cordoba",
-    "NOK": "Norwegian Krone", "NPR": "Nepalese Rupee", "NZD": "New Zealand Dollar",
-    "OMR": "Omani Rial", "PAB": "Panamanian Balboa", "PEN": "Peruvian Sol",
-    "PGK": "Papua New Guinean Kina", "PHP": "Philippine Peso", "PKR": "Pakistani Rupee",
-    "PLN": "Polish Zloty", "PYG": "Paraguayan Guarani", "QAR": "Qatari Riyal",
-    "RON": "Romanian Leu", "RSD": "Serbian Dinar", "RUB": "Russian Ruble",
-    "RWF": "Rwandan Franc", "SAR": "Saudi Riyal", "SBD": "Solomon Islands Dollar",
-    "SCR": "Seychellois Rupee", "SDG": "Sudanese Pound", "SEK": "Swedish Krona",
-    "SGD": "Singapore Dollar", "SHP": "Saint Helena Pound", "SLE": "Sierra Leonean Leone",
-    "SLL": "Sierra Leonean Leone (old)", "SOS": "Somali Shilling", "SRD": "Surinamese Dollar",
-    "SSP": "South Sudanese Pound", "STN": "Sao Tome & Principe Dobra", "SYP": "Syrian Pound",
-    "SZL": "Swazi Lilangeni", "THB": "Thai Baht", "TJS": "Tajikistani Somoni",
-    "TMT": "Turkmenistani Manat", "TND": "Tunisian Dinar", "TOP": "Tongan Pa'anga",
-    "TRY": "Turkish Lira", "TTD": "Trinidad & Tobago Dollar", "TVD": "Tuvaluan Dollar",
-    "TWD": "New Taiwan Dollar", "TZS": "Tanzanian Shilling", "UAH": "Ukrainian Hryvnia",
-    "UGX": "Ugandan Shilling", "USD": "US Dollar", "UYU": "Uruguayan Peso",
-    "UZS": "Uzbekistani Som", "VES": "Venezuelan Bolivar", "VND": "Vietnamese Dong",
-    "VUV": "Vanuatu Vatu", "WST": "Samoan Tala", "XAF": "Central African CFA Franc",
-    "XCD": "East Caribbean Dollar", "XCG": "Caribbean Guilder", "XDR": "IMF Special Drawing Rights",
-    "XOF": "West African CFA Franc", "XPF": "CFP Franc", "YER": "Yemeni Rial",
-    "ZAR": "South African Rand", "ZMW": "Zambian Kwacha", "ZWG": "Zimbabwe Gold",
+    "AED": "UAE Dirham",
+    "AFN": "Afghan Afghani",
+    "ALL": "Albanian Lek",
+    "AMD": "Armenian Dram",
+    "ANG": "Netherlands Antillean Guilder",
+    "AOA": "Angolan Kwanza",
+    "ARS": "Argentine Peso",
+    "AUD": "Australian Dollar",
+    "AWG": "Aruban Florin",
+    "AZN": "Azerbaijani Manat",
+    "BAM": "Bosnia-Herzegovina Convertible Mark",
+    "BBD": "Barbadian Dollar",
+    "BDT": "Bangladeshi Taka",
+    "BGN": "Bulgarian Lev",
+    "BHD": "Bahraini Dinar",
+    "BIF": "Burundian Franc",
+    "BMD": "Bermudan Dollar",
+    "BND": "Brunei Dollar",
+    "BOB": "Bolivian Boliviano",
+    "BRL": "Brazilian Real",
+    "BSD": "Bahamian Dollar",
+    "BTN": "Bhutanese Ngultrum",
+    "BWP": "Botswanan Pula",
+    "BYN": "Belarusian Ruble",
+    "BZD": "Belize Dollar",
+    "CAD": "Canadian Dollar",
+    "CDF": "Congolese Franc",
+    "CHF": "Swiss Franc",
+    "CLF": "Chilean Unit of Account (UF)",
+    "CLP": "Chilean Peso",
+    "CNH": "Chinese Yuan (Offshore)",
+    "CNY": "Chinese Yuan",
+    "COP": "Colombian Peso",
+    "CRC": "Costa Rican Colon",
+    "CUP": "Cuban Peso",
+    "CVE": "Cape Verdean Escudo",
+    "CZK": "Czech Koruna",
+    "DJF": "Djiboutian Franc",
+    "DKK": "Danish Krone",
+    "DOP": "Dominican Peso",
+    "DZD": "Algerian Dinar",
+    "EGP": "Egyptian Pound",
+    "ERN": "Eritrean Nakfa",
+    "ETB": "Ethiopian Birr",
+    "EUR": "Euro",
+    "FJD": "Fijian Dollar",
+    "FKP": "Falkland Islands Pound",
+    "FOK": "Faroese Krona",
+    "GBP": "British Pound",
+    "GEL": "Georgian Lari",
+    "GGP": "Guernsey Pound",
+    "GHS": "Ghanaian Cedi",
+    "GIP": "Gibraltar Pound",
+    "GMD": "Gambian Dalasi",
+    "GNF": "Guinean Franc",
+    "GTQ": "Guatemalan Quetzal",
+    "GYD": "Guyanaese Dollar",
+    "HKD": "Hong Kong Dollar",
+    "HNL": "Honduran Lempira",
+    "HRK": "Croatian Kuna",
+    "HTG": "Haitian Gourde",
+    "HUF": "Hungarian Forint",
+    "IDR": "Indonesian Rupiah",
+    "ILS": "Israeli New Shekel",
+    "IMP": "Isle of Man Pound",
+    "INR": "Indian Rupee",
+    "IQD": "Iraqi Dinar",
+    "IRR": "Iranian Rial",
+    "ISK": "Icelandic Krona",
+    "JEP": "Jersey Pound",
+    "JMD": "Jamaican Dollar",
+    "JOD": "Jordanian Dinar",
+    "JPY": "Japanese Yen",
+    "KES": "Kenyan Shilling",
+    "KGS": "Kyrgystani Som",
+    "KHR": "Cambodian Riel",
+    "KID": "Kiribati Dollar",
+    "KMF": "Comorian Franc",
+    "KRW": "South Korean Won",
+    "KWD": "Kuwaiti Dinar",
+    "KYD": "Cayman Islands Dollar",
+    "KZT": "Kazakhstani Tenge",
+    "LAK": "Laotian Kip",
+    "LBP": "Lebanese Pound",
+    "LKR": "Sri Lankan Rupee",
+    "LRD": "Liberian Dollar",
+    "LSL": "Lesotho Loti",
+    "LYD": "Libyan Dinar",
+    "MAD": "Moroccan Dirham",
+    "MDL": "Moldovan Leu",
+    "MGA": "Malagasy Ariary",
+    "MKD": "Macedonian Denar",
+    "MMK": "Myanmar Kyat",
+    "MNT": "Mongolian Tugrik",
+    "MOP": "Macanese Pataca",
+    "MRU": "Mauritanian Ouguiya",
+    "MUR": "Mauritian Rupee",
+    "MVR": "Maldivian Rufiyaa",
+    "MWK": "Malawian Kwacha",
+    "MXN": "Mexican Peso",
+    "MYR": "Malaysian Ringgit",
+    "MZN": "Mozambican Metical",
+    "NAD": "Namibian Dollar",
+    "NGN": "Nigerian Naira",
+    "NIO": "Nicaraguan Cordoba",
+    "NOK": "Norwegian Krone",
+    "NPR": "Nepalese Rupee",
+    "NZD": "New Zealand Dollar",
+    "OMR": "Omani Rial",
+    "PAB": "Panamanian Balboa",
+    "PEN": "Peruvian Sol",
+    "PGK": "Papua New Guinean Kina",
+    "PHP": "Philippine Peso",
+    "PKR": "Pakistani Rupee",
+    "PLN": "Polish Zloty",
+    "PYG": "Paraguayan Guarani",
+    "QAR": "Qatari Riyal",
+    "RON": "Romanian Leu",
+    "RSD": "Serbian Dinar",
+    "RUB": "Russian Ruble",
+    "RWF": "Rwandan Franc",
+    "SAR": "Saudi Riyal",
+    "SBD": "Solomon Islands Dollar",
+    "SCR": "Seychellois Rupee",
+    "SDG": "Sudanese Pound",
+    "SEK": "Swedish Krona",
+    "SGD": "Singapore Dollar",
+    "SHP": "Saint Helena Pound",
+    "SLE": "Sierra Leonean Leone",
+    "SLL": "Sierra Leonean Leone (old)",
+    "SOS": "Somali Shilling",
+    "SRD": "Surinamese Dollar",
+    "SSP": "South Sudanese Pound",
+    "STN": "Sao Tome & Principe Dobra",
+    "SYP": "Syrian Pound",
+    "SZL": "Swazi Lilangeni",
+    "THB": "Thai Baht",
+    "TJS": "Tajikistani Somoni",
+    "TMT": "Turkmenistani Manat",
+    "TND": "Tunisian Dinar",
+    "TOP": "Tongan Pa'anga",
+    "TRY": "Turkish Lira",
+    "TTD": "Trinidad & Tobago Dollar",
+    "TVD": "Tuvaluan Dollar",
+    "TWD": "New Taiwan Dollar",
+    "TZS": "Tanzanian Shilling",
+    "UAH": "Ukrainian Hryvnia",
+    "UGX": "Ugandan Shilling",
+    "USD": "US Dollar",
+    "UYU": "Uruguayan Peso",
+    "UZS": "Uzbekistani Som",
+    "VES": "Venezuelan Bolivar",
+    "VND": "Vietnamese Dong",
+    "VUV": "Vanuatu Vatu",
+    "WST": "Samoan Tala",
+    "XAF": "Central African CFA Franc",
+    "XCD": "East Caribbean Dollar",
+    "XCG": "Caribbean Guilder",
+    "XDR": "IMF Special Drawing Rights",
+    "XOF": "West African CFA Franc",
+    "XPF": "CFP Franc",
+    "YER": "Yemeni Rial",
+    "ZAR": "South African Rand",
+    "ZMW": "Zambian Kwacha",
+    "ZWG": "Zimbabwe Gold",
     "ZWL": "Zimbabwean Dollar",
 }
 # The subset of NUMERIC_FIELDS that are actually money (as opposed to day
 # counts) - only these get rescaled when converting to USD.
-CURRENCY_FIELDS = {"Principal Value", "Expected Interest", "Expected Fee", "Total Paid", "Total Due"}
+CURRENCY_FIELDS = {
+    "Principal Value",
+    "Expected Interest",
+    "Expected Fee",
+    "Total Paid",
+    "Total Due",
+}
 _FX_API_URL = app_config.FX["api_url"]
 
 
@@ -158,7 +289,9 @@ def _fetch_usd_fx_rates() -> dict:
     """Live USD exchange rates from a free, keyless, open API (open.er-api.com).
     Returns {currency_code: units of that currency per 1 USD}; cached for an
     hour so repeated reruns/uploads don't hammer the endpoint."""
-    resp = requests.get(_FX_API_URL, timeout=app_config.FX["request_timeout_seconds"], verify=_ca_bundle_path())
+    resp = requests.get(
+        _FX_API_URL, timeout=app_config.FX["request_timeout_seconds"], verify=_ca_bundle_path()
+    )
     resp.raise_for_status()
     data = resp.json()
     if data.get("result") != "success":
@@ -246,9 +379,7 @@ with feedback_col:
             if not fb_text.strip():
                 st.warning("Please enter some feedback first.")
             else:
-                ok, err = _send_slack_feedback(
-                    fb_text, "Lending", fb_user
-                )
+                ok, err = _send_slack_feedback(fb_text, "Lending", fb_user)
                 if ok:
                     st.session_state["fb_form_version"] = fb_form_version + 1
                     st.session_state["fb_just_sent"] = True
@@ -259,15 +390,27 @@ with feedback_col:
 LENDING_CONFIG = dict(
     id_field="Loan ID",
     input_columns=[
-        ("Loan ID", True), ("Disbursement Date", True), ("Expected Completion Date", True),
-        ("Principal Value", True), ("Expected Interest", True), ("Expected Fee", False),
-        ("Total Paid", True), ("Total Due", False),
-        ("Loan Status", False), ("Days Late", False), ("Term (days)", False),
+        ("Loan ID", True),
+        ("Disbursement Date", True),
+        ("Expected Completion Date", True),
+        ("Principal Value", True),
+        ("Expected Interest", True),
+        ("Expected Fee", False),
+        ("Total Paid", True),
+        ("Total Due", False),
+        ("Loan Status", False),
+        ("Days Late", False),
+        ("Term (days)", False),
     ],
     date_fields={"Disbursement Date", "Expected Completion Date"},
     numeric_fields={
-        "Principal Value", "Expected Interest", "Expected Fee", "Total Paid", "Total Due",
-        "Days Late", "Term (days)",
+        "Principal Value",
+        "Expected Interest",
+        "Expected Fee",
+        "Total Paid",
+        "Total Due",
+        "Days Late",
+        "Term (days)",
     },
     dayfirst=True,
     primary_date_field="Disbursement Date",
@@ -320,6 +463,7 @@ def _extract_pdf_text(data: bytes) -> str:
 
 def _extract_excel_text(data: bytes) -> str:
     from openpyxl import load_workbook
+
     wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     lines = []
     try:
@@ -341,7 +485,9 @@ def _extract_docx_text(data: bytes) -> str:
     try:
         from docx import Document
     except ImportError:
-        raise RuntimeError("Word support requires the 'python-docx' package (pip install python-docx).")
+        raise RuntimeError(
+            "Word support requires the 'python-docx' package (pip install python-docx)."
+        )
     doc = Document(io.BytesIO(data))
     parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
     for table in doc.tables:
@@ -376,7 +522,11 @@ def _extract_document_text(uploaded) -> dict:
         elif suffix in ("txt", "csv", "md", "json", "log"):
             text = _extract_text_file(data)
         else:
-            return {"name": name, "text": "", "error": f"Unsupported file type '.{suffix}' - use PDF, Excel, Word (.docx), or text files."}
+            return {
+                "name": name,
+                "text": "",
+                "error": f"Unsupported file type '.{suffix}' - use PDF, Excel, Word (.docx), or text files.",
+            }
     except Exception as e:
         return {"name": name, "text": "", "error": str(e)}
     return {"name": name, "text": text, "error": None}
@@ -397,7 +547,9 @@ def _ai_context_text(max_chars: int = 60000, per_doc: int = 15000) -> str:
         parts.append("## Additional context notes\n" + notes)
     for doc in st.session_state.get("context_documents", []):
         if doc.get("error"):
-            parts.append(f"## Uploaded document: {doc['name']}\n[Could not be used: {doc['error']}]")
+            parts.append(
+                f"## Uploaded document: {doc['name']}\n[Could not be used: {doc['error']}]"
+            )
         else:
             parts.append(
                 f"## Uploaded document: {doc['name']}\n" + _truncate_text(doc["text"], per_doc)
@@ -410,7 +562,7 @@ def _load_cache(path, key) -> dict | None:
     if not os.path.exists(path):
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             cache = json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
@@ -421,7 +573,7 @@ def _save_cache(path, key, value) -> None:
     cache = {}
     if os.path.exists(path):
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 cache = json.load(f)
         except (json.JSONDecodeError, OSError):
             cache = {}
@@ -478,21 +630,23 @@ def _step2_data_quality_checks(raw: pd.DataFrame, config: dict) -> list[dict]:
     if id_field in raw.columns:
         dup_mask = raw[id_field].notna() & raw[id_field].duplicated(keep=False)
         if dup_mask.any():
-            checks.append({
-                "level": "warning",
-                "check_id": "duplicate_loan_id",
-                "message": (
-                    f"**Duplicate {id_field}s** - {raw.loc[dup_mask, id_field].nunique()} "
-                    f"{id_field}(s) appear more than once ({int(dup_mask.sum())} rows). "
-                    "Confirm with the borrower whether these are genuine duplicates."
-                ),
-                # key=str: id_field can be a mix of str/int/float (e.g. an Excel
-                # column read with some cells numeric, others text) - sort_values
-                # compares values pairwise and raises TypeError on a mixed-type
-                # column, so sort by each value's string form instead.
-                "detail": raw.loc[dup_mask].sort_values(id_field, key=lambda s: s.astype(str)),
-                "detail_expander": f"View {int(dup_mask.sum())} duplicate row(s)",
-            })
+            checks.append(
+                {
+                    "level": "warning",
+                    "check_id": "duplicate_loan_id",
+                    "message": (
+                        f"**Duplicate {id_field}s** - {raw.loc[dup_mask, id_field].nunique()} "
+                        f"{id_field}(s) appear more than once ({int(dup_mask.sum())} rows). "
+                        "Confirm with the borrower whether these are genuine duplicates."
+                    ),
+                    # key=str: id_field can be a mix of str/int/float (e.g. an Excel
+                    # column read with some cells numeric, others text) - sort_values
+                    # compares values pairwise and raises TypeError on a mixed-type
+                    # column, so sort by each value's string form instead.
+                    "detail": raw.loc[dup_mask].sort_values(id_field, key=lambda s: s.astype(str)),
+                    "detail_expander": f"View {int(dup_mask.sum())} duplicate row(s)",
+                }
+            )
 
     low_completion = [
         f"{target} ({raw[target].notna().mean():.0%})"
@@ -500,39 +654,43 @@ def _step2_data_quality_checks(raw: pd.DataFrame, config: dict) -> list[dict]:
         if target in raw.columns and raw[target].notna().mean() < 0.80
     ]
     if low_completion:
-        checks.append({
-            "level": "warning",
-            "message": (
-                "**Field completion below 80%** - " + ", ".join(low_completion) + ". "
-                "Records missing these fields may distort downstream metrics."
-            ),
-        })
+        checks.append(
+            {
+                "level": "warning",
+                "message": (
+                    "**Field completion below 80%** - " + ", ".join(low_completion) + ". "
+                    "Records missing these fields may distort downstream metrics."
+                ),
+            }
+        )
 
     if len(raw) > 5000:
-        checks.append({
-            "level": "info",
-            "message": (
-                f"**Large portfolio** - {len(raw):,} rows exceeds the 5,000-row "
-                "screening threshold. The tool itself scales well past this "
-                "(tested sub-second at ~419,000 rows); flagged in case screening "
-                "policy calls for a sampled or ad-hoc review at this size regardless."
-            ),
-        })
+        checks.append(
+            {
+                "level": "info",
+                "message": (
+                    f"**Large portfolio** - {len(raw):,} rows exceeds the 5,000-row "
+                    "screening threshold. The tool itself scales well past this "
+                    "(tested sub-second at ~419,000 rows); flagged in case screening "
+                    "policy calls for a sampled or ad-hoc review at this size regardless."
+                ),
+            }
+        )
 
     primary_date_field = config["primary_date_field"]
     if primary_date_field in raw.columns and raw[primary_date_field].notna().any():
-        span_days = (
-            raw[primary_date_field].max() - raw[primary_date_field].min()
-        ).days
+        span_days = (raw[primary_date_field].max() - raw[primary_date_field].min()).days
         if span_days < 365:
-            checks.append({
-                "level": "warning",
-                "message": (
-                    f"**Limited history** - dates span only "
-                    f"{span_days / 30:.1f} months, below the 12-month screening "
-                    "threshold; loss/churn-rate percentiles may be unreliable."
-                ),
-            })
+            checks.append(
+                {
+                    "level": "warning",
+                    "message": (
+                        f"**Limited history** - dates span only "
+                        f"{span_days / 30:.1f} months, below the 12-month screening "
+                        "threshold; loss/churn-rate percentiles may be unreliable."
+                    ),
+                }
+            )
 
     return checks
 
@@ -553,13 +711,19 @@ def _lending_variance_check(cohorts: pd.DataFrame) -> list[dict]:
             prior_term = by_month["Weighted Avg Term"].shift(1).loc[flagged.index]
             avg_loan_size = by_month["Total Principal"] / by_month["Loan Count"]
             avg_loan_size_pct = avg_loan_size.pct_change().loc[flagged.index]
-            pvd_delta = by_month["PvD Ratio"].diff().loc[flagged.index] if "PvD Ratio" in by_month.columns else None
+            pvd_delta = (
+                by_month["PvD Ratio"].diff().loc[flagged.index]
+                if "PvD Ratio" in by_month.columns
+                else None
+            )
 
             def _diagnose(idx):
                 causes = []
                 matured = flagged.loc[idx, "Matured Count"]
                 if pd.notna(matured) and matured < 10:
-                    causes.append(f"small matured sample ({int(matured)} loans) - swing may be noise")
+                    causes.append(
+                        f"small matured sample ({int(matured)} loans) - swing may be noise"
+                    )
                 lc_pct = loan_count_pct.loc[idx]
                 if pd.notna(lc_pct) and abs(lc_pct) > 0.5:
                     causes.append(
@@ -585,29 +749,37 @@ def _lending_variance_check(cohorts: pd.DataFrame) -> list[dict]:
                             f"PvD ratio shifted {pvd * 100:+.0f}pp vs prior cohort "
                             "- possible collections/servicing change"
                         )
-                return "; ".join(causes) if causes else (
-                    "No obvious data-driven cause - likely a genuine portfolio "
-                    "event, escalate to Borrower"
+                return (
+                    "; ".join(causes)
+                    if causes
+                    else (
+                        "No obvious data-driven cause - likely a genuine portfolio "
+                        "event, escalate to Borrower"
+                    )
                 )
 
-            detail = pd.DataFrame({
-                "Cohort": flagged["Cohort"].dt.strftime("%b %Y"),
-                "Loss Rate (%)": (flagged["Loss Rate"] * 100).round(1).values,
-                "Swing vs Prior Cohort (pp)": (flagged_deltas * 100).round(1).values,
-                "Likely Contributing Factor(s)": [_diagnose(i) for i in flagged.index],
-            })
-            checks.append({
-                "level": "warning",
-                "check_id": "unexplained_variance",
-                "message": (
-                    f"**Unexplained variance** - {len(detail)} cohort(s) show a "
-                    "loss-rate swing of more than 5 percentage points versus the "
-                    "prior cohort. Likely contributing factors are diagnosed below "
-                    "from loan-count, sample-size, and term-mix signals already in "
-                    "the data - verify before relying on these cohorts."
-                ),
-                "detail": detail,
-            })
+            detail = pd.DataFrame(
+                {
+                    "Cohort": flagged["Cohort"].dt.strftime("%b %Y"),
+                    "Loss Rate (%)": (flagged["Loss Rate"] * 100).round(1).values,
+                    "Swing vs Prior Cohort (pp)": (flagged_deltas * 100).round(1).values,
+                    "Likely Contributing Factor(s)": [_diagnose(i) for i in flagged.index],
+                }
+            )
+            checks.append(
+                {
+                    "level": "warning",
+                    "check_id": "unexplained_variance",
+                    "message": (
+                        f"**Unexplained variance** - {len(detail)} cohort(s) show a "
+                        "loss-rate swing of more than 5 percentage points versus the "
+                        "prior cohort. Likely contributing factors are diagnosed below "
+                        "from loan-count, sample-size, and term-mix signals already in "
+                        "the data - verify before relying on these cohorts."
+                    ),
+                    "detail": detail,
+                }
+            )
 
     return checks
 
@@ -630,29 +802,33 @@ def _negative_loss_rate_check(cohorts: pd.DataFrame) -> list[dict]:
         return checks
 
     owed = flagged["Total Principal"] + flagged["Total Interest"] + flagged["Total Fee"]
-    detail = pd.DataFrame({
-        "Cohort": flagged["Cohort"].dt.strftime("%b %Y"),
-        "Matured Count": flagged["Matured Count"].values,
-        "Loss Rate (%)": (flagged["Loss Rate"] * 100).round(2).values,
-        "Owed = Principal+Interest+Fee": owed.round(2).values,
-        "Total Paid": flagged["Total Paid"].round(2).values,
-        "Excess Collected (Paid - Owed)": (flagged["Total Paid"] - owed).round(2).values,
-    })
-    checks.append({
-        "level": "warning",
-        "check_id": "negative_loss_rate",
-        "message": (
-            f"**Negative Loss Rate** - {len(detail)} cohort(s) show Total Paid exceeding "
-            "Principal+Interest+Fee for their matured loans, i.e. a negative loss. This can "
-            "be legitimate (late fees or penalty interest collected but never added to the "
-            "\"owed\" side of the formula) or a real data issue (refinanced/rolled-over loans "
-            "double-counting principal in Total Paid, a scale or currency mismatch, or a sign "
-            "error upstream) - the owed/paid components below are the exact figures the Loss "
-            "Rate is computed from, so the cause can be traced directly rather than guessed at."
-        ),
-        "detail": detail,
-        "detail_expander": f"View {len(detail)} negative-loss cohort(s)",
-    })
+    detail = pd.DataFrame(
+        {
+            "Cohort": flagged["Cohort"].dt.strftime("%b %Y"),
+            "Matured Count": flagged["Matured Count"].values,
+            "Loss Rate (%)": (flagged["Loss Rate"] * 100).round(2).values,
+            "Owed = Principal+Interest+Fee": owed.round(2).values,
+            "Total Paid": flagged["Total Paid"].round(2).values,
+            "Excess Collected (Paid - Owed)": (flagged["Total Paid"] - owed).round(2).values,
+        }
+    )
+    checks.append(
+        {
+            "level": "warning",
+            "check_id": "negative_loss_rate",
+            "message": (
+                f"**Negative Loss Rate** - {len(detail)} cohort(s) show Total Paid exceeding "
+                "Principal+Interest+Fee for their matured loans, i.e. a negative loss. This can "
+                "be legitimate (late fees or penalty interest collected but never added to the "
+                '"owed" side of the formula) or a real data issue (refinanced/rolled-over loans '
+                "double-counting principal in Total Paid, a scale or currency mismatch, or a sign "
+                "error upstream) - the owed/paid components below are the exact figures the Loss "
+                "Rate is computed from, so the cause can be traced directly rather than guessed at."
+            ),
+            "detail": detail,
+            "detail_expander": f"View {len(detail)} negative-loss cohort(s)",
+        }
+    )
     return checks
 
 
@@ -671,21 +847,23 @@ def _cohort_coverage_note(cohorts: pd.DataFrame) -> list[dict]:
     if cohorts is not None and not cohorts.empty and "Cohort" in cohorts.columns:
         months = cohorts["Cohort"].dropna()
         if not months.empty:
-            checks.append({
-                "level": "info",
-                "check_id": "cohort_coverage",
-                "message": (
-                    f"**Cohort coverage** - this analysis covers "
-                    f"{months.nunique()} disbursement cohort(s), "
-                    f"{months.min():%b %Y} to {months.max():%b %Y}, computed "
-                    "live from the uploaded Data Input rows. If comparing "
-                    "against a previously downloaded Excel/Google Sheets "
-                    "export, check that its own Cohorts sheet covers the "
-                    "same range - Google Sheets pivot caches can go stale "
-                    "and keep showing an older, narrower range after the "
-                    "live sheet has grown."
-                ),
-            })
+            checks.append(
+                {
+                    "level": "info",
+                    "check_id": "cohort_coverage",
+                    "message": (
+                        f"**Cohort coverage** - this analysis covers "
+                        f"{months.nunique()} disbursement cohort(s), "
+                        f"{months.min():%b %Y} to {months.max():%b %Y}, computed "
+                        "live from the uploaded Data Input rows. If comparing "
+                        "against a previously downloaded Excel/Google Sheets "
+                        "export, check that its own Cohorts sheet covers the "
+                        "same range - Google Sheets pivot caches can go stale "
+                        "and keep showing an older, narrower range after the "
+                        "live sheet has grown."
+                    ),
+                }
+            )
     return checks
 
 
@@ -703,19 +881,21 @@ def _cohort_threshold_check(gi, cohorts: pd.DataFrame, filtered: pd.DataFrame) -
     total = len(cohorts)
     kept = len(filtered) if filtered is not None else 0
     if total >= 3 and kept / total < 0.5:
-        checks.append({
-            "level": "warning",
-            "check_id": "min_loans_per_cohort_too_high",
-            "message": (
-                f"**Minimum loans per cohort ({gi.min_loans_per_cohort}) may not fit this file** - "
-                f"only {kept} of {total} cohorts meet it. This threshold is a per-deal assumption "
-                "that varies between real files (seen as low as 1, as high as 20) and isn't "
-                "derivable from the uploaded data - if this file's real threshold is lower, "
-                "loss/churn-rate percentiles are being computed from a small, filtered slice of "
-                "the portfolio. Check the file's own General Inputs value if you have it, or "
-                "lower the number in the form above and re-run."
-            ),
-        })
+        checks.append(
+            {
+                "level": "warning",
+                "check_id": "min_loans_per_cohort_too_high",
+                "message": (
+                    f"**Minimum loans per cohort ({gi.min_loans_per_cohort}) may not fit this file** - "
+                    f"only {kept} of {total} cohorts meet it. This threshold is a per-deal assumption "
+                    "that varies between real files (seen as low as 1, as high as 20) and isn't "
+                    "derivable from the uploaded data - if this file's real threshold is lower, "
+                    "loss/churn-rate percentiles are being computed from a small, filtered slice of "
+                    "the portfolio. Check the file's own General Inputs value if you have it, or "
+                    "lower the number in the form above and re-run."
+                ),
+            }
+        )
     return checks
 
 
@@ -776,7 +956,9 @@ def _render_snapshot_table(rows: list) -> None:
     st.markdown(html, unsafe_allow_html=True)
 
 
-def _render_big_number_card(label: str, value: float, value_fmt: str = "{:.1%}", help_text: str = None) -> None:
+def _render_big_number_card(
+    label: str, value: float, value_fmt: str = "{:.1%}", help_text: str = None
+) -> None:
     """A metric-style card matching stMetric's card look (see theme.py), but
     with the big number colored green/red by sign - stMetric itself only
     colors its delta, not the primary value, so a plain st.metric can't do
@@ -841,16 +1023,19 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
     revenue = df["Expected Interest"].sum()
     origination_income = df["Expected Fee"].sum()
 
-    matured = df[df["Reached T+3?"] == True]
+    matured = df[df["Reached T+3?"]]
     matured_principal = matured["Principal Value"].sum()
     matured_revenue = matured["Expected Interest"].sum()
     matured_origination_income = matured["Expected Fee"].sum()
     matured_owed = matured_principal + matured_revenue + matured_origination_income
     losses_dollar = matured_owed - matured["Total Paid"].sum() if matured_owed else float("nan")
-    losses_pct_of_gbv = losses_dollar / principal if principal and pd.notna(losses_dollar) else float("nan")
+    losses_pct_of_gbv = (
+        losses_dollar / principal if principal and pd.notna(losses_dollar) else float("nan")
+    )
     matured_term_m = (
         (matured["Term (days)"] * matured["Principal Value"]).sum() / matured_principal / 30.4375
-        if matured_principal else float("nan")
+        if matured_principal
+        else float("nan")
     )
 
     rates = principal_weighted_average_rates(df)
@@ -866,47 +1051,83 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
     )
     _cost_defaults = app_config.UE_MODEL_COST_DEFAULTS
     m1, m2 = st.columns(2)
-    upfront_cost_pct = m1.number_input(
-        "Upfront variable costs (% of matured-loan GBV)", min_value=0.0,
-        value=_cost_defaults["upfront_cost_pct"], step=0.1,
-        format="%.2f", key="ue_ai_upfront_cost",
-    ) / 100
-    ongoing_cost_pct = m2.number_input(
-        "Ongoing variable costs (% of matured-loan GBV)", min_value=0.0,
-        value=_cost_defaults["ongoing_cost_pct"], step=0.1,
-        format="%.2f", key="ue_ai_ongoing_cost",
-    ) / 100
+    upfront_cost_pct = (
+        m1.number_input(
+            "Upfront variable costs (% of matured-loan GBV)",
+            min_value=0.0,
+            value=_cost_defaults["upfront_cost_pct"],
+            step=0.1,
+            format="%.2f",
+            key="ue_ai_upfront_cost",
+        )
+        / 100
+    )
+    ongoing_cost_pct = (
+        m2.number_input(
+            "Ongoing variable costs (% of matured-loan GBV)",
+            min_value=0.0,
+            value=_cost_defaults["ongoing_cost_pct"],
+            step=0.1,
+            format="%.2f",
+            key="ue_ai_ongoing_cost",
+        )
+        / 100
+    )
     m4, m5, m6 = st.columns(3)
-    financing_cost_pct = m4.number_input(
-        "Financing cost (% p.a.)", min_value=0.0,
-        value=_cost_defaults["financing_cost_pct"], step=0.1,
-        format="%.2f", key="ue_ai_financing_cost",
-    ) / 100
-    facility_fee_pct = m5.number_input(
-        "Facility fee - annualised (% p.a.)", min_value=0.0,
-        value=_cost_defaults["facility_fee_pct"], step=0.1,
-        format="%.2f", key="ue_ai_facility_fee",
-    ) / 100
-    hedge_cost_pct = m6.number_input(
-        "Hedge cost - annualised (% p.a.)", min_value=0.0,
-        value=_cost_defaults["hedge_cost_pct"], step=0.1,
-        format="%.2f", key="ue_ai_hedge_cost",
-    ) / 100
+    financing_cost_pct = (
+        m4.number_input(
+            "Financing cost (% p.a.)",
+            min_value=0.0,
+            value=_cost_defaults["financing_cost_pct"],
+            step=0.1,
+            format="%.2f",
+            key="ue_ai_financing_cost",
+        )
+        / 100
+    )
+    facility_fee_pct = (
+        m5.number_input(
+            "Facility fee - annualised (% p.a.)",
+            min_value=0.0,
+            value=_cost_defaults["facility_fee_pct"],
+            step=0.1,
+            format="%.2f",
+            key="ue_ai_facility_fee",
+        )
+        / 100
+    )
+    hedge_cost_pct = (
+        m6.number_input(
+            "Hedge cost - annualised (% p.a.)",
+            min_value=0.0,
+            value=_cost_defaults["hedge_cost_pct"],
+            step=0.1,
+            format="%.2f",
+            key="ue_ai_hedge_cost",
+        )
+        / 100
+    )
 
     n_matured = len(matured)
     avg_principal_matured = matured_principal / n_matured if n_matured else float("nan")
     avg_fee_matured = matured_origination_income / n_matured if n_matured else float("nan")
     avg_gbv_matured = matured_owed / n_matured if n_matured and matured_owed else float("nan")
-    n_periods = int(round(matured_term_m)) + 3 if pd.notna(matured_term_m) and matured_term_m > 0 else None
+    n_periods = (
+        int(round(matured_term_m)) + 3 if pd.notna(matured_term_m) and matured_term_m > 0 else None
+    )
 
     gross_irr = float("nan")
-    if n_periods and pd.notna(avg_principal_matured) and pd.notna(avg_gbv_matured) and pd.notna(losses_dollar) \
-            and matured_owed:
+    if (
+        n_periods
+        and pd.notna(avg_principal_matured)
+        and pd.notna(avg_gbv_matured)
+        and pd.notna(losses_dollar)
+        and matured_owed
+    ):
         loss_rate = losses_dollar / matured_owed
         cf0 = -avg_principal_matured + avg_fee_matured - (upfront_cost_pct * avg_principal_matured)
-        monthly_cf = (
-            (avg_gbv_matured / n_periods) * (1 - loss_rate)
-            - (ongoing_cost_pct * avg_principal_matured / n_periods)
+        monthly_cf = (avg_gbv_matured / n_periods) * (1 - loss_rate) - (
+            ongoing_cost_pct * avg_principal_matured / n_periods
         )
         cashflows = [cf0] + [monthly_cf] * n_periods
         try:
@@ -967,52 +1188,98 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
 
     st.markdown("")
     _ue_model_badge("Auto-calculated from your data", "#2ca02c", "#fff")
-    _render_snapshot_table([
-        ("Product Interest Rate", fmt(ue_data["Average Interest %"]),
-         "Total expected interest income as a % of total principal disbursed, across all loans - "
-         "the stated interest on the product, not the solved-for APR below."),
-        ("Origination Income %", fmt(ue_data["Average Fee %"]),
-         "Total expected fee income as a % of total principal disbursed, across all loans."),
-        ("Implied Interest (APR) %", fmt(implied_interest),
-         "Nominal APR: principal-weighted average implied rate, same figure as the Cohorts Stats tab."),
-        ("Implied Monthly Interest %", fmt(implied_interest / 12), "Implied interest divided by 12."),
-        ("Loss %", fmt(losses_pct_of_gbv),
-         "Losses in dollars divided by total Principal Value disbursed across the whole book - a "
-         "literal % of GBV (not the Summary tab's Loss Rate, which divides by matured owed instead "
-         "and is scoped to a much smaller base)."),
-        ("Term", fmt(term_m, "{:,.1f} months"), "Principal-weighted average term."),
-    ])
+    _render_snapshot_table(
+        [
+            (
+                "Product Interest Rate",
+                fmt(ue_data["Average Interest %"]),
+                "Total expected interest income as a % of total principal disbursed, across all loans - "
+                "the stated interest on the product, not the solved-for APR below.",
+            ),
+            (
+                "Origination Income %",
+                fmt(ue_data["Average Fee %"]),
+                "Total expected fee income as a % of total principal disbursed, across all loans.",
+            ),
+            (
+                "Implied Interest (APR) %",
+                fmt(implied_interest),
+                "Nominal APR: principal-weighted average implied rate, same figure as the Cohorts Stats tab.",
+            ),
+            (
+                "Implied Monthly Interest %",
+                fmt(implied_interest / 12),
+                "Implied interest divided by 12.",
+            ),
+            (
+                "Loss %",
+                fmt(losses_pct_of_gbv),
+                "Losses in dollars divided by total Principal Value disbursed across the whole book - a "
+                "literal % of GBV (not the Summary tab's Loss Rate, which divides by matured owed instead "
+                "and is scoped to a much smaller base).",
+            ),
+            ("Term", fmt(term_m, "{:,.1f} months"), "Principal-weighted average term."),
+        ]
+    )
     st.caption(
         f"{len(matured):,} of {len(df):,} loans have matured (Reached T+3? = True), "
-        f"{matured_principal / principal:.1%} of GBV" if principal else "No loans in view."
+        f"{matured_principal / principal:.1%} of GBV"
+        if principal
+        else "No loans in view."
     )
 
     st.markdown("")
-    _ue_model_badge("Derived - matured loans only (auto-calculated + manual inputs)", "#2ca02c", "#fff")
+    _ue_model_badge(
+        "Derived - matured loans only (auto-calculated + manual inputs)", "#2ca02c", "#fff"
+    )
     st.caption(
         "Revenue, Origination Income and GBV below are re-summed over matured loans only, to match "
         "Losses' scope - not the full-book totals shown above."
     )
-    _render_snapshot_table([
-        ("Income (net losses)", fmt(income_net_losses_margin),
-         "Matured-only Revenue + Origination Income - Losses, as a % of matured-loan GBV."),
-        ("Variable costs", f"${variable_costs_dollar:,.0f}" if pd.notna(variable_costs_dollar) else "n/a",
-         "(Upfront + ongoing costs %) x matured-loan GBV."),
-        ("Variable costs (% of GBV)", fmt(variable_costs_pct), "Sum of the two cost %s entered above."),
-        ("Product contribution", fmt(product_margin),
-         "Income (net losses) - Variable costs, as a % of matured-loan GBV - the workbook's "
-         "'simple' (non-time-value-of-money) unit economics basis, computed only on the subset "
-         "of the book that's actually matured."),
-        ("Cost of Finance (% p.a.)", fmt(cost_of_finance_pct),
-         "Financing cost + Facility fee + Hedge cost, as entered (per annum)."),
-        ("Cost of Finance (over loan life)", fmt(cost_of_finance_over_term),
-         f"Cost of Finance (% p.a.) x matured loans' own weighted term ({fmt(matured_term_m, '{:,.1f}')} "
-         "months) / 12 - not the full-book Term (m) above, which covers a different, longer-duration "
-         "population. Grossed up so it's comparable to Product contribution before being netted below."),
-        ("Net Unit Economics (simplified)", fmt(net_ue_simple),
-         "Product contribution - Cost of Finance (over loan life). A single-period proxy for the "
-         "workbook's cash-flow-basis Net Unit Economics - see the caption below."),
-    ])
+    _render_snapshot_table(
+        [
+            (
+                "Income (net losses)",
+                fmt(income_net_losses_margin),
+                "Matured-only Revenue + Origination Income - Losses, as a % of matured-loan GBV.",
+            ),
+            (
+                "Variable costs",
+                f"${variable_costs_dollar:,.0f}" if pd.notna(variable_costs_dollar) else "n/a",
+                "(Upfront + ongoing costs %) x matured-loan GBV.",
+            ),
+            (
+                "Variable costs (% of GBV)",
+                fmt(variable_costs_pct),
+                "Sum of the two cost %s entered above.",
+            ),
+            (
+                "Product contribution",
+                fmt(product_margin),
+                "Income (net losses) - Variable costs, as a % of matured-loan GBV - the workbook's "
+                "'simple' (non-time-value-of-money) unit economics basis, computed only on the subset "
+                "of the book that's actually matured.",
+            ),
+            (
+                "Cost of Finance (% p.a.)",
+                fmt(cost_of_finance_pct),
+                "Financing cost + Facility fee + Hedge cost, as entered (per annum).",
+            ),
+            (
+                "Cost of Finance (over loan life)",
+                fmt(cost_of_finance_over_term),
+                f"Cost of Finance (% p.a.) x matured loans' own weighted term ({fmt(matured_term_m, '{:,.1f}')} "
+                "months) / 12 - not the full-book Term (m) above, which covers a different, longer-duration "
+                "population. Grossed up so it's comparable to Product contribution before being netted below.",
+            ),
+            (
+                "Net Unit Economics (simplified)",
+                fmt(net_ue_simple),
+                "Product contribution - Cost of Finance (over loan life). A single-period proxy for the "
+                "workbook's cash-flow-basis Net Unit Economics - see the caption below.",
+            ),
+        ]
+    )
     st.caption(
         "Not replicated: 'IRR of cash flow' and 'Net Unit Economics (Cash Flow)'. Both need a full "
         "monthly repayment + loss + cost cash-flow schedule (XIRR/XNPV at WACC), which this app "
@@ -1020,14 +1287,22 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
         "'Net IRR' at the top of this tab is a straight-line approximation, not that schedule either."
     )
     return {
-        "revenue": revenue, "origination_income": origination_income,
-        "implied_interest": implied_interest, "losses_dollar": losses_dollar,
-        "losses_pct_of_gbv": losses_pct_of_gbv, "term_m": term_m,
-        "n_matured": len(matured), "n_total": len(df),
+        "revenue": revenue,
+        "origination_income": origination_income,
+        "implied_interest": implied_interest,
+        "losses_dollar": losses_dollar,
+        "losses_pct_of_gbv": losses_pct_of_gbv,
+        "term_m": term_m,
+        "n_matured": len(matured),
+        "n_total": len(df),
         "matured_gbv_pct": matured_principal / principal if principal else float("nan"),
-        "income_net_losses": income_net_losses, "income_net_losses_margin": income_net_losses_margin,
-        "product_margin": product_margin, "cost_of_finance_pct": cost_of_finance_pct,
-        "net_ue_simple": net_ue_simple, "gross_irr": gross_irr, "net_irr": net_irr,
+        "income_net_losses": income_net_losses,
+        "income_net_losses_margin": income_net_losses_margin,
+        "product_margin": product_margin,
+        "cost_of_finance_pct": cost_of_finance_pct,
+        "net_ue_simple": net_ue_simple,
+        "gross_irr": gross_irr,
+        "net_irr": net_irr,
     }
 
 
@@ -1042,23 +1317,93 @@ def _coerce_dates(raw: pd.DataFrame, date_fields, dayfirst=False) -> pd.DataFram
 # whose column names differ from the template's (strip spaces/punctuation/case
 # before matching), so a "clean but differently-worded" upload still maps.
 _FIELD_ALIASES = {
-    "Loan ID": ["loan id", "loan_id", "account id", "account_id", "id", "loan no", "loan number", "contract no", "contract number"],
-    "Disbursement Date": ["disbursement date", "disbursal date", "disbursed date", "funded date", "funding date", "start date", "origination date", "loan date", "issue date"],
-    "Expected Completion Date": ["expected completion date", "maturity date", "expected end date", "end date", "expected maturity", "due date"],
-    "Principal Value": ["principal value", "principal", "loan amount", "disbursement amount", "principal amount"],
-    "Expected Interest": ["expected interest", "interest", "interest amount", "expected interest amount"],
+    "Loan ID": [
+        "loan id",
+        "loan_id",
+        "account id",
+        "account_id",
+        "id",
+        "loan no",
+        "loan number",
+        "contract no",
+        "contract number",
+    ],
+    "Disbursement Date": [
+        "disbursement date",
+        "disbursal date",
+        "disbursed date",
+        "funded date",
+        "funding date",
+        "start date",
+        "origination date",
+        "loan date",
+        "issue date",
+    ],
+    "Expected Completion Date": [
+        "expected completion date",
+        "maturity date",
+        "expected end date",
+        "end date",
+        "expected maturity",
+        "due date",
+    ],
+    "Principal Value": [
+        "principal value",
+        "principal",
+        "loan amount",
+        "disbursement amount",
+        "principal amount",
+    ],
+    "Expected Interest": [
+        "expected interest",
+        "interest",
+        "interest amount",
+        "expected interest amount",
+    ],
     "Expected Fee": ["expected fee", "fee", "fee amount", "upfront fee", "expected fees"],
-    "Total Paid": ["total paid", "amount paid", "total repayments", "payments", "total amount paid"],
-    "Total Due": ["total due", "total dues calculated", "total due calculated", "pos", "outstanding", "balance", "amount due"],
+    "Total Paid": [
+        "total paid",
+        "amount paid",
+        "total repayments",
+        "payments",
+        "total amount paid",
+    ],
+    "Total Due": [
+        "total due",
+        "total dues calculated",
+        "total due calculated",
+        "pos",
+        "outstanding",
+        "balance",
+        "amount due",
+    ],
     "Loan Status": ["loan status", "status", "loan status label", "account status"],
     "Days Late": ["days late", "days past due", "dpd", "days overdue", "days in arrears"],
-    "Term (days)": ["term (days)", "term", "tenor", "tenor (days)", "loan term", "term in days", "loan tenor"],
-    "Payment per Period": ["payment per period", "payment", "installment", "instalment", "monthly payment", "periodic payment"],
+    "Term (days)": [
+        "term (days)",
+        "term",
+        "tenor",
+        "tenor (days)",
+        "loan term",
+        "term in days",
+        "loan tenor",
+    ],
+    "Payment per Period": [
+        "payment per period",
+        "payment",
+        "installment",
+        "instalment",
+        "monthly payment",
+        "periodic payment",
+    ],
     "Payment Frequency": ["payment frequency", "frequency", "payment terms", "repayment frequency"],
 }
 
 _LENDING_EXTRA_FIELDS = {
-    "Begin Date", "Total Dues Calculated", "Delinquent Amount", "Write-off amount",
+    "Begin Date",
+    "Total Dues Calculated",
+    "Delinquent Amount",
+    "Write-off amount",
 }
 
 
@@ -1096,7 +1441,9 @@ def _normalize_columns(raw: pd.DataFrame, fields) -> pd.DataFrame:
     return raw.rename(columns=rename)
 
 
-def _format_normalize(raw: pd.DataFrame, date_fields, numeric_fields, model_fields=()) -> pd.DataFrame:
+def _format_normalize(
+    raw: pd.DataFrame, date_fields, numeric_fields, model_fields=()
+) -> pd.DataFrame:
     # model_fields is scoped to the Lending canonical names so aliases that
     # overlap between fields resolve deterministically rather than by set
     # iteration order.
@@ -1167,10 +1514,13 @@ def _suggest_mapping(columns: list, input_columns: list, context: str = "") -> d
     )
     system_prompt = app_config.render_prompt(
         app_config.AI_PROMPTS["mapping_suggestion"],
-        columns=", ".join(columns), fields=fields,
+        columns=", ".join(columns),
+        fields=fields,
     ).strip()
     if context.strip():
-        system_prompt += app_config.AI_PROMPTS["mapping_suggestion_context_suffix"] + context.strip()
+        system_prompt += (
+            app_config.AI_PROMPTS["mapping_suggestion_context_suffix"] + context.strip()
+        )
 
     resp = requests.post(
         DEEPINFRA_CHAT_URL,
@@ -1215,7 +1565,9 @@ def _suggest_escalation_writeup(filename: str, facts: list, model_name: str) -> 
 
     system_prompt = app_config.render_prompt(
         app_config.AI_PROMPTS["escalation_writeup"],
-        model_name=model_name, filename=filename, facts="\n".join(facts),
+        model_name=model_name,
+        filename=filename,
+        facts="\n".join(facts),
     ).strip()
 
     resp = requests.post(
@@ -1242,7 +1594,10 @@ def _suggest_escalation_writeup(filename: str, facts: list, model_name: str) -> 
 
 
 def _render_variance_escalation(
-    detail: "pd.DataFrame", metric_label: str, model_name: str, button_key: str,
+    detail: "pd.DataFrame",
+    metric_label: str,
+    model_name: str,
+    button_key: str,
     uploaded_name: str,
 ) -> None:
     """Shared by the Lending unexplained-variance check: renders the
@@ -1254,9 +1609,7 @@ def _render_variance_escalation(
     if st.session_state.pop("dq_just_escalated", False):
         ai_warning = st.session_state.pop("dq_escalate_ai_warning", None)
         if ai_warning:
-            st.warning(
-                f"AI write-up unavailable ({ai_warning}); sent a plain summary instead."
-            )
+            st.warning(f"AI write-up unavailable ({ai_warning}); sent a plain summary instead.")
         else:
             st.success("Sent to analytics.")
     if st.button("Escalate flagged cohorts to analytics", key=button_key):
@@ -1290,7 +1643,10 @@ def _render_variance_escalation(
 
 
 def _render_data_quality_checks(
-    checks: list, variance_metric_label: str, model_name: str, button_key: str,
+    checks: list,
+    variance_metric_label: str,
+    model_name: str,
+    button_key: str,
     uploaded_name: str,
 ) -> None:
     """Renders the "Data Quality Checks" section, shared by every model so
@@ -1319,7 +1675,11 @@ def _render_data_quality_checks(
             st.dataframe(detail, width="stretch", hide_index=True)
             if check.get("check_id") == "unexplained_variance":
                 _render_variance_escalation(
-                    detail, variance_metric_label, model_name, button_key, uploaded_name,
+                    detail,
+                    variance_metric_label,
+                    model_name,
+                    button_key,
+                    uploaded_name,
                 )
 
 
@@ -1330,13 +1690,17 @@ def _add_reference_line(chart, value, label, color="#d62728", x_anchor=None):
     rule = alt.Chart(ref).mark_rule(color=color, strokeDash=[6, 6]).encode(y=alt.Y("v:Q"))
     if x_anchor is not None:
         ref["xa"] = [x_anchor]
-        text = alt.Chart(ref).mark_text(
-            color=color, dx=8, dy=-6, align="left", fontSize=11, fontWeight="bold"
-        ).encode(x="xa:T", y=alt.Y("v:Q"), text="label:N")
+        text = (
+            alt.Chart(ref)
+            .mark_text(color=color, dx=8, dy=-6, align="left", fontSize=11, fontWeight="bold")
+            .encode(x="xa:T", y=alt.Y("v:Q"), text="label:N")
+        )
     else:
-        text = alt.Chart(ref).mark_text(
-            color=color, dy=-7, dx=6, align="left", fontSize=11, fontWeight="bold"
-        ).encode(x=alt.value(70), y=alt.Y("v:Q"), text="label:N")
+        text = (
+            alt.Chart(ref)
+            .mark_text(color=color, dy=-7, dx=6, align="left", fontSize=11, fontWeight="bold")
+            .encode(x=alt.value(70), y=alt.Y("v:Q"), text="label:N")
+        )
     return (chart + rule + text).properties(padding={"right": 95})
 
 
@@ -1400,11 +1764,7 @@ def _column_stats_tooltip(series: pd.Series, numeric: bool) -> str:
             f"Min: {s.min():,.2f}\n"
             f"Max: {s.max():,.2f}"
         )
-    return (
-        f"Count: {non_null.count():,}\n"
-        f"Nulls: {nulls:,}\n"
-        f"Distinct: {non_null.nunique():,}"
-    )
+    return f"Count: {non_null.count():,}\nNulls: {nulls:,}\nDistinct: {non_null.nunique():,}"
 
 
 # ag-grid valueFormatters for the cohorts table columns. These must be
@@ -1419,9 +1779,7 @@ _FMT_MONEY_JS = JsCode(
 _FMT_INT_JS = JsCode(
     "params => params.value == null ? '' : params.value.toLocaleString('en-US', {maximumFractionDigits: 0})"
 )
-_FMT_PCT1_JS = JsCode(
-    "params => params.value == null ? '' : (params.value * 100).toFixed(1) + '%'"
-)
+_FMT_PCT1_JS = JsCode("params => params.value == null ? '' : (params.value * 100).toFixed(1) + '%'")
 
 
 # Display formatting applied to the cohorts table columns. Keys are exact
@@ -1448,7 +1806,10 @@ def _render_cohorts_grid(df: pd.DataFrame, bins: int = 10, height: int = 420):
     }
     gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_default_column(
-        resizable=True, sortable=True, filter=True, floatingFilter=True,
+        resizable=True,
+        sortable=True,
+        filter=True,
+        floatingFilter=True,
     )
     for col in df.columns:
         is_numeric = pd.api.types.is_numeric_dtype(df[col])
@@ -1459,7 +1820,8 @@ def _render_cohorts_grid(df: pd.DataFrame, bins: int = 10, height: int = 420):
         series = pd.to_numeric(df[col], errors="coerce").dropna()
         counts = (
             pd.cut(series, bins=bins).value_counts(sort=False).tolist()
-            if series.nunique() > 1 else []
+            if series.nunique() > 1
+            else []
         )
         kwargs = dict(
             headerComponent=_HISTOGRAM_HEADER_JS,
@@ -1474,9 +1836,14 @@ def _render_cohorts_grid(df: pd.DataFrame, bins: int = 10, height: int = 420):
     grid_options["headerHeight"] = 54
     grid_options["tooltipShowDelay"] = 200
     AgGrid(
-        df, gridOptions=grid_options, height=height,
-        allow_unsafe_jscode=True, theme="streamlit",
-        show_toolbar=False, show_search=False, show_download_button=False,
+        df,
+        gridOptions=grid_options,
+        height=height,
+        allow_unsafe_jscode=True,
+        theme="streamlit",
+        show_toolbar=False,
+        show_search=False,
+        show_download_button=False,
     )
 
 
@@ -1516,7 +1883,10 @@ def _smart_quant_format(col_name: str, max_abs) -> tuple:
 
 
 def _render_custom_visualizations_tab(
-    data_sources: dict, key_prefix: str = "cv", header: bool = True, simple: bool = False,
+    data_sources: dict,
+    key_prefix: str = "cv",
+    header: bool = True,
+    simple: bool = False,
 ):
     """Generic ad-hoc chart builder shared by both models. `data_sources` maps
     a display name to the DataFrame it plots from for the active model - the
@@ -1529,7 +1899,9 @@ def _render_custom_visualizations_tab(
     a single-chart embedding like the Cohorts tab's."""
     if header:
         st.subheader("Custom Visualizations")
-        st.caption("Build your own charts from the mapped and computed data. Add as many chart cards as you like.")
+        st.caption(
+            "Build your own charts from the mapped and computed data. Add as many chart cards as you like."
+        )
 
     cards_state_key = f"{key_prefix}_chart_cards"
     next_id_state_key = f"{key_prefix}_chart_next_id"
@@ -1538,10 +1910,14 @@ def _render_custom_visualizations_tab(
         st.session_state[next_id_state_key] = 1
 
     def _render_chart_card(card_id):
-        k = lambda name: f"{key_prefix}_{name}_{card_id}"
+        def k(name):
+            return f"{key_prefix}_{name}_{card_id}"
+
         cv1, cv2 = st.columns([1, 1])
         with cv1:
-            source_name = st.selectbox("Data source", options=list(data_sources.keys()), key=k("source"))
+            source_name = st.selectbox(
+                "Data source", options=list(data_sources.keys()), key=k("source")
+            )
         source_df = data_sources[source_name]
         if source_df is None or source_df.empty:
             st.info("This data source has no rows to plot.")
@@ -1565,7 +1941,8 @@ def _render_custom_visualizations_tab(
             return fallback
 
         default_x = _pick(
-            datetime_cols, ["cohort", "disbursement", "origination", "start"],
+            datetime_cols,
+            ["cohort", "disbursement", "origination", "start"],
             datetime_cols[0] if datetime_cols else all_cols[0],
         )
         y_options = numeric_cols if numeric_cols else all_cols
@@ -1574,15 +1951,28 @@ def _render_custom_visualizations_tab(
         default_kind = "Bar" if default_x in datetime_cols and default_y in numeric_cols else "Line"
 
         with cv2:
-            chart_kind = st.selectbox("Chart type", options=chart_options, index=chart_options.index(default_kind), key=k("kind"))
+            chart_kind = st.selectbox(
+                "Chart type",
+                options=chart_options,
+                index=chart_options.index(default_kind),
+                key=k("kind"),
+            )
 
         cv3, cv4, cv5, cv6 = st.columns(4)
         with cv3:
-            x_col = st.selectbox("X axis", options=all_cols, index=all_cols.index(default_x), key=k("x"))
+            x_col = st.selectbox(
+                "X axis", options=all_cols, index=all_cols.index(default_x), key=k("x")
+            )
         with cv4:
-            y_col = st.selectbox("Y axis", options=y_options, index=y_options.index(default_y), key=k("y"))
+            y_col = st.selectbox(
+                "Y axis", options=y_options, index=y_options.index(default_y), key=k("y")
+            )
         with cv5:
-            color_col = st.selectbox("Group / color by (optional)", options=["(none)"] + [c for c in categorical_cols if c != x_col], key=k("color"))
+            color_col = st.selectbox(
+                "Group / color by (optional)",
+                options=["(none)"] + [c for c in categorical_cols if c != x_col],
+                key=k("color"),
+            )
         with cv6:
             # A secondary metric line (e.g. Loss Rate alongside a Principal
             # bar chart) reads its own axis on the right - more useful here
@@ -1592,10 +1982,12 @@ def _render_custom_visualizations_tab(
             line_options = ["(none)"] + [c for c in numeric_cols if c not in (x_col, y_col)]
             default_line = "Loss Rate" if "Loss Rate" in line_options else "(none)"
             line_choice = st.selectbox(
-                "Add a line (optional)", options=line_options,
-                index=line_options.index(default_line), key=k("line"),
+                "Add a line (optional)",
+                options=line_options,
+                index=line_options.index(default_line),
+                key=k("line"),
                 help="Overlay a second metric (e.g. Loss Rate) as a line with its own axis, "
-                     "aggregated by the mean of X (and Group/color by, if set).",
+                "aggregated by the mean of X (and Group/color by, if set).",
             )
         line_col = None if line_choice == "(none)" else line_choice
 
@@ -1674,13 +2066,25 @@ def _render_custom_visualizations_tab(
         if line_df is not None and not line_df.empty:
             line_max_abs = line_df[line_col].abs().max()
             line_axis, line_tooltip_format = _smart_quant_format(line_col, line_max_abs)
-            line_chart = alt.Chart(line_df).mark_line(point=True, color="#E8632A", strokeWidth=2.5).encode(
-                x=alt.X(f"{x_col}:{x_type}", axis=x_axis),
-                y=alt.Y(f"{line_col}:Q", title=line_col, axis=line_axis),
-                tooltip=[x_col, alt.Tooltip(f"{line_col}:Q", title=line_col, format=line_tooltip_format)],
+            line_chart = (
+                alt.Chart(line_df)
+                .mark_line(point=True, color="#E8632A", strokeWidth=2.5)
+                .encode(
+                    x=alt.X(f"{x_col}:{x_type}", axis=x_axis),
+                    y=alt.Y(f"{line_col}:Q", title=line_col, axis=line_axis),
+                    tooltip=[
+                        x_col,
+                        alt.Tooltip(f"{line_col}:Q", title=line_col, format=line_tooltip_format),
+                    ],
+                )
             )
-            custom_chart = alt.layer(primary_chart, line_chart).resolve_scale(y="independent").properties(
-                title=chart_title, height=400,
+            custom_chart = (
+                alt.layer(primary_chart, line_chart)
+                .resolve_scale(y="independent")
+                .properties(
+                    title=chart_title,
+                    height=400,
+                )
             )
         else:
             custom_chart = primary_chart.properties(title=chart_title, height=400)
@@ -1694,11 +2098,19 @@ def _render_custom_visualizations_tab(
         with bc1:
             if st.button("Add this chart to the Excel export", key=k("add_export")):
                 export_charts = st.session_state.setdefault("export_charts", [])
-                export_charts.append({
-                    "title": chart_title, "kind": chart_kind, "x_col": x_col, "y_col": y_col,
-                    "color_col": None if color_col == "(none)" else color_col, "y_title": y_col,
-                    "data": plot_df[[c for c in {x_col, y_col, color_col} if c in plot_df.columns]].copy(),
-                })
+                export_charts.append(
+                    {
+                        "title": chart_title,
+                        "kind": chart_kind,
+                        "x_col": x_col,
+                        "y_col": y_col,
+                        "color_col": None if color_col == "(none)" else color_col,
+                        "y_title": y_col,
+                        "data": plot_df[
+                            [c for c in {x_col, y_col, color_col} if c in plot_df.columns]
+                        ].copy(),
+                    }
+                )
                 st.success(f"Added '{chart_title}' to the Excel export queue.")
         with bc2:
             if len(st.session_state[cards_state_key]) > 1:
@@ -1742,7 +2154,9 @@ def _ask_data_chatbot(question: str, context: str, history: list) -> str:
     no per-loan data leaves the app for this feature."""
     api_key = _get_deepinfra_api_key()
     if not api_key:
-        raise RuntimeError("No DEEPINFRA_API_KEY found. Add it to Streamlit secrets or the environment.")
+        raise RuntimeError(
+            "No DEEPINFRA_API_KEY found. Add it to Streamlit secrets or the environment."
+        )
 
     system_prompt = app_config.AI_PROMPTS["chat_assistant"].strip() + "\n\n" + context
     messages = [{"role": "system", "content": system_prompt}]
@@ -1752,7 +2166,11 @@ def _ask_data_chatbot(question: str, context: str, history: list) -> str:
     resp = requests.post(
         DEEPINFRA_CHAT_URL,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"model": DEEPINFRA_MODEL, "messages": messages, "max_tokens": app_config.AI["chat_assistant_max_tokens"]},
+        json={
+            "model": DEEPINFRA_MODEL,
+            "messages": messages,
+            "max_tokens": app_config.AI["chat_assistant_max_tokens"],
+        },
         timeout=app_config.AI["request_timeout_seconds"],
         verify=_ca_bundle_path(),
     )
@@ -1761,8 +2179,14 @@ def _ask_data_chatbot(question: str, context: str, history: list) -> str:
 
 
 def _build_lending_chat_context(
-    gi, df: pd.DataFrame, cohorts: pd.DataFrame, ue_data: dict, ltv_data: dict,
-    ue_model_ai_data: dict, dq_checks: list, user_context: str = "",
+    gi,
+    df: pd.DataFrame,
+    cohorts: pd.DataFrame,
+    ue_data: dict,
+    ltv_data: dict,
+    ue_model_ai_data: dict,
+    dq_checks: list,
+    user_context: str = "",
 ) -> str:
     lines = [
         "## Lending portfolio - summary statistics",
@@ -1778,7 +2202,7 @@ def _build_lending_chat_context(
         f"Average Principal Amount per loan: ${ue_data['Average Principal Amount']:,.0f}.",
         f"Average Fee %: {fmt(ue_data['Average Fee %'])}. Average Interest %: {fmt(ue_data['Average Interest %'])}.",
         f"Average Expected Term: {fmt(ue_data['Average Expected Term'], '{:,.1f}')} days.",
-        f"Sense-check Margin (Interest%+Fee%, netted against Average Loss - mixes full-book revenue "
+        "Sense-check Margin (Interest%+Fee%, netted against Average Loss - mixes full-book revenue "
         "with matured-only losses, a known approximation): " + fmt(ue_data["Sense-check Margin"]),
         f"95th Percentile Loss Rate across cohorts (Loan Count >= {gi.min_loans_per_cohort}): "
         + fmt(ltv_data["95th Percentile Losses"]),
@@ -1801,7 +2225,7 @@ def _build_lending_chat_context(
         "against a small realized-loss sample.",
         f"Revenue (interest, full book): ${ue_model_ai_data['revenue']:,.0f}. "
         f"Origination Income (full book): ${ue_model_ai_data['origination_income']:,.0f}.",
-        f"Implied Interest (annualized nominal APR, amortization-solved, full book): "
+        "Implied Interest (annualized nominal APR, amortization-solved, full book): "
         + fmt(ue_model_ai_data["implied_interest"]),
         f"Losses (matured-only $, owed-paid): ${ue_model_ai_data['losses_dollar']:,.0f}. "
         f"Losses as a literal % of total book GBV: {fmt(ue_model_ai_data['losses_pct_of_gbv'])}.",
@@ -1810,11 +2234,11 @@ def _build_lending_chat_context(
         f"({fmt(ue_model_ai_data['matured_gbv_pct'])} of GBV) have matured.",
         f"Derived, matured-only: Income (net losses) = ${ue_model_ai_data['income_net_losses']:,.0f} "
         f"({fmt(ue_model_ai_data['income_net_losses_margin'])} of matured-loan GBV).",
-        f"Derived, matured-only: Product Margin (after any user-entered variable costs) = "
+        "Derived, matured-only: Product Margin (after any user-entered variable costs) = "
         + fmt(ue_model_ai_data["product_margin"]),
-        f"User-entered Cost of Finance (% p.a., 0 unless the user filled it in): "
+        "User-entered Cost of Finance (% p.a., 0 unless the user filled it in): "
         + fmt(ue_model_ai_data["cost_of_finance_pct"]),
-        f"Net Unit Economics (simplified proxy, NOT a true XIRR/XNPV cash-flow figure): "
+        "Net Unit Economics (simplified proxy, NOT a true XIRR/XNPV cash-flow figure): "
         + fmt(ue_model_ai_data["net_ue_simple"]),
         "'IRR of cash flow' and the workbook's true cash-flow-basis 'Net Unit Economics' are NOT "
         "computed by this app - they'd need a full monthly repayment/loss/cost schedule.",
@@ -1856,7 +2280,9 @@ def _render_ai_chat_tab(context: str) -> None:
         with st.chat_message("assistant"):
             try:
                 with st.spinner("Thinking..."):
-                    answer = _ask_data_chatbot(question, context, st.session_state["ai_chat_history"][:-1])
+                    answer = _ask_data_chatbot(
+                        question, context, st.session_state["ai_chat_history"][:-1]
+                    )
             except Exception as e:
                 answer = f"Unable to get a response: {e}"
             st.markdown(answer)
@@ -1872,7 +2298,13 @@ def _write_custom_charts_sheet(writer, export_charts):
     row = 1
     for ec in export_charts:
         if ec["color_col"]:
-            wide = ec["data"].pivot_table(index=ec["x_col"], columns=ec["color_col"], values=ec["y_col"], aggfunc="first").reset_index()
+            wide = (
+                ec["data"]
+                .pivot_table(
+                    index=ec["x_col"], columns=ec["color_col"], values=ec["y_col"], aggfunc="first"
+                )
+                .reset_index()
+            )
         else:
             wide = ec["data"][[ec["x_col"], ec["y_col"]]]
         header_row = row
@@ -1885,7 +2317,9 @@ def _write_custom_charts_sheet(writer, export_charts):
             c = chart_map[ec["kind"]]()
             c.title = ec["title"]
             c.height, c.width = 10, 20
-            data = Reference(cc_ws, min_col=2, min_row=header_row, max_col=1 + n_series_cols, max_row=data_end)
+            data = Reference(
+                cc_ws, min_col=2, min_row=header_row, max_col=1 + n_series_cols, max_row=data_end
+            )
             cats = Reference(cc_ws, min_col=1, min_row=data_start, max_row=data_end)
             c.add_data(data, titles_from_data=True)
             c.set_categories(cats)
@@ -1957,7 +2391,8 @@ def _download_google_sheet(url: str) -> tuple[bytes, str]:
         return data, "google_sheet.csv"
     resp = requests.get(
         f"https://drive.google.com/uc?export=download&id={doc_id}",
-        timeout=30, verify=_ca_bundle_path(),
+        timeout=30,
+        verify=_ca_bundle_path(),
     )
     if resp.status_code != 200:
         raise RuntimeError(
@@ -2005,7 +2440,7 @@ def _google_redirect_uri() -> str:
 
 def _load_gdrive_token_file() -> dict | None:
     try:
-        with open(GDRIVE_TOKEN_FILE, "r", encoding="utf-8") as f:
+        with open(GDRIVE_TOKEN_FILE, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
@@ -2075,10 +2510,7 @@ def _gdrive_token() -> dict | None:
 
 
 def _gdrive_access_token(token: dict) -> str:
-    if (
-        time.time() >= token.get("expires_at", 0) - 60
-        and token.get("refresh_token")
-    ):
+    if time.time() >= token.get("expires_at", 0) - 60 and token.get("refresh_token"):
         refreshed = _refresh_google_token(token["refresh_token"])
         refreshed["refresh_token"] = token["refresh_token"]
         st.session_state["gdrive_token"] = refreshed
@@ -2256,17 +2688,24 @@ def _read_tabular_file(uploaded) -> pd.DataFrame:
     if len(pickable_sheets) > 1:
         sheet_name = st.selectbox(
             "This file has multiple sheets - which one has your loan-level data?",
-            options=pickable_sheets, index=pickable_sheets.index(default_sheet), key="upload_sheet_name",
+            options=pickable_sheets,
+            index=pickable_sheets.index(default_sheet),
+            key="upload_sheet_name",
         )
 
     with st.spinner("Reading file..."):
         df = xls.parse(sheet_name)
-        unnamed_frac = sum(str(c).startswith("Unnamed:") for c in df.columns) / max(len(df.columns), 1)
+        unnamed_frac = sum(str(c).startswith("Unnamed:") for c in df.columns) / max(
+            len(df.columns), 1
+        )
         if unnamed_frac >= 0.5:
             preview = xls.parse(sheet_name, header=None, nrows=10)
             for i in range(1, len(preview)):
                 row = preview.iloc[i]
-                if row.notna().mean() > 0.7 and row.dropna().map(lambda v: isinstance(v, str)).mean() > 0.7:
+                if (
+                    row.notna().mean() > 0.7
+                    and row.dropna().map(lambda v: isinstance(v, str)).mean() > 0.7
+                ):
                     df = xls.parse(sheet_name, header=i)
                     break
     return df
@@ -2304,9 +2743,7 @@ file_id = None
 file_name = None
 gdrive_pick = None
 if data_source == "Local file":
-    uploaded = st.file_uploader(
-        "Choose a CSV or Excel file", type=["csv", "xlsx"], key="uploader"
-    )
+    uploaded = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xlsx"], key="uploader")
     if not uploaded:
         st.info("Upload a contract-level file to begin.")
         st.stop()
@@ -2357,11 +2794,15 @@ try:
             st.session_state["gs_download_id"] = file_id
             st.session_state["gs_bytes"] = gs_bytes
             st.session_state["gs_name"] = gs_name
-        raw = _read_tabular_file(_NamedBytes(st.session_state["gs_bytes"], st.session_state["gs_name"]))
+        raw = _read_tabular_file(
+            _NamedBytes(st.session_state["gs_bytes"], st.session_state["gs_name"])
+        )
     else:
         raw = _read_tabular_file(_NamedBytes(gdrive_pick["data"], gdrive_pick["name"]))
 except Exception as e:
-    st.error(f"Couldn't read '{file_name}': {e}. Check that the file is a valid, non-empty CSV or Excel.")
+    st.error(
+        f"Couldn't read '{file_name}': {e}. Check that the file is a valid, non-empty CSV or Excel."
+    )
     st.stop()
 if raw.empty or not len(raw.columns):
     st.error(f"'{file_name}' has no data to read.")
@@ -2436,7 +2877,9 @@ if st.session_state.get("context_documents"):
 
 cached_mapping = _load_cache(MAPPING_CACHE_PATH, _cache_key(raw.columns)) or {}
 if cached_mapping:
-    st.caption("A saved mapping was found for a file with these same column headers - pre-filled below.")
+    st.caption(
+        "A saved mapping was found for a file with these same column headers - pre-filled below."
+    )
 
 # AI auto-fill: guess the best column mapping for this file's headers (per model).
 guess_key = f"ai_mapping_guess_{_cache_key(raw.columns)}"
@@ -2445,7 +2888,8 @@ if guess_key not in st.session_state:
         try:
             with st.spinner("Asking the AI to auto-fill the column mapping..."):
                 st.session_state[guess_key] = _suggest_mapping(
-                    list(raw.columns), INPUT_COLUMNS,
+                    list(raw.columns),
+                    INPUT_COLUMNS,
                     _ai_context_text(max_chars=20000, per_doc=6000),
                 )
         except Exception as e:
@@ -2464,7 +2908,9 @@ if restored_session:
 
 with st.form("column_mapping"):
     st.subheader("Map your columns to the Data Input template")
-    st.caption("For each template field below, select the matching column in your file. Required fields must be mapped to run the analysis.")
+    st.caption(
+        "For each template field below, select the matching column in your file. Required fields must be mapped to run the analysis."
+    )
     used = set()
     mapping = {}
     fillna_zero = {}
@@ -2473,12 +2919,15 @@ with st.form("column_mapping"):
         # Precedence: restored session (re-uploaded export) > saved mapping > AI guess > "(not provided)".
         default_choice = (
             (restored_session or {}).get("mapping", {}).get(target)
-            or cached_mapping.get(target) or ai_guess.get(target)
+            or cached_mapping.get(target)
+            or ai_guess.get(target)
         )
         default_index = options.index(default_choice) if default_choice in options else 0
         chosen = st.selectbox(
             f"Map to **{target}** ({'required' if required else 'optional'})",
-            options=options, index=default_index, key=f"map_{target}",
+            options=options,
+            index=default_index,
+            key=f"map_{target}",
         )
         mapping[target] = None if chosen == "(not provided)" else chosen
         if chosen != "(not provided)":
@@ -2492,7 +2941,8 @@ with st.form("column_mapping"):
             n_missing = raw[chosen].isna().sum()
             fillna_zero[target] = st.checkbox(
                 f"Treat missing values in **{target}** as 0 (instead of blocking if this column has gaps)",
-                key=f"fillna0_{target}", value=False,
+                key=f"fillna0_{target}",
+                value=False,
             )
             if fillna_zero[target] and n_missing:
                 st.caption(f"{n_missing:,} row(s) with a blank '{chosen}' will be treated as 0.")
@@ -2504,15 +2954,19 @@ with st.form("column_mapping"):
     st.subheader("Currency")
     _currency_options = ["USD"] + sorted(c for c in CURRENCY_NAMES if c != "USD")
     _restored_currency = (restored_session or {}).get("currency")
-    _currency_index = _currency_options.index(_restored_currency) if _restored_currency in _currency_options else 0
+    _currency_index = (
+        _currency_options.index(_restored_currency)
+        if _restored_currency in _currency_options
+        else 0
+    )
     portfolio_currency = st.selectbox(
         "Portfolio currency",
         options=_currency_options,
         format_func=lambda c: f"{c} - {CURRENCY_NAMES[c]}",
         index=_currency_index,
         help="The currency the mapped monetary columns (Principal Value, Expected Interest, "
-             "Expected Fee, Total Paid, Total Due) are denominated in. If not USD, every one of "
-             "those columns is converted to USD using a live exchange rate before analysis runs.",
+        "Expected Fee, Total Paid, Total Due) are denominated in. If not USD, every one of "
+        "those columns is converted to USD using a live exchange rate before analysis runs.",
     )
 
     # Date of extraction defaults to the max of whichever raw column the user
@@ -2532,24 +2986,29 @@ with st.form("column_mapping"):
     gc1, gc2, gc3 = st.columns(3)
     with gc1:
         extraction_date = st.date_input(
-            "Date of extraction", value=default_extraction.date(),
+            "Date of extraction",
+            value=default_extraction.date(),
             help="The max date in the loan tape. Used to identify which loans have reached their maturity.",
         )
     with gc2:
         days_after_term = st.number_input(
             "Days after term",
-            value=restored_gi.get("days_after_term", app_config.GENERAL_INPUTS_DEFAULTS["days_after_term"]),
+            value=restored_gi.get(
+                "days_after_term", app_config.GENERAL_INPUTS_DEFAULTS["days_after_term"]
+            ),
             min_value=0,
             help="Days after term used to compute loss rate (default 90 = Term + 3 months). "
-                 "Modify only if the company has significant repayments after 3 months from term.",
+            "Modify only if the company has significant repayments after 3 months from term.",
         )
     with gc3:
         min_loans_per_cohort = st.number_input(
             "Minimum loans per cohort",
-            value=restored_gi.get("min_loans_per_cohort", app_config.GENERAL_INPUTS_DEFAULTS["min_loans_per_cohort"]),
+            value=restored_gi.get(
+                "min_loans_per_cohort", app_config.GENERAL_INPUTS_DEFAULTS["min_loans_per_cohort"]
+            ),
             min_value=0,
             help="Affects the cohort stressed loss rate: requires a minimum number of observations to "
-                 "include a cohort in the cohort loss rate distribution (default 10).",
+            "include a cohort in the cohort loss rate distribution (default 10).",
         )
 
     submitted = st.form_submit_button("Run analysis")
@@ -2563,7 +3022,9 @@ if submitted:
         raw, mapping, REQUIRED_FIELDS, DATE_FIELDS, NUMERIC_FIELDS, active_cfg["dayfirst"]
     )
     if mapping_errors:
-        st.error("Fix these mappings before running:\n\n" + "\n".join(f"- {e}" for e in mapping_errors))
+        st.error(
+            "Fix these mappings before running:\n\n" + "\n".join(f"- {e}" for e in mapping_errors)
+        )
         st.stop()
     st.session_state["analysis_mapping"] = mapping
     st.session_state["analysis_mapping_warnings"] = mapping_warnings
@@ -2598,7 +3059,9 @@ rename_map = {src: tgt for tgt, src in mapping.items() if src}
 # sharing the same label - raw[col] then returns a DataFrame instead of a
 # Series and every .dtype/coercion call below breaks. Drop the stale column
 # first so the mapped source always wins.
-stale_target_cols = [tgt for tgt in rename_map.values() if tgt in raw.columns and tgt not in rename_map]
+stale_target_cols = [
+    tgt for tgt in rename_map.values() if tgt in raw.columns and tgt not in rename_map
+]
 raw = raw.drop(columns=stale_target_cols)
 raw = raw.rename(columns=rename_map)
 _coerce_dates(raw, DATE_FIELDS, active_cfg["dayfirst"])
@@ -2632,7 +3095,9 @@ if portfolio_currency != "USD":
 
 unmapped = [t for t, _ in INPUT_COLUMNS if t not in raw.columns]
 if unmapped:
-    st.warning("Not mapped (optional) - related metrics will be unavailable: " + ", ".join(unmapped))
+    st.warning(
+        "Not mapped (optional) - related metrics will be unavailable: " + ", ".join(unmapped)
+    )
 
 mapping_warnings = st.session_state.get("analysis_mapping_warnings") or []
 if mapping_warnings:
@@ -2651,22 +3116,31 @@ with st.spinner("Running analysis..."):
     filtered = lending_filter_cohorts(cohorts, gi.min_loans_per_cohort)
     st.caption(f"Mapped & computed columns: {', '.join(df.columns)}")
     if "Total Due" not in df.columns:
-        st.warning("No 'Total Due' or payment schedule mapped - loss rate proxy and PvD ratio will be unavailable.")
+        st.warning(
+            "No 'Total Due' or payment schedule mapped - loss rate proxy and PvD ratio will be unavailable."
+        )
     ltv = LendingLtvAnalysis(df, filtered)
     ue = LendingUeAnalysis(df)
     ue_data, ltv_data = ue.as_dict(), ltv.as_dict()
     lending_chart_data = cohorts.dropna(subset=["Loss Rate"]).copy()
     if not lending_chart_data.empty:
-        lending_chart_data["Fee %"] = lending_chart_data["Total Fee"] / lending_chart_data["Total Principal"]
-        lending_chart_data["Interest %"] = lending_chart_data["Total Interest"] / lending_chart_data["Total Principal"]
+        lending_chart_data["Fee %"] = (
+            lending_chart_data["Total Fee"] / lending_chart_data["Total Principal"]
+        )
+        lending_chart_data["Interest %"] = (
+            lending_chart_data["Total Interest"] / lending_chart_data["Total Principal"]
+        )
 
 dq_checks = _lending_data_quality_checks(raw, cohorts, gi, filtered)
 
 tab_names = [
-    "Summary", "Data Checks",
-    "Cohorts", "LTV Analysis",
+    "Summary",
+    "Data Checks",
+    "Cohorts",
+    "LTV Analysis",
     "Unit Economics Analysis",
-    "Custom Visualizations", "Ask AI",
+    "Custom Visualizations",
+    "Ask AI",
 ]
 tabs = st.tabs(tab_names)
 
@@ -2687,26 +3161,30 @@ with tabs[0]:
         outstanding_gbv = principal + interest + fees - paid
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric(
-        "Data up to", str(gi.extraction_date.date()),
+        "Data up to",
+        str(gi.extraction_date.date()),
         help="As-of date of the loan tape (the most recent disbursement date in the data).",
     )
     c2.metric(
         "Outstanding GBV",
         f"{outstanding_gbv:,.0f}" if outstanding_gbv is not None else "n/a",
         help="Principal + expected interest + expected fees - amount paid, "
-             "for loans with status 'active' only. n/a when no active loans.",
+        "for loans with status 'active' only. n/a when no active loans.",
     )
     c3.metric(
-        "Loss Rate", fmt(ue_data["Average Loss"]),
+        "Loss Rate",
+        fmt(ue_data["Average Loss"]),
         help="Average loss rate across matured loans: (owed - paid) / owed.",
     )
     c4.metric(
-        "95th %ile Loss Rate", fmt(ltv_data["95th Percentile Losses"]),
+        "95th %ile Loss Rate",
+        fmt(ltv_data["95th Percentile Losses"]),
         help="The 95th percentile of cohort loss rates - a stressed view of how "
-             "bad loss could get for the worst cohorts.",
+        "bad loss could get for the worst cohorts.",
     )
     c5.metric(
-        "Interest Rate", fmt(ue_data["Average Interest %"]),
+        "Interest Rate",
+        fmt(ue_data["Average Interest %"]),
         help="Total expected interest as a share of total principal across all loans.",
     )
 
@@ -2714,24 +3192,44 @@ with tabs[0]:
     snapshot_col, chart_col = st.columns([1, 1.3])
     with snapshot_col:
         st.subheader("Portfolio Snapshot")
-        date_range = (
-            f"{df['Disbursement Date'].min().date()} to {gi.extraction_date.date()}"
-        )
+        date_range = f"{df['Disbursement Date'].min().date()} to {gi.extraction_date.date()}"
         snapshot_rows = [
-            ("Date Range", date_range, "From the earliest disbursement date to the tape as-of date."),
+            (
+                "Date Range",
+                date_range,
+                "From the earliest disbursement date to the tape as-of date.",
+            ),
             ("Loans", f"{len(df):,}", "Total number of loan records in the tape."),
-            ("Value of Principal Disbursed", f"${df['Principal Value'].sum():,.0f}",
-             "Total principal amount lent across all loans."),
-            ("Total Collected", f"${df['Total Paid'].sum():,.0f}",
-             "Total cash collected from borrowers to date."),
-            ("Avg Fee", fmt(ue_data["Average Fee %"]),
-             "Total expected fees as a share of total principal."),
-            ("Avg Loan Value", f"${ue_data['Average Principal Amount']:,.0f}",
-             "Average principal amount per loan."),
-            ("Avg Loan Term", fmt(ue_data["Average Expected Term"], "{:,.1f} days"),
-             "Principal-weighted average loan term (days)."),
-            ("Avg Total Revenue", fmt(ltv_data["Average Total Revenue %"]),
-             "Expected interest + fees as a share of total principal."),
+            (
+                "Value of Principal Disbursed",
+                f"${df['Principal Value'].sum():,.0f}",
+                "Total principal amount lent across all loans.",
+            ),
+            (
+                "Total Collected",
+                f"${df['Total Paid'].sum():,.0f}",
+                "Total cash collected from borrowers to date.",
+            ),
+            (
+                "Avg Fee",
+                fmt(ue_data["Average Fee %"]),
+                "Total expected fees as a share of total principal.",
+            ),
+            (
+                "Avg Loan Value",
+                f"${ue_data['Average Principal Amount']:,.0f}",
+                "Average principal amount per loan.",
+            ),
+            (
+                "Avg Loan Term",
+                fmt(ue_data["Average Expected Term"], "{:,.1f} days"),
+                "Principal-weighted average loan term (days).",
+            ),
+            (
+                "Avg Total Revenue",
+                fmt(ltv_data["Average Total Revenue %"]),
+                "Expected interest + fees as a share of total principal.",
+            ),
         ]
         _render_snapshot_table(snapshot_rows)
 
@@ -2740,56 +3238,79 @@ with tabs[0]:
         summary_cohorts = lending_build_cohorts(
             df, min_matured=gi.min_loans_per_cohort, matured_only=False
         )
-        bars = alt.Chart(summary_cohorts).mark_bar(color="#B8BEC6").encode(
-            x=alt.X("Cohort:T", title="Cohort"),
-            y=alt.Y(
-                "Total Principal:Q", title="Principal Disbursed",
-                # "~s" gives short SI-style labels (k/M/G/T); swap D3's "G" (giga)
-                # for the more finance-familiar "B" (billion) - same magnitude, friendlier label.
-                axis=alt.Axis(format="~s", labelExpr="replace(datum.label, 'G', 'B')"),
-            ),
-            tooltip=[
-                alt.Tooltip("Cohort:T"),
-                alt.Tooltip("Total Principal:Q", format=",.0f", title="Principal Disbursed"),
-                alt.Tooltip("Loan Count:Q", title="Loans"),
-            ],
+        bars = (
+            alt.Chart(summary_cohorts)
+            .mark_bar(color="#B8BEC6")
+            .encode(
+                x=alt.X("Cohort:T", title="Cohort"),
+                y=alt.Y(
+                    "Total Principal:Q",
+                    title="Principal Disbursed",
+                    # "~s" gives short SI-style labels (k/M/G/T); swap D3's "G" (giga)
+                    # for the more finance-familiar "B" (billion) - same magnitude, friendlier label.
+                    axis=alt.Axis(format="~s", labelExpr="replace(datum.label, 'G', 'B')"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Cohort:T"),
+                    alt.Tooltip("Total Principal:Q", format=",.0f", title="Principal Disbursed"),
+                    alt.Tooltip("Loan Count:Q", title="Loans"),
+                ],
+            )
         )
         loss_data = summary_cohorts.dropna(subset=["Loss Rate"])
-        line = alt.Chart(loss_data).mark_line(point=True, color="#E8632A", strokeWidth=2.5).encode(
-            x=alt.X("Cohort:T"),
-            y=alt.Y("Loss Rate:Q", title="Loss Rate", axis=alt.Axis(format="%")),
-            tooltip=[
-                alt.Tooltip("Cohort:T"),
-                alt.Tooltip("Loss Rate:Q", format=".2%"),
-                alt.Tooltip("Matured Count:Q", title="Matured Loans"),
-            ],
+        line = (
+            alt.Chart(loss_data)
+            .mark_line(point=True, color="#E8632A", strokeWidth=2.5)
+            .encode(
+                x=alt.X("Cohort:T"),
+                y=alt.Y("Loss Rate:Q", title="Loss Rate", axis=alt.Axis(format="%")),
+                tooltip=[
+                    alt.Tooltip("Cohort:T"),
+                    alt.Tooltip("Loss Rate:Q", format=".2%"),
+                    alt.Tooltip("Matured Count:Q", title="Matured Loans"),
+                ],
+            )
         )
         if not loss_data.empty:
+
             def _ref_layer(value, label, color, x_anchor):
                 if pd.isna(value):
                     return None
                 ref = pd.DataFrame({"v": [value], "label": [label], "xa": [x_anchor]})
-                rule = alt.Chart(ref).mark_rule(color=color, strokeDash=[6, 6]).encode(y=alt.Y("v:Q"))
-                text = alt.Chart(ref).mark_text(
-                    color=color, dx=8, dy=-6, align="left", fontSize=11, fontWeight="bold"
-                ).encode(x="xa:T", y=alt.Y("v:Q"), text="label:N")
+                rule = (
+                    alt.Chart(ref).mark_rule(color=color, strokeDash=[6, 6]).encode(y=alt.Y("v:Q"))
+                )
+                text = (
+                    alt.Chart(ref)
+                    .mark_text(
+                        color=color, dx=8, dy=-6, align="left", fontSize=11, fontWeight="bold"
+                    )
+                    .encode(x="xa:T", y=alt.Y("v:Q"), text="label:N")
+                )
                 return rule + text
 
             for ref in (
                 _ref_layer(
-                    ue_data["Average Loss"], f"Avg: {fmt(ue_data['Average Loss'])}",
-                    "#6B7280", loss_data["Cohort"].min(),
+                    ue_data["Average Loss"],
+                    f"Avg: {fmt(ue_data['Average Loss'])}",
+                    "#6B7280",
+                    loss_data["Cohort"].min(),
                 ),
                 _ref_layer(
-                    ltv_data["95th Percentile Losses"], f"95th %ile: {fmt(ltv_data['95th Percentile Losses'])}",
-                    "#d62728", loss_data["Cohort"].max(),
+                    ltv_data["95th Percentile Losses"],
+                    f"95th %ile: {fmt(ltv_data['95th Percentile Losses'])}",
+                    "#d62728",
+                    loss_data["Cohort"].max(),
                 ),
             ):
                 if ref is not None:
                     line = line + ref
         st.altair_chart(
-            alt.layer(bars, line).resolve_scale(y="independent").properties(
-                height=340, padding={"right": 95},
+            alt.layer(bars, line)
+            .resolve_scale(y="independent")
+            .properties(
+                height=340,
+                padding={"right": 95},
             ),
             width="stretch",
         )
@@ -2803,47 +3324,59 @@ if is_lending:
         st.subheader("Cohorts")
 
         matured_only_toggle = st.checkbox(
-            "Matured loans only", value=True,
+            "Matured loans only",
+            value=True,
             help="When checked (default), every figure below is computed from matured loans only "
-                 "(Reached T+3? = True) - a cohort with none doesn't appear at all, matching the "
-                 "Excel template's Cohorts pivot exactly. Uncheck to instead see each cohort's true "
-                 "origination volume and full-book figures. Loss Rate is always matured-only either "
-                 "way, since it isn't meaningful otherwise - and the 95th %ile Loss Rate metric below "
-                 "is never affected by this toggle.",
+            "(Reached T+3? = True) - a cohort with none doesn't appear at all, matching the "
+            "Excel template's Cohorts pivot exactly. Uncheck to instead see each cohort's true "
+            "origination volume and full-book figures. Loss Rate is always matured-only either "
+            "way, since it isn't meaningful otherwise - and the 95th %ile Loss Rate metric below "
+            "is never affected by this toggle.",
         )
-        display_cohorts = cohorts if matured_only_toggle else lending_build_cohorts(
-            df, min_matured=gi.min_loans_per_cohort, matured_only=False
+        display_cohorts = (
+            cohorts
+            if matured_only_toggle
+            else lending_build_cohorts(df, min_matured=gi.min_loans_per_cohort, matured_only=False)
         )
         st.caption(
             f"{len(display_cohorts)} monthly cohorts with at least one matured loan (Reached T+3? = True)"
-            if matured_only_toggle else
-            f"{len(display_cohorts)} monthly cohorts (all loans, matured or not)"
+            if matured_only_toggle
+            else f"{len(display_cohorts)} monthly cohorts (all loans, matured or not)"
         )
 
         min_loans = st.number_input(
             "Minimum loans per cohort",
-            min_value=0, value=gi.min_loans_per_cohort, step=1,
+            min_value=0,
+            value=gi.min_loans_per_cohort,
+            step=1,
             help="Only show cohorts with at least this many loans (matured-only or all-loans, "
-                 f"depending on the toggle above). Defaults to the Excel template's threshold "
-                 f"({gi.min_loans_per_cohort}).",
+            f"depending on the toggle above). Defaults to the Excel template's threshold "
+            f"({gi.min_loans_per_cohort}).",
         )
 
         cohort_view = display_cohorts[display_cohorts["Loan Count"] >= min_loans]
 
-        lead_cols = [c for c in ("Cohort", "Loan Count", "Matured Count", "Loss Rate") if c in cohort_view.columns]
-        cohort_view = cohort_view[lead_cols + [c for c in cohort_view.columns if c not in lead_cols]]
+        lead_cols = [
+            c
+            for c in ("Cohort", "Loan Count", "Matured Count", "Loss Rate")
+            if c in cohort_view.columns
+        ]
+        cohort_view = cohort_view[
+            lead_cols + [c for c in cohort_view.columns if c not in lead_cols]
+        ]
 
         c_metric_1, c_metric_2 = st.columns(2)
         c_metric_1.metric(
             "Total Cohorts available",
             f"{len(display_cohorts)}",
             help="All monthly cohorts in the analysis - not affected by the "
-                 "minimum-loans filter above.",
+            "minimum-loans filter above.",
         )
         c_metric_2.metric(
-            "Cohorts shown", f"{len(cohort_view)}",
+            "Cohorts shown",
+            f"{len(cohort_view)}",
             help="Cohorts matching the 'Minimum loans per cohort' filter above, out of "
-                 f"{len(display_cohorts)} monthly cohorts.",
+            f"{len(display_cohorts)} monthly cohorts.",
         )
 
         table_tab, stats_tab = st.tabs(["Table", "Stats"])
@@ -2867,24 +3400,40 @@ if is_lending:
             # (precision/backend) between the two sides, which can silently
             # match nothing instead of erroring.
             qualifying_periods = pd.to_datetime(cohort_view["Cohort"]).dt.to_period("M")
-            cohort_loans = df[pd.to_datetime(df["Cohort"]).dt.to_period("M").isin(qualifying_periods)]
+            cohort_loans = df[
+                pd.to_datetime(df["Cohort"]).dt.to_period("M").isin(qualifying_periods)
+            ]
             avg_rates = principal_weighted_average_rates(cohort_loans)
-            _render_snapshot_table([
-                ("PvD", fmt(cohort_view["PvD Ratio"].mean()),
-                 "Average Paid-vs-Due ratio (Total Paid / Total Due) across the cohorts shown in "
-                 "the table."),
-                ("Weighted Avg Term", fmt(cohort_view["Weighted Avg Term"].mean(), "{:,.1f} days"),
-                 "Average, across the cohorts shown in the table, of each cohort's own "
-                 "principal-weighted average term (days)."),
-                ("APR", fmt(avg_rates["APR"]),
-                 "Nominal APR: principal-weighted average, across loans in the cohorts shown, of "
-                 "the periodic rate that amortizes Principal to the full amount owed - using the "
-                 "loan's real installment (Payment per Period) where available, else a synthetic "
-                 "owed/term estimate - annualized as rate x periods per year."),
-                ("EAR", fmt(avg_rates["EAR"]),
-                 "Effective Annual Rate: the same implied periodic rate as APR, annualized by "
-                 "compounding - (1 + rate)^periods per year - 1 - instead of a simple multiply."),
-            ])
+            _render_snapshot_table(
+                [
+                    (
+                        "PvD",
+                        fmt(cohort_view["PvD Ratio"].mean()),
+                        "Average Paid-vs-Due ratio (Total Paid / Total Due) across the cohorts shown in "
+                        "the table.",
+                    ),
+                    (
+                        "Weighted Avg Term",
+                        fmt(cohort_view["Weighted Avg Term"].mean(), "{:,.1f} days"),
+                        "Average, across the cohorts shown in the table, of each cohort's own "
+                        "principal-weighted average term (days).",
+                    ),
+                    (
+                        "APR",
+                        fmt(avg_rates["APR"]),
+                        "Nominal APR: principal-weighted average, across loans in the cohorts shown, of "
+                        "the periodic rate that amortizes Principal to the full amount owed - using the "
+                        "loan's real installment (Payment per Period) where available, else a synthetic "
+                        "owed/term estimate - annualized as rate x periods per year.",
+                    ),
+                    (
+                        "EAR",
+                        fmt(avg_rates["EAR"]),
+                        "Effective Annual Rate: the same implied periodic rate as APR, annualized by "
+                        "compounding - (1 + rate)^periods per year - 1 - instead of a simple multiply.",
+                    ),
+                ]
+            )
             solved_pct = (
                 f"{avg_rates['n_solved']}/{avg_rates['n_total']}" if avg_rates["n_total"] else "0/0"
             )
@@ -2912,17 +3461,32 @@ if is_lending:
         st.markdown("**Inputs**")
         y1, y2, y3 = st.columns(3)
         with y1:
-            calc_data_source = st.selectbox("Data Input Source", LTV_CALC_DATA_SOURCES, key="ltvcalc_data_source")
-            calc_country = st.selectbox("Alt Lender Country", LTV_CALC_COUNTRIES, key="ltvcalc_country")
+            calc_data_source = st.selectbox(
+                "Data Input Source", LTV_CALC_DATA_SOURCES, key="ltvcalc_data_source"
+            )
+            calc_country = st.selectbox(
+                "Alt Lender Country", LTV_CALC_COUNTRIES, key="ltvcalc_country"
+            )
         with y2:
-            calc_macro_fx = st.selectbox("Macro FX Risk Rating", LTV_CALC_FX_RISK_RATINGS, key="ltvcalc_macro_fx")
-            calc_segmentation = st.selectbox("Segmentation", LTV_CALC_SEGMENTATIONS, key="ltvcalc_segmentation")
+            calc_macro_fx = st.selectbox(
+                "Macro FX Risk Rating", LTV_CALC_FX_RISK_RATINGS, key="ltvcalc_macro_fx"
+            )
+            calc_segmentation = st.selectbox(
+                "Segmentation", LTV_CALC_SEGMENTATIONS, key="ltvcalc_segmentation"
+            )
         with y3:
             calc_hedge_rate = st.number_input(
                 "Hedge Rate (0 if unhedged, else % OTM as a decimal)",
-                min_value=0.0, max_value=1.0, value=0.0, step=0.01, format="%.4f", key="ltvcalc_hedge_rate",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.0,
+                step=0.01,
+                format="%.4f",
+                key="ltvcalc_hedge_rate",
             )
-            calc_rolled_hedge = st.selectbox("Rolled hedge?", LTV_CALC_HEDGE_TYPES, key="ltvcalc_rolled_hedge")
+            calc_rolled_hedge = st.selectbox(
+                "Rolled hedge?", LTV_CALC_HEDGE_TYPES, key="ltvcalc_rolled_hedge"
+            )
 
         result = None
         if pd.isna(green_interest) or pd.isna(green_loss) or green_term_bucket is None:
@@ -2931,9 +3495,15 @@ if is_lending:
             )
         else:
             result = ltv_calculator_compute(
-                gross_interest=green_interest, term_months=green_term_bucket, loss_rate=green_loss,
-                country=calc_country, macro_fx_risk=calc_macro_fx, segmentation=calc_segmentation,
-                hedge_rate=calc_hedge_rate, rolled_hedge=calc_rolled_hedge, data_source=calc_data_source,
+                gross_interest=green_interest,
+                term_months=green_term_bucket,
+                loss_rate=green_loss,
+                country=calc_country,
+                macro_fx_risk=calc_macro_fx,
+                segmentation=calc_segmentation,
+                hedge_rate=calc_hedge_rate,
+                rolled_hedge=calc_rolled_hedge,
+                data_source=calc_data_source,
             )
             for note in result["notes"]:
                 st.info(note)
@@ -2943,86 +3513,167 @@ if is_lending:
             st.markdown("#### Outputs - Suggested LTV")
 
             st.subheader("LTGBV")
-            _render_snapshot_table([
-                ("No FX Adjustment", fmt(result["ltgbv_no_fx"]),
-                 "LTGBV before any FX adjustment: 1 minus the selected stress loss."),
-                ("With FX Adjustment (High)", fmt(result["ltgbv_high"]),
-                 "LTGBV (no FX) divided by (1 + selected FX devaluation, high end)."),
-                ("With FX Adjustment (Low)", fmt(result["ltgbv_low"]),
-                 "LTGBV (no FX) divided by (1 + selected FX devaluation, low end)."),
-            ])
+            _render_snapshot_table(
+                [
+                    (
+                        "No FX Adjustment",
+                        fmt(result["ltgbv_no_fx"]),
+                        "LTGBV before any FX adjustment: 1 minus the selected stress loss.",
+                    ),
+                    (
+                        "With FX Adjustment (High)",
+                        fmt(result["ltgbv_high"]),
+                        "LTGBV (no FX) divided by (1 + selected FX devaluation, high end).",
+                    ),
+                    (
+                        "With FX Adjustment (Low)",
+                        fmt(result["ltgbv_low"]),
+                        "LTGBV (no FX) divided by (1 + selected FX devaluation, low end).",
+                    ),
+                ]
+            )
 
             st.subheader("Advance on Principal (LTV)")
-            _render_snapshot_table([
-                ("No FX Adjustment", fmt(result["ltv_no_fx"]),
-                 "LTGBV (no FX) grossed up by (1 + weighted avg. gross interest)."),
-                ("With FX Adjustment (High)", fmt(result["ltv_high"]),
-                 "LTGBV (FX high) grossed up by (1 + weighted avg. gross interest)."),
-                ("With FX Adjustment (Low)", fmt(result["ltv_low"]),
-                 "LTGBV (FX low) grossed up by (1 + weighted avg. gross interest)."),
-            ])
-            st.caption("Both LTGBV and LTV limits must be complied with (source: Receivables sheet, cell C44).")
+            _render_snapshot_table(
+                [
+                    (
+                        "No FX Adjustment",
+                        fmt(result["ltv_no_fx"]),
+                        "LTGBV (no FX) grossed up by (1 + weighted avg. gross interest).",
+                    ),
+                    (
+                        "With FX Adjustment (High)",
+                        fmt(result["ltv_high"]),
+                        "LTGBV (FX high) grossed up by (1 + weighted avg. gross interest).",
+                    ),
+                    (
+                        "With FX Adjustment (Low)",
+                        fmt(result["ltv_low"]),
+                        "LTGBV (FX low) grossed up by (1 + weighted avg. gross interest).",
+                    ),
+                ]
+            )
+            st.caption(
+                "Both LTGBV and LTV limits must be complied with (source: Receivables sheet, cell C44)."
+            )
 
             st.markdown("---")
             st.markdown("#### Back-Up")
 
             st.subheader("FX Backup")
-            _render_snapshot_table([
-                ("Term", f"{green_term_bucket} months" if green_term_bucket else "n/a",
-                 "Weighted average receivable term, snapped to the nearest tenor bucket the "
-                 "workbook's dropdown allows."),
-                ("Historical Devaluation", fmt(result["historical_fx_deval"]),
-                 "99th-percentile historical FX devaluation for the selected country and tenor."),
-                ("Utilized Historical FX Deval", fmt(result["utilized_fx_deval"]),
-                 "Historical FX devaluation actually used - the 6-month figure when the tenor is 6 "
-                 "months or less."),
-                ("Stress FX Devaluation", fmt(result["stress_fx_deval"]),
-                 f"Max(historical, utilized) FX devaluation, stressed by the FX stress factor ({result['stress_fx_factor']:g}x)."),
-                ("Base FX Deval", fmt(result["base_fx_deval"]),
-                 "Stress FX devaluation, capped at the hedge rate when the deal is hedged."),
-                ("FX Slippage Stress", fmt(result["fx_slippage"]),
-                 "FX basis-risk slippage for the selected country."),
-                ("Selected FX Deval (High)", fmt(result["selected_fx_deval_high"]),
-                 "Base FX deval + slippage + high-end roll risk."),
-                ("Selected FX Deval (Low)", fmt(result["selected_fx_deval_low"]),
-                 "Base FX deval + slippage + low-end roll risk."),
-            ])
-            fx_country_data = pd.DataFrame({
-                "Tenor (months)": LTV_CALC_TENORS,
-                "Historical FX Devaluation": LTV_CALC_FX_DEVAL_TABLE[calc_country],
-            })
+            _render_snapshot_table(
+                [
+                    (
+                        "Term",
+                        f"{green_term_bucket} months" if green_term_bucket else "n/a",
+                        "Weighted average receivable term, snapped to the nearest tenor bucket the "
+                        "workbook's dropdown allows.",
+                    ),
+                    (
+                        "Historical Devaluation",
+                        fmt(result["historical_fx_deval"]),
+                        "99th-percentile historical FX devaluation for the selected country and tenor.",
+                    ),
+                    (
+                        "Utilized Historical FX Deval",
+                        fmt(result["utilized_fx_deval"]),
+                        "Historical FX devaluation actually used - the 6-month figure when the tenor is 6 "
+                        "months or less.",
+                    ),
+                    (
+                        "Stress FX Devaluation",
+                        fmt(result["stress_fx_deval"]),
+                        f"Max(historical, utilized) FX devaluation, stressed by the FX stress factor ({result['stress_fx_factor']:g}x).",
+                    ),
+                    (
+                        "Base FX Deval",
+                        fmt(result["base_fx_deval"]),
+                        "Stress FX devaluation, capped at the hedge rate when the deal is hedged.",
+                    ),
+                    (
+                        "FX Slippage Stress",
+                        fmt(result["fx_slippage"]),
+                        "FX basis-risk slippage for the selected country.",
+                    ),
+                    (
+                        "Selected FX Deval (High)",
+                        fmt(result["selected_fx_deval_high"]),
+                        "Base FX deval + slippage + high-end roll risk.",
+                    ),
+                    (
+                        "Selected FX Deval (Low)",
+                        fmt(result["selected_fx_deval_low"]),
+                        "Base FX deval + slippage + low-end roll risk.",
+                    ),
+                ]
+            )
+            fx_country_data = pd.DataFrame(
+                {
+                    "Tenor (months)": LTV_CALC_TENORS,
+                    "Historical FX Devaluation": LTV_CALC_FX_DEVAL_TABLE[calc_country],
+                }
+            )
             st.altair_chart(
                 _add_reference_line(
-                    alt.Chart(fx_country_data).mark_line(point=True, color="#1f77b4").encode(
+                    alt.Chart(fx_country_data)
+                    .mark_line(point=True, color="#1f77b4")
+                    .encode(
                         x=alt.X("Tenor (months):O", title="Tenor (months)"),
-                        y=alt.Y("Historical FX Devaluation:Q", title="99th %ile FX Devaluation",
-                                axis=alt.Axis(format="%")),
-                        tooltip=["Tenor (months):O", alt.Tooltip("Historical FX Devaluation:Q", format=".2%")],
+                        y=alt.Y(
+                            "Historical FX Devaluation:Q",
+                            title="99th %ile FX Devaluation",
+                            axis=alt.Axis(format="%"),
+                        ),
+                        tooltip=[
+                            "Tenor (months):O",
+                            alt.Tooltip("Historical FX Devaluation:Q", format=".2%"),
+                        ],
                     ),
                     result["historical_fx_deval"],
                     f"Selected tenor ({green_term_bucket}m): {result['historical_fx_deval']:.2%}",
                     color="#d62728",
-                ).properties(title=f"99th %ile Historical FX Devaluation - {calc_country}", height=300),
+                ).properties(
+                    title=f"99th %ile Historical FX Devaluation - {calc_country}", height=300
+                ),
                 width="stretch",
             )
 
             st.subheader("Credit Stress Backup")
-            _render_snapshot_table([
-                ("Product Interest Rate", fmt(green_interest),
-                 "Weighted average gross interest rate, pulled from this analysis."),
-                ("95th %ile Loss", fmt(green_loss),
-                 "95th percentile loss rate at T+3, pulled from this analysis."),
-                ("Stress Loss", fmt(result["stress_loss_rate"]),
-                 f"Loss rate multiplied by the credit stress factor ({result['credit_stress_factor']:g}x)."),
-                ("Minimum Loss Rate", fmt(result["minimum_stress_loss"]),
-                 "Sector-minimum stress loss floor for the selected segmentation and data source."),
-                ("Selected Stress Loss", fmt(result["selected_stress_loss"]),
-                 "Max(stress loss rate, minimum stress loss floor)."),
-            ])
+            _render_snapshot_table(
+                [
+                    (
+                        "Product Interest Rate",
+                        fmt(green_interest),
+                        "Weighted average gross interest rate, pulled from this analysis.",
+                    ),
+                    (
+                        "95th %ile Loss",
+                        fmt(green_loss),
+                        "95th percentile loss rate at T+3, pulled from this analysis.",
+                    ),
+                    (
+                        "Stress Loss",
+                        fmt(result["stress_loss_rate"]),
+                        f"Loss rate multiplied by the credit stress factor ({result['credit_stress_factor']:g}x).",
+                    ),
+                    (
+                        "Minimum Loss Rate",
+                        fmt(result["minimum_stress_loss"]),
+                        "Sector-minimum stress loss floor for the selected segmentation and data source.",
+                    ),
+                    (
+                        "Selected Stress Loss",
+                        fmt(result["selected_stress_loss"]),
+                        "Max(stress loss rate, minimum stress loss floor).",
+                    ),
+                ]
+            )
             if not lending_chart_data.empty:
                 st.altair_chart(
                     _add_reference_line(
-                        alt.Chart(lending_chart_data).mark_line(point=True).encode(
+                        alt.Chart(lending_chart_data)
+                        .mark_line(point=True)
+                        .encode(
                             x=alt.X("Cohort:T", title="Cohort"),
                             y=alt.Y("Loss Rate:Q", title="Loss Rate", axis=alt.Axis(format="%")),
                             tooltip=["Cohort:T", alt.Tooltip("Loss Rate:Q", format=".2%")],
@@ -3040,11 +3691,15 @@ if is_lending:
         overview_tab, ue_model_tab = st.tabs(["Overview", "UE Model"])
         with overview_tab:
             row1 = st.columns(3)
-            row1[0].metric("Average Expected Term (days)", fmt(ue_data["Average Expected Term"], "{:,.1f}"))
+            row1[0].metric(
+                "Average Expected Term (days)", fmt(ue_data["Average Expected Term"], "{:,.1f}")
+            )
             row1[1].metric("Average Loss", fmt(ue_data["Average Loss"]))
             row1[2].metric("Loss Rate Proxy (1-PvD)", fmt(ue_data["Loss Rate Proxy (1-PvD)"]))
             row2 = st.columns(3)
-            row2[0].metric("Average Principal Amount", fmt(ue_data["Average Principal Amount"], "{:,.0f}"))
+            row2[0].metric(
+                "Average Principal Amount", fmt(ue_data["Average Principal Amount"], "{:,.0f}")
+            )
             row2[1].metric("Average Fee %", fmt(ue_data["Average Fee %"]))
             row2[2].metric("Average Interest %", fmt(ue_data["Average Interest %"]))
             row3 = st.columns(3)
@@ -3052,7 +3707,9 @@ if is_lending:
             if not lending_chart_data.empty:
                 st.altair_chart(
                     _add_reference_line(
-                        alt.Chart(lending_chart_data).mark_line(point=True).encode(
+                        alt.Chart(lending_chart_data)
+                        .mark_line(point=True)
+                        .encode(
                             x=alt.X("Cohort:T", title="Cohort"),
                             y=alt.Y("Loss Rate:Q", title="Loss Rate", axis=alt.Axis(format="%")),
                             tooltip=["Cohort:T", alt.Tooltip("Loss Rate:Q", format=".2%")],
@@ -3066,7 +3723,9 @@ if is_lending:
                 )
                 st.altair_chart(
                     _add_reference_line(
-                        alt.Chart(lending_chart_data).mark_line(point=True).encode(
+                        alt.Chart(lending_chart_data)
+                        .mark_line(point=True)
+                        .encode(
                             x=alt.X("Cohort:T", title="Cohort"),
                             y=alt.Y("Weighted Avg Term:Q", title="Avg Term (days)"),
                             tooltip=["Cohort:T", alt.Tooltip("Weighted Avg Term:Q", format=".1f")],
@@ -3080,9 +3739,13 @@ if is_lending:
                 )
                 st.altair_chart(
                     _add_reference_line(
-                        alt.Chart(lending_chart_data).mark_line(point=True, color="#ff7f0e").encode(
+                        alt.Chart(lending_chart_data)
+                        .mark_line(point=True, color="#ff7f0e")
+                        .encode(
                             x=alt.X("Cohort:T", title="Cohort"),
-                            y=alt.Y("Interest %:Q", title="% of Principal", axis=alt.Axis(format="%")),
+                            y=alt.Y(
+                                "Interest %:Q", title="% of Principal", axis=alt.Axis(format="%")
+                            ),
                             tooltip=["Cohort:T", alt.Tooltip("Interest %:Q", format=".2%")],
                         ),
                         ue_data["Average Interest %"],
@@ -3094,7 +3757,9 @@ if is_lending:
                 )
                 st.altair_chart(
                     _add_reference_line(
-                        alt.Chart(lending_chart_data).mark_line(point=True, color="#1f77b4").encode(
+                        alt.Chart(lending_chart_data)
+                        .mark_line(point=True, color="#1f77b4")
+                        .encode(
                             x=alt.X("Cohort:T", title="Cohort"),
                             y=alt.Y("Fee %:Q", title="% of Principal", axis=alt.Axis(format="%")),
                             tooltip=["Cohort:T", alt.Tooltip("Fee %:Q", format=".2%")],
@@ -3110,13 +3775,23 @@ if is_lending:
             ue_model_ai_data = _render_ue_model_ai_tab(df, ue_data)
 
     with tabs[5]:
-        _render_custom_visualizations_tab({
-            "Data Input (loan-level)": df, "Cohorts": cohorts, "Cohorts for X or more loans": filtered,
-        })
+        _render_custom_visualizations_tab(
+            {
+                "Data Input (loan-level)": df,
+                "Cohorts": cohorts,
+                "Cohorts for X or more loans": filtered,
+            }
+        )
 
     with tabs[6]:
         chat_context = _build_lending_chat_context(
-            gi, df, cohorts, ue_data, ltv_data, ue_model_ai_data, dq_checks,
+            gi,
+            df,
+            cohorts,
+            ue_data,
+            ltv_data,
+            ue_model_ai_data,
+            dq_checks,
             user_context=_ai_context_text(max_chars=60000, per_doc=15000),
         )
         _render_ai_chat_tab(chat_context)
@@ -3126,8 +3801,11 @@ with tabs[1]:
     checks_tab, data_tab = st.tabs(["Checks", "Data Input"])
     with checks_tab:
         _render_data_quality_checks(
-            dq_checks, "Loss Rate (%)", "Lending",
-            "escalate_variance", file_name,
+            dq_checks,
+            "Loss Rate (%)",
+            "Lending",
+            "escalate_variance",
+            file_name,
         )
     with data_tab:
         st.caption(
@@ -3139,19 +3817,38 @@ with tabs[1]:
 st.markdown("---")
 
 
-@st.cache_data(show_spinner="Building the Excel export — this can take a while for large portfolios...")
+@st.cache_data(
+    show_spinner="Building the Excel export — this can take a while for large portfolios..."
+)
 def _build_lending_export_workbook(
-    df, cohorts, filtered, days_after_term, min_loans_per_cohort,
-    ltv_data, ue_data, lending_chart_data, export_charts, term_supplied=False,
-    mapping=None, currency=None, extraction_date=None,
+    df,
+    cohorts,
+    filtered,
+    days_after_term,
+    min_loans_per_cohort,
+    ltv_data,
+    ue_data,
+    lending_chart_data,
+    export_charts,
+    term_supplied=False,
+    mapping=None,
+    currency=None,
+    extraction_date=None,
 ):
     """Cached on its inputs so it's only rebuilt when the analysis or queued
     custom charts actually change, rather than on every Streamlit rerun (e.g.
     toggling an unrelated checkbox) -- at scale (hundreds of thousands of
     rows) rebuilding this from scratch every rerun took 45-60+ seconds."""
-    raw_cols = ["Loan ID", "Disbursement Date", "Expected Completion Date",
-                "Principal Value", "Expected Interest", "Expected Fee",
-                "Total Due", "Total Paid"]
+    raw_cols = [
+        "Loan ID",
+        "Disbursement Date",
+        "Expected Completion Date",
+        "Principal Value",
+        "Expected Interest",
+        "Expected Fee",
+        "Total Due",
+        "Total Paid",
+    ]
     if term_supplied:
         raw_cols.append("Term (days)")
     data_frame = pd.DataFrame({col: df.get(col, pd.Series([None] * len(df))) for col in raw_cols})
@@ -3163,9 +3860,24 @@ def _build_lending_export_workbook(
         gs = writer.book.create_sheet("General Inputs", 0)
         for r, label, val, note in [
             (2, "Inputs", None, None),
-            (3, "Date of extraction", "=MAX('Data Input'!B:B)", "Defaults to most recent disbursement date"),
-            (4, "Days after term", days_after_term, "Ignore any loans for loss rates that are less than this number of days after term"),
-            (5, "Minimum loans per cohort", min_loans_per_cohort, "Ignore any cohorts for loss rates that are less than this number of loans"),
+            (
+                3,
+                "Date of extraction",
+                "=MAX('Data Input'!B:B)",
+                "Defaults to most recent disbursement date",
+            ),
+            (
+                4,
+                "Days after term",
+                days_after_term,
+                "Ignore any loans for loss rates that are less than this number of days after term",
+            ),
+            (
+                5,
+                "Minimum loans per cohort",
+                min_loans_per_cohort,
+                "Ignore any cohorts for loss rates that are less than this number of loans",
+            ),
         ]:
             if label:
                 gs.cell(row=r, column=2, value=label)
@@ -3174,7 +3886,9 @@ def _build_lending_export_workbook(
             if note:
                 gs.cell(row=r, column=4, value=note)
 
-        q_df = pd.DataFrame([(i, q) for i, q in enumerate(LENDING_QUESTIONS, 1)], columns=["#", "Question"])
+        q_df = pd.DataFrame(
+            [(i, q) for i, q in enumerate(LENDING_QUESTIONS, 1)], columns=["#", "Question"]
+        )
         q_df.to_excel(writer, sheet_name="Data Questionnaire", index=False)
 
         data_frame.to_excel(writer, sheet_name="Data Input", index=False, header=True)
@@ -3189,21 +3903,31 @@ def _build_lending_export_workbook(
         if not term_supplied:
             dws.cell(row=1, column=11, value="Term (days)")
         for r in range(2, max(num_data, 1) + 2):
-            dws.cell(row=r, column=matured_col).value = f'=IF(ISBLANK(C{r}),"",(C{r}+\'General Inputs\'!$C$4)<=\'General Inputs\'!$C$3)'
-            dws.cell(row=r, column=cohort_col).value = f'=IF(ISBLANK(B{r}),"",DATE(YEAR(B{r}),MONTH(B{r}),1))'
+            dws.cell(
+                row=r, column=matured_col
+            ).value = f"=IF(ISBLANK(C{r}),\"\",(C{r}+'General Inputs'!$C$4)<='General Inputs'!$C$3)"
+            dws.cell(
+                row=r, column=cohort_col
+            ).value = f'=IF(ISBLANK(B{r}),"",DATE(YEAR(B{r}),MONTH(B{r}),1))'
             if not term_supplied:
-                dws.cell(row=r, column=11).value = f'=IF(OR(ISBLANK(B{r}),ISBLANK(C{r})),"",C{r}-B{r})'
+                dws.cell(
+                    row=r, column=11
+                ).value = f'=IF(OR(ISBLANK(B{r}),ISBLANK(C{r})),"",C{r}-B{r})'
 
         ltv_df = pd.DataFrame(list(ltv_data.items()), columns=["Metric", "Value"])
         ltv_df.to_excel(writer, sheet_name="LTV Analysis", index=False)
         ltv_ws = writer.sheets["LTV Analysis"]
         if not lending_chart_data.empty:
-            lending_chart_data[["Cohort", "Loss Rate"]].to_excel(writer, sheet_name="LTV Analysis", startrow=6, index=False)
+            lending_chart_data[["Cohort", "Loss Rate"]].to_excel(
+                writer, sheet_name="LTV Analysis", startrow=6, index=False
+            )
             c = LineChart()
             c.title = "Loss per Cohort"
             c.y_axis.numFmt = "0.00%"
             c.height, c.width = 14, 24
-            data = Reference(ltv_ws, min_col=1, min_row=7, max_col=2, max_row=7 + len(lending_chart_data))
+            data = Reference(
+                ltv_ws, min_col=1, min_row=7, max_col=2, max_row=7 + len(lending_chart_data)
+            )
             cats = Reference(ltv_ws, min_col=1, min_row=8, max_row=7 + len(lending_chart_data))
             c.add_data(data, titles_from_data=True)
             c.set_categories(cats)
@@ -3213,10 +3937,18 @@ def _build_lending_export_workbook(
         ue_df.to_excel(writer, sheet_name="Unit Economics Analysis", index=False)
         ue_ws = writer.sheets["Unit Economics Analysis"]
         if not lending_chart_data.empty:
-            lending_chart_data[["Cohort", "Loss Rate"]].to_excel(writer, sheet_name="Unit Economics Analysis", startrow=10, index=False)
-            lending_chart_data[["Cohort", "Weighted Avg Term"]].to_excel(writer, sheet_name="Unit Economics Analysis", startrow=10, startcol=4, index=False)
-            lending_chart_data[["Cohort", "Fee %"]].to_excel(writer, sheet_name="Unit Economics Analysis", startrow=10, startcol=8, index=False)
-            lending_chart_data[["Cohort", "Interest %"]].to_excel(writer, sheet_name="Unit Economics Analysis", startrow=10, startcol=11, index=False)
+            lending_chart_data[["Cohort", "Loss Rate"]].to_excel(
+                writer, sheet_name="Unit Economics Analysis", startrow=10, index=False
+            )
+            lending_chart_data[["Cohort", "Weighted Avg Term"]].to_excel(
+                writer, sheet_name="Unit Economics Analysis", startrow=10, startcol=4, index=False
+            )
+            lending_chart_data[["Cohort", "Fee %"]].to_excel(
+                writer, sheet_name="Unit Economics Analysis", startrow=10, startcol=8, index=False
+            )
+            lending_chart_data[["Cohort", "Interest %"]].to_excel(
+                writer, sheet_name="Unit Economics Analysis", startrow=10, startcol=11, index=False
+            )
             sr = 11
             lr = sr + len(lending_chart_data) - 1
             for title, col, anchor in [
@@ -3237,10 +3969,13 @@ def _build_lending_export_workbook(
                 ue_ws.add_chart(c, anchor)
 
         ga_summary = lending_general_analysis(df)
-        ga_df = pd.DataFrame([
-            ("Shape", f"{ga_summary['shape'][0]:,} rows x {ga_summary['shape'][1]} cols"),
-            ("Columns", ", ".join(ga_summary["columns"])),
-        ], columns=["Property", "Value"])
+        ga_df = pd.DataFrame(
+            [
+                ("Shape", f"{ga_summary['shape'][0]:,} rows x {ga_summary['shape'][1]} cols"),
+                ("Columns", ", ".join(ga_summary["columns"])),
+            ],
+            columns=["Property", "Value"],
+        )
         ga_df.to_excel(writer, sheet_name="General Analysis", index=False)
         ga_ws = writer.sheets["General Analysis"]
         if not orig_source.empty:
@@ -3269,7 +4004,9 @@ def _build_lending_export_workbook(
                 "mapping": mapping,
                 "currency": currency,
                 "gi_overrides": {
-                    "extraction_date": extraction_date.isoformat() if extraction_date is not None else None,
+                    "extraction_date": extraction_date.isoformat()
+                    if extraction_date is not None
+                    else None,
                     "days_after_term": days_after_term,
                     "min_loans_per_cohort": min_loans_per_cohort,
                 },
@@ -3284,8 +4021,15 @@ def _build_lending_export_workbook(
 
 if is_lending:
     buf = _build_lending_export_workbook(
-        df, cohorts, filtered, gi.days_after_term, gi.min_loans_per_cohort,
-        ltv_data, ue_data, lending_chart_data, st.session_state.get("export_charts", []),
+        df,
+        cohorts,
+        filtered,
+        gi.days_after_term,
+        gi.min_loans_per_cohort,
+        ltv_data,
+        ue_data,
+        lending_chart_data,
+        st.session_state.get("export_charts", []),
         term_supplied,
         mapping=st.session_state.get("analysis_mapping"),
         currency=st.session_state.get("analysis_currency"),

@@ -13,23 +13,28 @@ def _make_df(expected_fee=5, total_due=None):
     the same shape used to verify matured-only filtering throughout this
     project's development."""
     n = 12
-    raw = pd.DataFrame({
-        "Loan ID": range(1, n + 1),
-        "Disbursement Date": (
-            [pd.Timestamp("2024-01-05")] * 5
-            + [pd.Timestamp("2024-02-10")] * 4
-            + [pd.Timestamp("2024-05-20")] * 3
-        ),
-        "Expected Completion Date": (
-            [pd.Timestamp("2024-02-05")] * 5
-            + [pd.Timestamp("2024-03-10")] * 2 + [pd.Timestamp("2024-05-10")] * 2
-            + [pd.Timestamp("2024-08-20")] * 3
-        ),
-        "Principal Value": [100] * n,
-        "Expected Interest": [10] * n,
-        "Expected Fee": [expected_fee] * n if not isinstance(expected_fee, list) else expected_fee,
-        "Total Paid": [110] * 5 + [95, 90, 50, 50] + [0, 0, 0],
-    })
+    raw = pd.DataFrame(
+        {
+            "Loan ID": range(1, n + 1),
+            "Disbursement Date": (
+                [pd.Timestamp("2024-01-05")] * 5
+                + [pd.Timestamp("2024-02-10")] * 4
+                + [pd.Timestamp("2024-05-20")] * 3
+            ),
+            "Expected Completion Date": (
+                [pd.Timestamp("2024-02-05")] * 5
+                + [pd.Timestamp("2024-03-10")] * 2
+                + [pd.Timestamp("2024-05-10")] * 2
+                + [pd.Timestamp("2024-08-20")] * 3
+            ),
+            "Principal Value": [100] * n,
+            "Expected Interest": [10] * n,
+            "Expected Fee": [expected_fee] * n
+            if not isinstance(expected_fee, list)
+            else expected_fee,
+            "Total Paid": [110] * 5 + [95, 90, 50, 50] + [0, 0, 0],
+        }
+    )
     if total_due is not None:
         raw["Total Due"] = total_due
     return process_data_input(raw, EXTRACTION_DATE, days_after_term=90)
@@ -49,7 +54,9 @@ def test_matured_only_false_restores_all_cohorts():
     df = _make_df()
     cohorts = build_cohorts(df, min_matured=1, matured_only=False)
     assert list(cohorts["Cohort"]) == [
-        pd.Timestamp("2024-01-01"), pd.Timestamp("2024-02-01"), pd.Timestamp("2024-05-01"),
+        pd.Timestamp("2024-01-01"),
+        pd.Timestamp("2024-02-01"),
+        pd.Timestamp("2024-05-01"),
     ]
     feb = cohorts[cohorts["Cohort"] == pd.Timestamp("2024-02-01")].iloc[0]
     assert feb["Loan Count"] == 4

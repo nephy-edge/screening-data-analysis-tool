@@ -2,7 +2,6 @@ import numpy as np
 import numpy_financial as npf
 import pandas as pd
 
-
 _PERIODS_PER_YEAR = {"weekly": 52, "biweekly": 26, "monthly": 12}
 
 
@@ -55,7 +54,12 @@ def compute_loan_rates(df: pd.DataFrame) -> pd.DataFrame:
 
     if "Payment Frequency" in df.columns:
         periods_per_year = (
-            df["Payment Frequency"].astype(str).str.lower().map(_PERIODS_PER_YEAR).fillna(12).astype("float64")
+            df["Payment Frequency"]
+            .astype(str)
+            .str.lower()
+            .map(_PERIODS_PER_YEAR)
+            .fillna(12)
+            .astype("float64")
         )
     else:
         periods_per_year = pd.Series(12.0, index=df.index, dtype="float64")
@@ -73,9 +77,7 @@ def compute_loan_rates(df: pd.DataFrame) -> pd.DataFrame:
     nper.loc[~has_real_pmt] = term_days[~has_real_pmt] / period_days[~has_real_pmt]
 
     valid = (
-        nper.notna() & (nper > 0)
-        & pmt.notna() & (pmt > 0)
-        & principal.notna() & (principal > 0)
+        nper.notna() & (nper > 0) & pmt.notna() & (pmt > 0) & principal.notna() & (principal > 0)
     )
 
     # Solved one loan at a time: numpy_financial.rate() vectorizes its Newton solve
@@ -89,14 +91,19 @@ def compute_loan_rates(df: pd.DataFrame) -> pd.DataFrame:
         # backing dtype - numpy_financial's Newton solve needs that, not a
         # pandas/pyarrow-backed scalar (see _num() above).
         rate_period.loc[idx] = npf.rate(
-            nper=float(nper.loc[idx]), pmt=float(pmt.loc[idx]), pv=-float(principal.loc[idx]), fv=0,
+            nper=float(nper.loc[idx]),
+            pmt=float(pmt.loc[idx]),
+            pv=-float(principal.loc[idx]),
+            fv=0,
         )
 
-    rates = pd.DataFrame({
-        "Principal Value": principal,
-        "APR": rate_period * periods_per_year,
-        "EAR": (1 + rate_period) ** periods_per_year - 1,
-    })
+    rates = pd.DataFrame(
+        {
+            "Principal Value": principal,
+            "APR": rate_period * periods_per_year,
+            "EAR": (1 + rate_period) ** periods_per_year - 1,
+        }
+    )
     # Diagnostics: distinguish "inputs were unusable before we even tried to
     # solve" from "inputs looked fine but the solver didn't converge" - these
     # point to very different root causes.
@@ -119,8 +126,7 @@ def principal_weighted_average_rates(df: pd.DataFrame) -> dict:
     n_total = len(df)
     n_solved = int(rates["APR"].notna().sum())
     n_real_pmt = int(
-        (_num(df["Payment per Period"]) > 0).sum()
-        if "Payment per Period" in df.columns else 0
+        (_num(df["Payment per Period"]) > 0).sum() if "Payment per Period" in df.columns else 0
     )
     if not total_weight:
         apr, ear = float("nan"), float("nan")
@@ -128,8 +134,10 @@ def principal_weighted_average_rates(df: pd.DataFrame) -> dict:
         apr = (rates["APR"] * weights).sum() / total_weight
         ear = (rates["EAR"] * weights).sum() / total_weight
     return {
-        "APR": apr, "EAR": ear,
-        "n_total": n_total, "n_solved": n_solved,
+        "APR": apr,
+        "EAR": ear,
+        "n_total": n_total,
+        "n_solved": n_solved,
         "n_real_pmt": n_real_pmt,
         "n_valid_inputs": rates.attrs.get("n_valid_inputs"),
         "n_converged": rates.attrs.get("n_converged"),

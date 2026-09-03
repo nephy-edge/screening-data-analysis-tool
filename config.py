@@ -52,7 +52,7 @@ _DEFAULTS = {
                 "message (Slack mrkdwn: *bold*, bullet points with '-') for an analyst "
                 "who hasn't seen the data, summarizing what's flagged and the likely "
                 "causes. Do not invent facts not present above.\n"
-                "3. For any fact whose likely cause is \"No obvious data-driven cause\", "
+                '3. For any fact whose likely cause is "No obvious data-driven cause", '
                 "add a short *Possible lines of inquiry (hypotheses to verify with the "
                 "Borrower - not conclusions)* section with 2-3 plausible external "
                 "explanations common to a %%MODEL_NAME%% business (e.g. underwriting/"

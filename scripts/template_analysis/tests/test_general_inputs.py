@@ -4,7 +4,9 @@ from template_analysis.general_inputs import GeneralInputs
 
 
 def test_extraction_date_defaults_to_max_disbursement_date():
-    df = pd.DataFrame({"Disbursement Date": pd.to_datetime(["2024-01-05", "2024-03-20", "2024-02-01"])})
+    df = pd.DataFrame(
+        {"Disbursement Date": pd.to_datetime(["2024-01-05", "2024-03-20", "2024-02-01"])}
+    )
     gi = GeneralInputs(df)
     assert gi.extraction_date == pd.Timestamp("2024-03-20")
 
