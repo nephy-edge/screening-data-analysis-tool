@@ -20,7 +20,6 @@ _DEFAULTS = {
         "chat_url": "https://api.deepinfra.com/v1/openai/chat/completions",
         "request_timeout_seconds": 30,
         "mapping_suggestion_max_tokens": 512,
-        "derived_column_max_tokens": 512,
         "escalation_writeup_max_tokens": 700,
         "chat_assistant_max_tokens": 800,
         "prompts": {
@@ -40,24 +39,6 @@ _DEFAULTS = {
             "mapping_suggestion_context_suffix": (
                 "\n\nUser-provided documentation about this dataset - prefer it when "
                 "deciding which raw column corresponds to which template field:\n"
-            ),
-            "derived_column_suggestion": (
-                "You help map a %%DOMAIN_HINT%%'s raw columns to a derived column. "
-                "You can only combine exactly two existing columns with one of these "
-                "operators: %%OPS%% (division). Pick the two columns and operator that "
-                "best satisfy the user's request. If the request truly needs more than "
-                "two columns or a non-arithmetic transform, still return your best "
-                "two-column approximation and say so in the explanation.\n\n"
-                "Available columns (use these exact names): %%COLUMNS%%\n"
-                "Available operators (use exactly one of these characters): %%OPS%%\n\n"
-                "Respond with ONLY a JSON object, no markdown fences, matching this shape:\n"
-                '{"name": "<short column name>", "col_a": "<one of the available columns>", '
-                '"op": "<one of the available operators>", "col_b": "<one of the available '
-                'columns>", "explanation": "<one sentence>"}'
-            ),
-            "derived_column_context_suffix": (
-                "\n\nUser-provided documentation about this dataset - prefer it when "
-                "deciding what a column means or how a metric should be calculated:\n"
             ),
             "escalation_writeup": (
                 "You help draft a Slack message escalating a data-quality anomaly from "

@@ -274,10 +274,6 @@ LENDING_CONFIG = dict(
     mapping_cache_path=os.path.join(os.path.expanduser("~"), ".sc_analysis_column_mappings.json"),
     needs_status_map=False,
     domain_hint="loan-portfolio spreadsheet",
-    derived_hint="If your file provides Total GBV and Principal Value but not Expected Interest, "
-                 "or separate Principal / Interest / Fee columns but not Total Due, combine them "
-                 "here; the result becomes selectable in the mapping below.",
-    derived_placeholder="For example, Expected Interest, calculated as Total GBV minus Principal Value",
 )
 active_cfg = LENDING_CONFIG
 INPUT_COLUMNS = active_cfg["input_columns"]
@@ -1130,75 +1126,11 @@ def _format_normalize(raw: pd.DataFrame, date_fields, numeric_fields, model_fiel
     return raw
 
 
-DERIVED_OPS = {
-    "+": lambda a, b: a + b,
-    "-": lambda a, b: a - b,
-    "×": lambda a, b: a * b,
-    "÷": lambda a, b: a.divide(b).replace([float("inf"), float("-inf")], pd.NA),
-}
-
-
-def _apply_derived_columns(raw: pd.DataFrame, defs: list) -> pd.DataFrame:
-    for d in defs:
-        col_a = pd.to_numeric(raw[d["col_a"]], errors="coerce")
-        col_b = pd.to_numeric(raw[d["col_b"]], errors="coerce")
-        raw[d["name"]] = DERIVED_OPS[d["op"]](col_a, col_b)
-    return raw
-
-
 def _get_deepinfra_api_key():
     try:
         return st.secrets["DEEPINFRA_API_KEY"]
     except Exception:
         return os.environ.get("DEEPINFRA_API_KEY")
-
-
-def _suggest_derived_column(
-    user_request: str, columns: list, domain_hint: str, context: str = ""
-) -> dict:
-    """Ask DeepSeek V4 Flash (via DeepInfra) to turn a plain-English request into
-    a two-column formula using only the columns actually present in the file.
-    `context` is optional user-provided documentation about the dataset that the
-    model should prefer when interpreting column meaning."""
-    api_key = _get_deepinfra_api_key()
-    if not api_key:
-        raise RuntimeError("No DEEPINFRA_API_KEY found. Add it to Streamlit secrets or the environment.")
-
-    ops = list(DERIVED_OPS.keys())
-    system_prompt = app_config.render_prompt(
-        app_config.AI_PROMPTS["derived_column_suggestion"],
-        domain_hint=domain_hint, ops=", ".join(ops), columns=", ".join(columns),
-    ).strip()
-    if context.strip():
-        system_prompt += app_config.AI_PROMPTS["derived_column_context_suffix"] + context.strip()
-
-    resp = requests.post(
-        DEEPINFRA_CHAT_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": DEEPINFRA_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_request},
-            ],
-            "response_format": {"type": "json_object"},
-            "max_tokens": app_config.AI["derived_column_max_tokens"],
-        },
-        timeout=app_config.AI["request_timeout_seconds"],
-        verify=_ca_bundle_path(),
-    )
-    resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"]
-    suggestion = json.loads(content)
-
-    missing = [k for k in ("name", "col_a", "op", "col_b", "explanation") if k not in suggestion]
-    if missing:
-        raise ValueError(f"Model response missing fields: {', '.join(missing)}")
-    if suggestion["col_a"] not in columns or suggestion["col_b"] not in columns:
-        raise ValueError("Model suggested a column that isn't in your file.")
-    if suggestion["op"] not in DERIVED_OPS:
-        raise ValueError(f"Model suggested an unsupported operator: {suggestion['op']}")
-    return suggestion
 
 
 # Short human-readable meaning for each Data Input template field, used to prompt
@@ -2312,11 +2244,19 @@ def _read_tabular_file(uploaded) -> pd.DataFrame:
 
     with st.spinner("Reading file..."):
         xls = pd.ExcelFile(uploaded)
-        sheet_name = xls.sheet_names[0]
-    if len(xls.sheet_names) > 1:
+        # "_App Session" is a hidden bookkeeping sheet this app writes into
+        # its own exports (see _detect_restored_session) - never a candidate
+        # for loan-level data, so hide it from the picker entirely.
+        pickable_sheets = [s for s in xls.sheet_names if s != "_App Session"]
+        # Prefer "Data Input" as the default when present (e.g. re-uploading
+        # this app's own export) instead of blindly defaulting to whichever
+        # sheet happens to be first in the workbook.
+        default_sheet = "Data Input" if "Data Input" in pickable_sheets else pickable_sheets[0]
+        sheet_name = default_sheet
+    if len(pickable_sheets) > 1:
         sheet_name = st.selectbox(
             "This file has multiple sheets - which one has your loan-level data?",
-            options=xls.sheet_names, key="upload_sheet_name",
+            options=pickable_sheets, index=pickable_sheets.index(default_sheet), key="upload_sheet_name",
         )
 
     with st.spinner("Reading file..."):
@@ -2336,10 +2276,10 @@ def _detect_restored_session(file_bytes: bytes, name: str) -> dict | None:
     """If `file_bytes` is a workbook previously produced by 'Download full
     workbook as Excel' (i.e. it carries the hidden '_App Session' sheet
     written by _build_lending_export_workbook), return its embedded mapping/
-    currency/GI-overrides/derived-columns config so the upload flow can
-    pre-fill the mapping form to reproduce that run. Returns None for any
-    other file, or if the sheet is present but unreadable - this must never
-    block a normal upload."""
+    currency/GI-overrides config so the upload flow can pre-fill the mapping
+    form to reproduce that run. Returns None for any other file, or if the
+    sheet is present but unreadable - this must never block a normal
+    upload."""
     if not name or not name.lower().endswith(".xlsx"):
         return None
     try:
@@ -2404,7 +2344,6 @@ if st.session_state.get("uploaded_file_id") != file_id:
     st.session_state.pop("context_files", None)
     st.session_state.pop("context_documents", None)
     st.session_state.pop("context_doc_ids", None)
-    st.session_state["derived_columns"] = []
     for target, _ in INPUT_COLUMNS:
         st.session_state.pop(f"map_{target}", None)
 
@@ -2438,8 +2377,6 @@ if st.session_state.get("restored_session_checked_id") != file_id:
         _source_bytes = gdrive_pick["data"] if gdrive_pick else None
     restored = _detect_restored_session(_source_bytes, file_name) if _source_bytes else None
     st.session_state["restored_session"] = restored
-    if restored and restored.get("derived_columns"):
-        st.session_state["derived_columns"] = restored["derived_columns"]
 
 _active_model_fields = {c for c, _ in INPUT_COLUMNS} | _LENDING_EXTRA_FIELDS
 raw = _format_normalize(raw, DATE_FIELDS, NUMERIC_FIELDS, _active_model_fields)
@@ -2451,10 +2388,10 @@ st.caption("Columns in your file: " + ", ".join(map(str, raw.columns)))
 st.subheader("Additional context for the AI")
 st.caption(
     "Optional documentation about this dataset. The AI uses it to answer questions about "
-    "the analysis, to auto-fill the column mapping, and to suggest derived columns - for "
-    "example the loan product and currency, what each field means, or how interest and "
-    "fees are charged. You can type notes and/or upload supporting documents (PDF, Excel, "
-    "Word, text). Editing either re-runs the AI column-mapping suggestion."
+    "the analysis and to auto-fill the column mapping - for example the loan product and "
+    "currency, what each field means, or how interest and fees are charged. You can type "
+    "notes and/or upload supporting documents (PDF, Excel, Word, text). Editing either "
+    "re-runs the AI column-mapping suggestion."
 )
 st.text_area(
     "Context / notes",
@@ -2496,94 +2433,6 @@ if st.session_state.get("context_documents"):
         for doc in st.session_state["context_documents"]:
             st.markdown(f"**{doc['name']}**")
             st.text(_truncate_text(doc.get("text", ""), 3000))
-
-if "derived_columns" not in st.session_state:
-    st.session_state["derived_columns"] = []
-
-with st.expander("Derive a missing column from existing fields"):
-    st.caption(active_cfg["derived_hint"])
-    st.markdown("**Describe the calculation and let AI suggest the formula.**")
-    if st.session_state.pop("_clear_dc_ai_request", False):
-        st.session_state["dc_ai_request"] = ""
-    ai1, ai2 = st.columns([4, 1])
-    with ai1:
-        ai_request = st.text_area(
-            "Describe the calculation",
-            placeholder=active_cfg["derived_placeholder"],
-            key="dc_ai_request", height=70,
-        )
-    with ai2:
-        st.write("")
-        ask_ai = st.button("Suggest formula", key="dc_ai_ask")
-
-    if ask_ai:
-        if not ai_request.strip():
-            st.warning("Describe the calculation before requesting a suggestion.")
-        else:
-            try:
-                with st.spinner("Asking DeepSeek..."):
-                    st.session_state["dc_ai_suggestion"] = _suggest_derived_column(
-                        ai_request, list(raw.columns), active_cfg["domain_hint"],
-                        _ai_context_text(max_chars=20000, per_doc=6000),
-                    )
-            except Exception as e:
-                st.session_state["dc_ai_suggestion"] = None
-                st.error(f"Unable to generate a suggestion: {e}")
-
-    suggestion = st.session_state.get("dc_ai_suggestion")
-    if suggestion:
-        st.info(
-            f"**Suggested:** {suggestion['name']} = {suggestion['col_a']} "
-            f"{suggestion['op']} {suggestion['col_b']}\n\n{suggestion['explanation']}"
-        )
-        if st.button("Use this suggestion", key="dc_ai_use"):
-            name = suggestion["name"].strip()
-            existing_names = {d["name"] for d in st.session_state["derived_columns"]}
-            if name in raw.columns or name in existing_names:
-                base, i = name, 2
-                while f"{base} ({i})" in raw.columns or f"{base} ({i})" in existing_names:
-                    i += 1
-                name = f"{base} ({i})"
-            st.session_state["derived_columns"].append({
-                "name": name, "col_a": suggestion["col_a"], "op": suggestion["op"], "col_b": suggestion["col_b"],
-            })
-            st.session_state["dc_ai_suggestion"] = None
-            st.session_state["_clear_dc_ai_request"] = True
-            st.rerun()
-
-    st.markdown("**Or build it manually:**")
-    dc1, dc2, dc3, dc4 = st.columns([2, 2, 1, 2])
-    with dc1:
-        new_name = st.text_input("New column name", key="dc_name")
-    with dc2:
-        col_a = st.selectbox("Column A", options=list(raw.columns), key="dc_col_a")
-    with dc3:
-        op = st.selectbox("Operator", options=list(DERIVED_OPS.keys()), key="dc_op")
-    with dc4:
-        col_b = st.selectbox("Column B", options=list(raw.columns), key="dc_col_b")
-
-    if st.button("Add derived column", key="dc_add"):
-        existing_names = {d["name"] for d in st.session_state["derived_columns"]}
-        if not new_name.strip():
-            st.error("Give the derived column a name.")
-        elif new_name in raw.columns or new_name in existing_names:
-            st.error(f"'{new_name}' already exists - choose a different name.")
-        else:
-            st.session_state["derived_columns"].append({"name": new_name.strip(), "col_a": col_a, "op": op, "col_b": col_b})
-            st.rerun()
-
-    if st.session_state["derived_columns"]:
-        st.markdown("**Derived columns:**")
-        for i, d in enumerate(st.session_state["derived_columns"]):
-            rc1, rc2 = st.columns([5, 1])
-            rc1.write(f"`{d['name']}` = {d['col_a']} {d['op']} {d['col_b']}")
-            if rc2.button("Remove", key=f"dc_remove_{i}"):
-                st.session_state["derived_columns"].pop(i)
-                st.rerun()
-
-raw = _apply_derived_columns(raw, st.session_state["derived_columns"])
-if st.session_state["derived_columns"]:
-    st.dataframe(raw[[d["name"] for d in st.session_state["derived_columns"]]].head(10), width="stretch", height=150)
 
 cached_mapping = _load_cache(MAPPING_CACHE_PATH, _cache_key(raw.columns)) or {}
 if cached_mapping:
@@ -3294,7 +3143,7 @@ st.markdown("---")
 def _build_lending_export_workbook(
     df, cohorts, filtered, days_after_term, min_loans_per_cohort,
     ltv_data, ue_data, lending_chart_data, export_charts, term_supplied=False,
-    mapping=None, currency=None, derived_columns=None, extraction_date=None,
+    mapping=None, currency=None, extraction_date=None,
 ):
     """Cached on its inputs so it's only rebuilt when the analysis or queued
     custom charts actually change, rather than on every Streamlit rerun (e.g.
@@ -3410,10 +3259,10 @@ def _build_lending_export_workbook(
         cohorts.to_excel(writer, sheet_name="Cohorts", index=False)
         filtered.to_excel(writer, sheet_name="Cohorts for X or more loans", index=False)
 
-        # Embed the session config (mapping/currency/GI overrides/derived
-        # columns) as a hidden sheet so re-uploading this same file lets the
-        # app detect it and pre-fill the mapping form to reproduce this exact
-        # run, instead of the recipient re-mapping/re-tuning from scratch.
+        # Embed the session config (mapping/currency/GI overrides) as a
+        # hidden sheet so re-uploading this same file lets the app detect it
+        # and pre-fill the mapping form to reproduce this exact run, instead
+        # of the recipient re-mapping/re-tuning from scratch.
         if mapping is not None:
             session_cfg = {
                 "schema": 1,
@@ -3424,7 +3273,6 @@ def _build_lending_export_workbook(
                     "days_after_term": days_after_term,
                     "min_loans_per_cohort": min_loans_per_cohort,
                 },
-                "derived_columns": derived_columns or [],
             }
             cfg_ws = writer.book.create_sheet("_App Session")
             cfg_ws["A1"] = json.dumps(session_cfg)
@@ -3441,7 +3289,6 @@ if is_lending:
         term_supplied,
         mapping=st.session_state.get("analysis_mapping"),
         currency=st.session_state.get("analysis_currency"),
-        derived_columns=st.session_state.get("derived_columns"),
         extraction_date=gi.extraction_date,
     )
     file_name = f"SC_Analysis_Lending_{pd.Timestamp.now():%Y-%m-%d}.xlsx"
