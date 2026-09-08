@@ -87,18 +87,20 @@ def process_data_input(df: pd.DataFrame, extraction_date, days_after_term=90):
         # a true completion date, making the subtraction below meaningless.
         # Trust the given values over deriving anything from dates.
         result["Term (days)"] = pd.to_numeric(result["Term (days)"], errors="coerce")
+        maturity_date = result["Disbursement Date"] + pd.to_timedelta(
+            result["Term (days)"], unit="D"
+        )
     else:
         result["Term (days)"] = (
             result["Expected Completion Date"] - result["Disbursement Date"]
         ).dt.days
+        maturity_date = result["Expected Completion Date"]
 
     computed = _compute_total_due(result, extraction_date)
     if computed is not None:
         result["Total Due"] = computed
 
     cutoff = extraction_date - pd.Timedelta(days=days_after_term)
-    result["Reached T+3?"] = result["Expected Completion Date"].notna() & (
-        result["Expected Completion Date"] <= cutoff
-    )
+    result["Reached T+3?"] = maturity_date.notna() & (maturity_date <= cutoff)
 
     return result

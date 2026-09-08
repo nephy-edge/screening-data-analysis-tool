@@ -577,6 +577,21 @@ def nearest_tenor_bucket(months):
     return min(TENORS, key=lambda t: abs(t - months))
 
 
+def sector_min_loss_rate(segmentation, data_source):
+    """Sector-minimum stress loss floor for the given segmentation/data source - the same
+    lookup `compute_ltv` uses internally for its 'minimum_stress_loss' output, exposed
+    separately so a fallback loss rate can be chosen (e.g. when a portfolio has no computable
+    loss rate of its own) before the rest of the waterfall runs. Returns (floor, notes)."""
+    if data_source == "Observed":
+        return SECTOR_MIN_OBSERVED[segmentation], []
+    if segmentation not in SECTOR_MIN_SELF_REPORTED:
+        return SECTOR_MIN_OBSERVED[segmentation], [
+            f"No self-reported sector-minimum floor is defined for '{segmentation}' "
+            "in the source workbook - using the Observed floor instead."
+        ]
+    return SECTOR_MIN_SELF_REPORTED[segmentation], []
+
+
 def compute_ltv(
     gross_interest,
     term_months,
@@ -614,17 +629,8 @@ def compute_ltv(
     # --- Credit Stress Build Up ---
     credit_stress_factor = CREDIT_STRESS_FACTOR
     stress_loss_rate = loss_rate * credit_stress_factor
-    if data_source == "Observed":
-        minimum_stress_loss = SECTOR_MIN_OBSERVED[segmentation]
-    else:
-        if segmentation not in SECTOR_MIN_SELF_REPORTED:
-            notes.append(
-                f"No self-reported sector-minimum floor is defined for '{segmentation}' "
-                "in the source workbook - using the Observed floor instead."
-            )
-            minimum_stress_loss = SECTOR_MIN_OBSERVED[segmentation]
-        else:
-            minimum_stress_loss = SECTOR_MIN_SELF_REPORTED[segmentation]
+    minimum_stress_loss, floor_notes = sector_min_loss_rate(segmentation, data_source)
+    notes.extend(floor_notes)
     selected_stress_loss = max(stress_loss_rate, minimum_stress_loss)
 
     # --- LTGBV ---

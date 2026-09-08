@@ -54,7 +54,6 @@ def build_cohorts(df: pd.DataFrame, min_matured: int | None = None, matured_only
             "Total Fee": grouped["Expected Fee"].sum(),
             "Total Due": _agg(grouped, "Total Due"),
             "Total Paid": grouped["Total Paid"].sum(),
-            "Avg Term (days)": grouped["Term (days)"].mean(),
             "Weighted Avg Term": weighted_avg_term,
         }
     )
@@ -103,5 +102,22 @@ def build_cohorts(df: pd.DataFrame, min_matured: int | None = None, matured_only
     cohort_paid = _num(cohorts["Total Paid"])
     cohort_due = _num(cohorts["Total Due"])
     cohorts["PvD Ratio"] = (cohort_paid / cohort_due).where(cohort_due > 0)
+
+    # Per-cohort unit-economics metrics, for the Cohorts tab's chart builder
+    # and table. Mirrors the portfolio-level "Avg Loan Value"/"Expected Fee
+    # %"/"APR Proxy" metrics computed in app.py (ue_data, apr_proxy) - same
+    # formulas, just aggregated per cohort instead of across the whole tape.
+    total_principal = _num(cohorts["Total Principal"])
+    cohorts["Avg Loan Principal Size"] = (total_principal / cohorts["Loan Count"]).where(
+        cohorts["Loan Count"] != 0
+    )
+    cohorts["Avg Loan Fee % per cohort"] = (_num(cohorts["Total Fee"]) / total_principal).where(
+        total_principal != 0
+    )
+    interest_pct = (_num(cohorts["Total Interest"]) / total_principal).where(total_principal != 0)
+    weighted_avg_term_months = cohorts["Weighted Avg Term"] / 30.4375
+    cohorts["Avg Annualized Flat Interest Rate"] = (
+        (interest_pct / weighted_avg_term_months) * 12
+    ).where(weighted_avg_term_months != 0)
 
     return cohorts.reset_index(drop=True)

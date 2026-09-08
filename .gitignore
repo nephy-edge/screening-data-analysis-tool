@@ -12,13 +12,16 @@ env/
 # Local environment variables (never commit API keys)
 .env
 
-# Google Drive OAuth refresh token (local persistence; never commit)
-.google_drive_token.json
-
 # Certificates / credentials
 *.pem
 *.key
 *.crt
+
+# Defensive: never commit a cached OAuth token, even though the app no
+# longer writes this file itself (removed in the multi-user Google sign-in
+# change - a shared on-disk token cache was a correctness bug, not just a
+# secrets risk).
+.google_drive_token.json
 
 # Local session/state
 PROGRESS.md
@@ -36,6 +39,11 @@ certs/
 
 # Client/source workbooks — contains raw Astranova portfolio data; do not publish
 docs/
+
+# Per-user saved profiles / share snapshots (local dummy-login fallback store) —
+# contains real client loan tapes
+data/profiles/
+data/shares/
 
 # Client portfolio data files (workbooks, exports, raw dumps) — never publish
 *.xlsx

@@ -16,6 +16,7 @@ previously unified two-model version of this file.
 # than disabled project-wide, so logic-only files still enforce it.
 # ruff: noqa: E501
 
+import base64
 import io
 import json
 import os
@@ -74,10 +75,14 @@ from template_analysis.ltv_calculator import (  # noqa: E402
     FX_RISK_RATINGS as LTV_CALC_FX_RISK_RATINGS,
     HEDGE_TYPES as LTV_CALC_HEDGE_TYPES,
     nearest_tenor_bucket as ltv_calculator_nearest_tenor,
+    sector_min_loss_rate as ltv_calculator_sector_min_loss_rate,
     SEGMENTATIONS as LTV_CALC_SEGMENTATIONS,
     TENORS as LTV_CALC_TENORS,
 )
 from template_analysis.ue_analysis import UeAnalysis as LendingUeAnalysis  # noqa: E402
+
+import drive_store  # noqa: E402
+import profile_store  # noqa: E402
 
 DEEPINFRA_MODEL = app_config.AI["model"]
 DEEPINFRA_CHAT_URL = app_config.AI["chat_url"]
@@ -99,6 +104,172 @@ def _ca_bundle_path() -> str:
     tmp.write(bundle)
     tmp.close()
     return tmp.name
+
+
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+GOOGLE_DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
+# "My Google Drive" (browsing a file to analyze) only ever needs read access;
+# sign-in additionally needs an identity (openid/email/profile) and write
+# access scoped to files this app itself creates (drive.file, NOT full drive
+# access) so it can save/share a profile snapshot in the user's own Drive.
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+GOOGLE_LOGIN_SCOPE = (
+    "openid email profile "
+    "https://www.googleapis.com/auth/drive.readonly "
+    "https://www.googleapis.com/auth/drive.file"
+)
+# OAuth callback lands back on the app itself (the redirect URI registered in the
+# Google Cloud console) with ?code=...&state=... in the query string. For local
+# runs that's http://localhost:8501; override via GOOGLE_REDIRECT_URI for cloud.
+
+
+def _get_google_client_id():
+    try:
+        return st.secrets.get("GOOGLE_CLIENT_ID")
+    except Exception:
+        return os.environ.get("GOOGLE_CLIENT_ID")
+
+
+def _get_google_client_secret():
+    try:
+        return st.secrets.get("GOOGLE_CLIENT_SECRET")
+    except Exception:
+        return os.environ.get("GOOGLE_CLIENT_SECRET")
+
+
+def _google_redirect_uri() -> str:
+    uri = None
+    try:
+        uri = st.secrets.get("GOOGLE_REDIRECT_URI")
+    except Exception:
+        pass
+    uri = uri or os.environ.get("GOOGLE_REDIRECT_URI")
+    return uri or "http://localhost:8501"
+
+
+def _google_auth_url(state: str, scope: str = GOOGLE_DRIVE_SCOPE) -> str:
+    return (
+        f"{GOOGLE_AUTH_URL}?client_id={quote(_get_google_client_id())}"
+        f"&redirect_uri={quote(_google_redirect_uri())}"
+        f"&response_type=code&scope={quote(scope)}"
+        f"&access_type=offline&prompt=consent&state={quote(state)}"
+    )
+
+
+def _exchange_google_code(code: str) -> dict:
+    resp = requests.post(
+        GOOGLE_TOKEN_URL,
+        data={
+            "code": code,
+            "client_id": _get_google_client_id(),
+            "client_secret": _get_google_client_secret(),
+            "redirect_uri": _google_redirect_uri(),
+            "grant_type": "authorization_code",
+        },
+        timeout=30,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    token = resp.json()
+    token["expires_at"] = time.time() + int(token.get("expires_in", 3600))
+    return token
+
+
+def _refresh_google_token(refresh_token: str) -> dict:
+    resp = requests.post(
+        GOOGLE_TOKEN_URL,
+        data={
+            "client_id": _get_google_client_id(),
+            "client_secret": _get_google_client_secret(),
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        },
+        timeout=30,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    token = resp.json()
+    token["expires_at"] = time.time() + int(token.get("expires_in", 3600))
+    return token
+
+
+def _fetch_google_userinfo(access_token: str) -> dict:
+    resp = requests.get(
+        GOOGLE_USERINFO_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _gdrive_token() -> dict | None:
+    # Deliberately session-only, not cached to a local file: this app can now
+    # be signed into by multiple different real people (see
+    # _render_google_login_gate), and a shared on-disk token cache would leak
+    # whoever signed in most recently to the next visitor's fresh session.
+    return st.session_state.get("gdrive_token")
+
+
+def _gdrive_access_token(token: dict) -> str:
+    if time.time() >= token.get("expires_at", 0) - 60 and token.get("refresh_token"):
+        refreshed = _refresh_google_token(token["refresh_token"])
+        refreshed["refresh_token"] = token["refresh_token"]
+        st.session_state["gdrive_token"] = refreshed
+        return refreshed["access_token"]
+    return token["access_token"]
+
+
+def _encode_oauth_state(csrf: str, share_token: str | None) -> str:
+    payload = json.dumps({"csrf": csrf, "share": share_token or ""})
+    return base64.urlsafe_b64encode(payload.encode()).decode()
+
+
+def _decode_oauth_state(state: str) -> dict:
+    try:
+        return json.loads(base64.urlsafe_b64decode(state.encode()).decode())
+    except Exception:
+        return {}
+
+
+# CSRF tracking for the OAuth "state" param CANNOT live in st.session_state:
+# Google's redirect back to this app is a full page load, which tears down
+# the WebSocket connection and starts a brand-new Streamlit session with
+# empty session_state - so anything stashed in session_state right before
+# navigating to Google is already gone by the time the callback arrives, no
+# matter whether the link opened in the same tab or a new one. It also can't
+# be a plain module-level variable: Streamlit re-executes this whole script's
+# top-level code on every single rerun (that's how it works), so a bare
+# `= set()` here would be reset to empty on every rerun too, not just once
+# per process. @st.cache_resource is the actual "persists for the life of
+# this server process, shared across every session" mechanism (same pattern
+# _ca_bundle_path already uses above) - a real, single-use, unguessable
+# CSRF/replay check with nothing exposed to the client except the
+# accompanying `share` payload riding along inside `state`.
+@st.cache_resource
+def _pending_oauth_states() -> set:
+    return set()
+
+
+def _issue_oauth_state(share_token: str | None) -> str:
+    csrf = secrets.token_urlsafe(16)
+    _pending_oauth_states().add(csrf)
+    return _encode_oauth_state(csrf, share_token)
+
+
+def _consume_oauth_state(state: str) -> dict | None:
+    """Validate and single-use-consume an OAuth `state` value we issued.
+    Returns the decoded payload (e.g. {"csrf", "share"}) if valid, else None."""
+    decoded = _decode_oauth_state(state)
+    csrf = decoded.get("csrf")
+    pending = _pending_oauth_states()
+    if not csrf or csrf not in pending:
+        return None
+    pending.discard(csrf)
+    return decoded
 
 
 # ISO 4217 currencies covered by the open.er-api.com free FX endpoint - kept
@@ -347,6 +518,170 @@ render_cover(
     "Upload loan-level portfolio data, map your columns to the Data Input "
     "template, and the analysis is computed automatically across all sheets.",
 )
+
+
+def _render_dummy_login_gate() -> str:
+    """Fallback identity when no Google OAuth client is configured. This is
+    NOT a security boundary: the "user" here is whatever the visitor types
+    in, not verified by anyone - only used so per-user saved progress can be
+    built and tested before Google sign-in (or other real SSO) is set up."""
+    st.subheader("Sign in")
+    st.caption(
+        "Temporary sign-in while Google sign-in is being set up - this only identifies "
+        "you so your uploaded file, mapping, and Ask AI chat can be saved and picked back "
+        "up later. It is not a password and does not verify who you are."
+    )
+    email = st.text_input(
+        "Your Lendable email", key="login_email_input", placeholder="you@lendable.io"
+    )
+    if st.button("Continue", key="login_submit"):
+        if email.strip():
+            st.session_state["current_user"] = email.strip().lower()
+            st.session_state["auth_mode"] = "dummy"
+            st.rerun()
+        else:
+            st.warning("Enter your email to continue.")
+    st.stop()
+    return ""
+
+
+def _render_google_login_gate() -> str:
+    """Real "Sign in with Google" - Google verifies the email, unlike the
+    dummy text-box fallback. The same OAuth grant also carries Drive scopes
+    (drive.readonly for "My Google Drive" file picking, drive.file for
+    saving/sharing a profile snapshot in the user's own Drive - see
+    scripts/drive_store.py), so signing in doubles as connecting Drive; nothing
+    else has to separately "Connect Google Drive" afterwards.
+
+    A share link (?share=<id>) opened while signed out would otherwise lose
+    that query param across the Google redirect round-trip (the redirect URI
+    registered in Google Cloud is fixed and comes back with only ?code=&
+    state=) - so it's folded into the opaque `state` value and restored onto
+    st.query_params right before the post-login rerun."""
+    code = st.query_params.get("code")
+    state = st.query_params.get("state")
+    if code and state:
+        decoded = _consume_oauth_state(state)
+        if decoded is not None:
+            try:
+                with st.spinner("Signing in with Google..."):
+                    token = _exchange_google_code(code)
+                    userinfo = _fetch_google_userinfo(token["access_token"])
+            except Exception as e:
+                st.query_params.clear()
+                st.error(f"Google sign-in failed: {e}")
+                st.stop()
+                return ""
+            email = (userinfo.get("email") or "").strip().lower()
+            if not email:
+                st.query_params.clear()
+                st.error("Google didn't return an email address for this account.")
+                st.stop()
+                return ""
+            st.session_state["current_user"] = email
+            st.session_state["auth_mode"] = "google"
+            st.session_state["gdrive_token"] = token
+            share_token = decoded.get("share")
+            st.query_params.clear()
+            if share_token:
+                st.query_params["share"] = share_token
+            st.rerun()
+            return ""
+        st.query_params.clear()
+
+    st.subheader("Sign in")
+    st.caption(
+        "Sign in with your Lendable Google account. This also lets the app save your "
+        "progress to your own Google Drive, and load analyses shared with you from there."
+    )
+    state_param = _issue_oauth_state(st.query_params.get("share"))
+    auth_url = _google_auth_url(state_param, scope=GOOGLE_LOGIN_SCOPE)
+    # A plain same-tab anchor, not st.link_button (which always opens a new
+    # tab) - same-tab keeps the user from ending up with a stale "Sign in"
+    # tab left open next to the one Google redirected back into.
+    st.markdown(
+        f'<a href="{auth_url}" target="_self" style="display:inline-block;padding:0.5em 1em;'
+        'border:1px solid rgba(49,51,63,0.2);border-radius:0.5em;text-decoration:none;">'
+        "Sign in with Google</a>",
+        unsafe_allow_html=True,
+    )
+    st.stop()
+    return ""
+
+
+def _render_login_gate() -> str:
+    if st.session_state.get("current_user"):
+        return st.session_state["current_user"]
+    if _get_google_client_id() and _get_google_client_secret():
+        return _render_google_login_gate()
+    return _render_dummy_login_gate()
+
+
+def _auth_mode() -> str:
+    return st.session_state.get("auth_mode", "dummy")
+
+
+def _store_has_profile() -> bool:
+    if _auth_mode() == "google":
+        try:
+            token = _gdrive_access_token(st.session_state["gdrive_token"])
+        except Exception:
+            return False
+        return drive_store.has_profile(token)
+    return profile_store.has_profile(st.session_state.get("current_user", ""))
+
+
+def _store_load_profile() -> dict | None:
+    if _auth_mode() == "google":
+        try:
+            token = _gdrive_access_token(st.session_state["gdrive_token"])
+        except Exception:
+            return None
+        return drive_store.load_profile(token)
+    return profile_store.load_profile(st.session_state.get("current_user", ""))
+
+
+def _store_save_profile(**snapshot_kwargs) -> None:
+    """Best-effort: never raises, since auto-save must not block the analysis."""
+    try:
+        if _auth_mode() == "google":
+            token = _gdrive_access_token(st.session_state["gdrive_token"])
+            drive_store.save_profile(token, **snapshot_kwargs)
+        else:
+            profile_store.save_profile(st.session_state.get("current_user", ""), **snapshot_kwargs)
+    except Exception:
+        pass
+
+
+def _store_create_share(**snapshot_kwargs) -> str:
+    current_user = st.session_state.get("current_user", "")
+    if _auth_mode() == "google":
+        token = _gdrive_access_token(st.session_state["gdrive_token"])
+        return drive_store.create_share(token, current_user, **snapshot_kwargs)
+    return profile_store.create_share(current_user, **snapshot_kwargs)
+
+
+def _store_load_share(share_id: str) -> dict | None:
+    if _auth_mode() == "google":
+        try:
+            token = _gdrive_access_token(st.session_state["gdrive_token"])
+        except Exception:
+            return None
+        return drive_store.load_share(token, share_id)
+    return profile_store.load_share(share_id)
+
+
+current_user = _render_login_gate()
+_user_bar_l, _user_bar_r = st.columns([5, 1], vertical_alignment="center")
+with _user_bar_l:
+    if _auth_mode() == "google":
+        st.caption(f"Signed in as **{current_user}** via Google")
+    else:
+        st.caption(f"Signed in as **{current_user}** (temporary sign-in, not yet real SSO)")
+with _user_bar_r:
+    if st.button("Log out", key="logout_btn"):
+        st.session_state.clear()
+        st.rerun()
 
 feedback_col = st.columns([5, 1], vertical_alignment="bottom")[1]
 
@@ -832,6 +1167,60 @@ def _negative_loss_rate_check(cohorts: pd.DataFrame) -> list[dict]:
     return checks
 
 
+def _expected_interest_equals_fee_check(raw: pd.DataFrame) -> list[dict]:
+    """Flags when Expected Interest and Expected Fee are identical (and
+    non-zero) for a material share of loans - not two independently priced
+    revenue components but, almost certainly, Expected Fee populated as a
+    copy of Expected Interest (or both mapped to the same source column)
+    somewhere upstream of this file. Negative-valued rows within that set are
+    the most urgent subset - a negative fee/interest actively understates
+    Product Interest Rate and fee-related metrics rather than just being
+    suspicious - so the detail table sorts those to the top."""
+    checks: list[dict] = []
+    if "Expected Interest" not in raw.columns or "Expected Fee" not in raw.columns:
+        return checks
+    interest = pd.to_numeric(raw["Expected Interest"], errors="coerce")
+    fee = pd.to_numeric(raw["Expected Fee"], errors="coerce")
+    dup_mask = (interest == fee) & interest.notna() & (interest != 0)
+    if not dup_mask.any():
+        return checks
+    share = dup_mask.mean()
+    id_field = LENDING_CONFIG["id_field"]
+    cols = [
+        c
+        for c in (
+            id_field,
+            "Disbursement Date",
+            "Principal Value",
+            "Expected Interest",
+            "Expected Fee",
+        )
+        if c in raw.columns
+    ]
+    detail = raw.loc[dup_mask, cols].sort_values("Expected Fee")
+    n_negative = int((fee[dup_mask] < 0).sum())
+    checks.append(
+        {
+            "level": "warning",
+            "check_id": "expected_interest_equals_fee",
+            "message": (
+                f"**Expected Interest = Expected Fee** - {dup_mask.sum():,} loan(s) "
+                f"({share:.0%} of the tape) have an identical, non-zero Expected Interest and "
+                "Expected Fee value - almost certainly a data issue (Expected Fee populated as "
+                "a copy of Expected Interest, or both fields mapped to the same source column) "
+                "rather than two genuinely distinct revenue components. "
+                f"{n_negative} of these are also negative, which directly understates Product "
+                "Interest Rate and fee-related metrics rather than just being suspicious. "
+                "Verify with the source before trusting Product Interest Rate, Expected Fee %, "
+                "or Avg Total Revenue."
+            ),
+            "detail": detail,
+            "detail_expander": f"View {dup_mask.sum():,} loan(s) where Expected Interest = Expected Fee",
+        }
+    )
+    return checks
+
+
 def _cohort_coverage_note(cohorts: pd.DataFrame) -> list[dict]:
     """Surfaces the exact date range and month count behind the cohort-level
     metrics, so a mismatch against a previously-downloaded Excel/Google
@@ -903,12 +1292,14 @@ def _lending_data_quality_checks(
     raw: pd.DataFrame, cohorts: pd.DataFrame, gi=None, filtered: pd.DataFrame = None
 ) -> list[dict]:
     """Lending: Step 2 checks (shared) + Step 4 loss-rate variance diagnosis
-    + negative-loss-rate flag + cohort-coverage note + General Inputs
-    sanity check (min loans/cohort vs this file's own cohort count)."""
+    + negative-loss-rate flag + Expected-Interest-equals-Expected-Fee flag +
+    cohort-coverage note + General Inputs sanity check (min loans/cohort vs
+    this file's own cohort count)."""
     checks = (
         _step2_data_quality_checks(raw, LENDING_CONFIG)
         + _lending_variance_check(cohorts)
         + _negative_loss_rate_check(cohorts)
+        + _expected_interest_equals_fee_check(raw)
         + _cohort_coverage_note(cohorts)
     )
     if gi is not None and filtered is not None:
@@ -950,6 +1341,45 @@ def _render_snapshot_table(rows: list) -> None:
             f'<tr><td>{_esc(name)}<span class="q">?<span class="tip">{_esc(desc)}</span></span></td>'
             f'<td class="val">{_esc(value)}</td></tr>'
             for name, value, desc in rows
+        )
+        + "</tbody></table></div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _matrix_row_html(row_label: str, row_values: list, is_big: bool) -> str:
+    tr_class = ' class="bigrow"' if is_big else ""
+    cells = "".join(f"<td>{_esc(v)}</td>" for v in row_values)
+    return f'<tr{tr_class}><td class="rowhead">{_esc(row_label)}</td>{cells}</tr>'
+
+
+def _render_matrix_table(
+    row_labels: list, col_labels: list, values: list, big_row: int | None = None
+) -> None:
+    """A small 2D metric matrix (row label x column label -> formatted value), styled like
+    _render_snapshot_table but with a header row of column labels instead of a single "Value"
+    column - e.g. FX High/No FX/FX Low (rows) x Advance on Principal/Advance on GBV (columns).
+    `values` is a list of rows, each a list of already-formatted strings, indexed [row][col] to
+    match row_labels/col_labels. `big_row`, if given, renders that row's values large/bold/green
+    - like the big-number cards used elsewhere on this page - so one headline row (e.g. the
+    stressed FX-high scenario) stands out above the rest of the matrix."""
+    html = (
+        """
+        <style>
+        div.matrix-table table{border-collapse:collapse;font-family:"Inter",sans-serif;font-size:.82rem;}
+        div.matrix-table th{padding:8px 12px;text-align:left;border-bottom:1px solid #D8DEE5;font-weight:600;color:#16312E;}
+        div.matrix-table td{padding:7px 12px;border-bottom:1px solid #D8DEE5;color:#16312E;}
+        div.matrix-table th.rowhead, div.matrix-table td.rowhead{color:#525252;font-weight:400;}
+        div.matrix-table tr.bigrow td{font-size:1.4rem;font-weight:700;color:#2ca02c;padding:16px 12px;}
+        div.matrix-table tr.bigrow td.rowhead{font-size:.82rem;font-weight:600;color:#16312E;}
+        </style>
+        <div class="matrix-table">
+        <table>
+          <thead><tr><th class="rowhead"></th>"""
+        + "".join(f"<th>{_esc(c)}</th>" for c in col_labels)
+        + "</tr></thead><tbody>"
+        + "".join(
+            _matrix_row_html(row_labels[r], values[r], r == big_row) for r in range(len(row_labels))
         )
         + "</tbody></table></div>"
     )
@@ -1016,8 +1446,7 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
 
     Two workbook rows aren't replicated: 'IRR of cash flow' and 'Net Unit Economics (Cash Flow)'
     both need a full monthly repayment + loss + cost cash-flow schedule (XIRR/XNPV at WACC) that
-    this app doesn't build. 'Net Unit Economics (simplified)' below is a single-period proxy for
-    that figure, not a replacement for it.
+    this app doesn't build - 'Net IRR' above is a straight-line approximation, not that schedule.
     """
     principal = df["Principal Value"].sum()
     revenue = df["Expected Interest"].sum()
@@ -1028,20 +1457,31 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
     matured_revenue = matured["Expected Interest"].sum()
     matured_origination_income = matured["Expected Fee"].sum()
     matured_owed = matured_principal + matured_revenue + matured_origination_income
-    losses_dollar = matured_owed - matured["Total Paid"].sum() if matured_owed else float("nan")
-    losses_pct_of_gbv = (
-        losses_dollar / principal if principal and pd.notna(losses_dollar) else float("nan")
+
+    actual_loss_rate = (
+        (matured_owed - matured["Total Paid"].sum()) / matured_owed
+        if matured_owed
+        else float("nan")
     )
+    proxy_loss_rate = ue_data["Loss Rate Proxy (1-PvD)"]
+
     matured_term_m = (
         (matured["Term (days)"] * matured["Principal Value"]).sum() / matured_principal / 30.4375
         if matured_principal
         else float("nan")
     )
 
-    rates = principal_weighted_average_rates(df)
-    implied_interest = rates["APR"]
     term_m = ue_data["Average Expected Term"] / 30.4375
+    # Internal estimated APR: a simple flat-rate annualization (Product Interest Rate / term in
+    # months x 12), doubled - the x2 approximates the jump from a flat rate (quoted against the
+    # full, undeclining principal) to the equivalent rate against a declining balance, where the
+    # borrower's average outstanding principal over the loan's life is roughly half of the
+    # original amount. Replaces the previous amortization-solved nominal APR (this function no
+    # longer calls principal_weighted_average_rates - that solve is still used independently for
+    # the Summary tab's EAR figure).
+    implied_interest = (ue_data["Average Interest %"] / term_m) * 12 * 2 if term_m else float("nan")
 
+    st.markdown("")
     _ue_model_badge("Manual inputs (not in a loan tape)", "#f5d90a", "#16312E")
     st.caption(
         "The master workbook needs these to complete the Unit Economics picture, but they're cost "
@@ -1108,6 +1548,42 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
         / 100
     )
 
+    st.markdown("")
+    st.markdown("**Loss Rate**")
+    loss_rate_choice = st.selectbox(
+        "Loss Rate used below",
+        options=["Actual Loss Rate", "Proxy Loss Rate (1-PvD)", "Input"],
+        key="ue_ai_loss_rate_choice",
+        help="Feeds Loss %, Income (net losses), Product contribution and the IRR cards below. "
+        "Actual Loss Rate: (matured owed - matured paid) / matured owed - "
+        "the same figure as the Summary tab's Loss Rate. Proxy Loss Rate (1-PvD): "
+        "1 - Total Paid / Total Due across the whole book (needs Total Due mapped - n/a "
+        "otherwise). Input: type in your own assumption.",
+    )
+    if loss_rate_choice == "Actual Loss Rate":
+        loss_rate = actual_loss_rate
+    elif loss_rate_choice == "Proxy Loss Rate (1-PvD)":
+        loss_rate = proxy_loss_rate
+    else:
+        loss_rate = (
+            st.number_input(
+                "Loss Rate (%)",
+                min_value=0.0,
+                value=(actual_loss_rate * 100 if pd.notna(actual_loss_rate) else 0.0),
+                step=0.1,
+                format="%.2f",
+                key="ue_ai_loss_rate_input",
+            )
+            / 100
+        )
+
+    losses_dollar = (
+        loss_rate * matured_owed if pd.notna(loss_rate) and matured_owed else float("nan")
+    )
+    losses_pct_of_gbv = (
+        losses_dollar / principal if principal and pd.notna(losses_dollar) else float("nan")
+    )
+
     n_matured = len(matured)
     avg_principal_matured = matured_principal / n_matured if n_matured else float("nan")
     avg_fee_matured = matured_origination_income / n_matured if n_matured else float("nan")
@@ -1124,7 +1600,6 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
         and pd.notna(losses_dollar)
         and matured_owed
     ):
-        loss_rate = losses_dollar / matured_owed
         cf0 = -avg_principal_matured + avg_fee_matured - (upfront_cost_pct * avg_principal_matured)
         monthly_cf = (avg_gbv_matured / n_periods) * (1 - loss_rate) - (
             ongoing_cost_pct * avg_principal_matured / n_periods
@@ -1179,12 +1654,10 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
         variable_costs_dollar = variable_costs_pct * matured_principal
         product_contribution = income_net_losses - variable_costs_dollar
         product_margin = product_contribution / matured_principal
-        net_ue_simple = product_margin - cost_of_finance_over_term
     else:
         income_net_losses = income_net_losses_margin = float("nan")
         variable_costs_dollar = float("nan")
         product_contribution = product_margin = float("nan")
-        net_ue_simple = float("nan")
 
     st.markdown("")
     _ue_model_badge("Auto-calculated from your data", "#2ca02c", "#fff")
@@ -1194,7 +1667,7 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
                 "Product Interest Rate",
                 fmt(ue_data["Average Interest %"]),
                 "Total expected interest income as a % of total principal disbursed, across all loans - "
-                "the stated interest on the product, not the solved-for APR below.",
+                "the stated interest on the product, not the estimated APR below.",
             ),
             (
                 "Origination Income %",
@@ -1202,9 +1675,12 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
                 "Total expected fee income as a % of total principal disbursed, across all loans.",
             ),
             (
-                "Implied Interest (APR) %",
+                "Estimated APR",
                 fmt(implied_interest),
-                "Nominal APR: principal-weighted average implied rate, same figure as the Cohorts Stats tab.",
+                "Internal estimated APR: Product Interest Rate divided by the average weighted "
+                "monthly term, times 12, times 2 - a flat-rate annualization doubled to "
+                "approximate the equivalent declining-balance rate (not the Summary tab's EAR, "
+                "which is solved independently via amortization).",
             ),
             (
                 "Implied Monthly Interest %",
@@ -1244,11 +1720,6 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
                 "Matured-only Revenue + Origination Income - Losses, as a % of matured-loan GBV.",
             ),
             (
-                "Variable costs",
-                f"${variable_costs_dollar:,.0f}" if pd.notna(variable_costs_dollar) else "n/a",
-                "(Upfront + ongoing costs %) x matured-loan GBV.",
-            ),
-            (
                 "Variable costs (% of GBV)",
                 fmt(variable_costs_pct),
                 "Sum of the two cost %s entered above.",
@@ -1270,21 +1741,9 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
                 fmt(cost_of_finance_over_term),
                 f"Cost of Finance (% p.a.) x matured loans' own weighted term ({fmt(matured_term_m, '{:,.1f}')} "
                 "months) / 12 - not the full-book Term (m) above, which covers a different, longer-duration "
-                "population. Grossed up so it's comparable to Product contribution before being netted below.",
-            ),
-            (
-                "Net Unit Economics (simplified)",
-                fmt(net_ue_simple),
-                "Product contribution - Cost of Finance (over loan life). A single-period proxy for the "
-                "workbook's cash-flow-basis Net Unit Economics - see the caption below.",
+                "population. Grossed up so it's comparable to Product contribution.",
             ),
         ]
-    )
-    st.caption(
-        "Not replicated: 'IRR of cash flow' and 'Net Unit Economics (Cash Flow)'. Both need a full "
-        "monthly repayment + loss + cost cash-flow schedule (XIRR/XNPV at WACC), which this app "
-        "doesn't build - 'Net Unit Economics (simplified)' above is a proxy, not that figure, and "
-        "'Net IRR' at the top of this tab is a straight-line approximation, not that schedule either."
     )
     return {
         "revenue": revenue,
@@ -1300,7 +1759,6 @@ def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
         "income_net_losses_margin": income_net_losses_margin,
         "product_margin": product_margin,
         "cost_of_finance_pct": cost_of_finance_pct,
-        "net_ue_simple": net_ue_simple,
         "gross_irr": gross_irr,
         "net_irr": net_irr,
     }
@@ -1758,6 +2216,7 @@ def _column_stats_tooltip(series: pd.Series, numeric: bool) -> str:
         return (
             f"Count: {s.count():,}\n"
             f"Nulls: {nulls:,}\n"
+            f"Sum: {s.sum():,.2f}\n"
             f"Mean: {s.mean():,.2f}\n"
             f"Median: {s.median():,.2f}\n"
             f"Std Dev: {s.std():,.2f}\n"
@@ -1796,9 +2255,21 @@ def _render_cohorts_grid(df: pd.DataFrame, bins: int = 10, height: int = 420):
     datetime64 into plain strings for every consumer downstream, not just
     this grid."""
     df = df.copy()
-    money_cols = {"Total Principal", "Total Interest", "Total Fee", "Total Due", "Total Paid"}
-    term_cols = {"Avg Term (days)", "Weighted Avg Term"}
-    pct_cols = {"PvD Ratio", "Loss Rate"}
+    money_cols = {
+        "Total Principal",
+        "Total Interest",
+        "Total Fee",
+        "Total Due",
+        "Total Paid",
+        "Avg Loan Principal Size",
+    }
+    term_cols = {"Weighted Avg Term"}
+    pct_cols = {
+        "PvD Ratio",
+        "Loss Rate",
+        "Avg Loan Fee % per cohort",
+        "Avg Annualized Flat Interest Rate",
+    }
     column_formatters = {
         **{c: _FMT_MONEY_JS for c in money_cols},
         **{c: _FMT_INT_JS for c in term_cols},
@@ -1832,6 +2303,75 @@ def _render_cohorts_grid(df: pd.DataFrame, bins: int = 10, height: int = 420):
         if col in column_formatters:
             kwargs["valueFormatter"] = column_formatters[col]
         gb.configure_column(col, **kwargs)
+    grid_options = gb.build()
+    grid_options["headerHeight"] = 54
+    grid_options["tooltipShowDelay"] = 200
+    AgGrid(
+        df,
+        gridOptions=grid_options,
+        height=height,
+        allow_unsafe_jscode=True,
+        theme="streamlit",
+        show_toolbar=False,
+        show_search=False,
+        show_download_button=False,
+    )
+
+
+def _render_data_input_grid(df: pd.DataFrame, bins: int = 10, height: int = 400):
+    """Raw uploaded-data preview, styled like the Cohorts table: a
+    distribution histogram + hover stats (count/nulls/sum/mean/median/std/
+    min/max) in each numeric column's header, a filter per column, and the
+    column menu (opened via the header's "..." icon) always visible instead
+    of only on hover.
+
+    Streamlit's native st.dataframe can't do the always-visible menu icon -
+    it's built on glide-data-grid, which renders to a <canvas>, so there's no
+    DOM/CSS to target and no exposed config for the hover behavior. AgGrid's
+    suppressMenuHide is the documented option for it - but two things must be
+    true for it to actually work in this AG Grid build: columnMenu must be
+    forced back to "legacy" mode (this bundle's newer default "new" mode
+    drops the classic header icon entirely, regardless of suppressMenuHide),
+    and suppressMenuHide itself must be set as a grid-level option, not a
+    per-column one - it moved from colDef to GridOptions in a later AG Grid
+    version, so setting it per-column (the documented colDef-era usage) is
+    silently ignored here. Note the histogram header (numeric columns only,
+    same as the Cohorts table) replaces AG Grid's default header rendering
+    entirely, which does not include the menu-icon markup - so numeric
+    columns show the histogram instead of the always-visible menu icon,
+    matching how the Cohorts table already behaves."""
+    df = df.copy()
+    money_cols = {"Total Paid", "Expected Interest", "Expected Fee", "Principal Value"}
+    gb = GridOptionsBuilder.from_dataframe(df)
+    gb.configure_default_column(
+        resizable=True,
+        sortable=True,
+        filter=True,
+        floatingFilter=True,
+    )
+    for col in df.columns:
+        is_numeric = pd.api.types.is_numeric_dtype(df[col])
+        tooltip = _column_stats_tooltip(df[col], is_numeric)
+        if not is_numeric:
+            gb.configure_column(col, headerTooltip=tooltip, menuTabs=["filterMenuTab"])
+            continue
+        series = pd.to_numeric(df[col], errors="coerce").dropna()
+        counts = (
+            pd.cut(series, bins=bins).value_counts(sort=False).tolist()
+            if series.nunique() > 1
+            else []
+        )
+        kwargs = dict(
+            headerComponent=_HISTOGRAM_HEADER_JS,
+            headerComponentParams={"histogram": counts},
+            headerTooltip=tooltip,
+            filter="agNumberColumnFilter",
+            menuTabs=["filterMenuTab"],
+        )
+        if col in money_cols:
+            kwargs["valueFormatter"] = _FMT_MONEY_JS
+        gb.configure_column(col, **kwargs)
+    gb.configure_grid_options(columnMenu="legacy", suppressMenuHide=True)
     grid_options = gb.build()
     grid_options["headerHeight"] = 54
     grid_options["tooltipShowDelay"] = 200
@@ -1887,6 +2427,8 @@ def _render_custom_visualizations_tab(
     key_prefix: str = "cv",
     header: bool = True,
     simple: bool = False,
+    fixed_x: str | None = None,
+    y_label: str = "Y axis",
 ):
     """Generic ad-hoc chart builder shared by both models. `data_sources` maps
     a display name to the DataFrame it plots from for the active model - the
@@ -1896,7 +2438,17 @@ def _render_custom_visualizations_tab(
     page run without colliding with another instance's state. `simple=True`
     drops the multi-card/Excel-export machinery (per-card header, "add to
     export"/"remove card"/"add another chart" buttons, the export queue) for
-    a single-chart embedding like the Cohorts tab's."""
+    a single-chart embedding like the Cohorts tab's.
+
+    The Data source selector is dropped automatically when `data_sources` has
+    only one entry (that entry is used directly) - the Cohorts tab embedding
+    passes a single-source dict for exactly this reason, since letting the
+    user switch away from the cohort-level table there doesn't make sense.
+    `fixed_x`, when set, drops the X axis selector and always plots against
+    that column instead (again, the Cohorts tab: every chart there is "by
+    Cohort"). `y_label` renames the Y axis selector - e.g. "Metric" for the
+    Cohorts tab, since its Y options are all per-cohort metrics, not just one
+    of several plottable fields."""
     if header:
         st.subheader("Custom Visualizations")
         st.caption(
@@ -1913,11 +2465,16 @@ def _render_custom_visualizations_tab(
         def k(name):
             return f"{key_prefix}_{name}_{card_id}"
 
-        cv1, cv2 = st.columns([1, 1])
-        with cv1:
-            source_name = st.selectbox(
-                "Data source", options=list(data_sources.keys()), key=k("source")
-            )
+        show_source = len(data_sources) > 1
+        if show_source:
+            cv1, cv2 = st.columns([1, 1])
+            with cv1:
+                source_name = st.selectbox(
+                    "Data source", options=list(data_sources.keys()), key=k("source")
+                )
+        else:
+            source_name = next(iter(data_sources))
+            cv2 = st.container()
         source_df = data_sources[source_name]
         if source_df is None or source_df.empty:
             st.info("This data source has no rows to plot.")
@@ -1958,14 +2515,19 @@ def _render_custom_visualizations_tab(
                 key=k("kind"),
             )
 
-        cv3, cv4, cv5, cv6 = st.columns(4)
-        with cv3:
-            x_col = st.selectbox(
-                "X axis", options=all_cols, index=all_cols.index(default_x), key=k("x")
-            )
+        show_x = fixed_x is None
+        if show_x:
+            cv3, cv4, cv5, cv6 = st.columns(4)
+            with cv3:
+                x_col = st.selectbox(
+                    "X axis", options=all_cols, index=all_cols.index(default_x), key=k("x")
+                )
+        else:
+            x_col = fixed_x if fixed_x in all_cols else default_x
+            cv4, cv5, cv6 = st.columns(3)
         with cv4:
             y_col = st.selectbox(
-                "Y axis", options=y_options, index=y_options.index(default_y), key=k("y")
+                y_label, options=y_options, index=y_options.index(default_y), key=k("y")
             )
         with cv5:
             color_col = st.selectbox(
@@ -1982,7 +2544,7 @@ def _render_custom_visualizations_tab(
             line_options = ["(none)"] + [c for c in numeric_cols if c not in (x_col, y_col)]
             default_line = "Loss Rate" if "Loss Rate" in line_options else "(none)"
             line_choice = st.selectbox(
-                "Add a line (optional)",
+                "Add secondary line (optional)",
                 options=line_options,
                 index=line_options.index(default_line),
                 key=k("line"),
@@ -2215,7 +2777,10 @@ def _build_lending_chat_context(
         f"Count are therefore the same figure. Columns: {', '.join(cohorts.columns)}.",
         "Loss Rate per cohort is NaN when its Matured Count is below the minimum-loans threshold "
         "(too few matured loans to be statistically meaningful).",
-        cohorts.to_csv(index=False),
+        # JSON, not CSV: easier for the model to parse reliably (per Niraj's suggestion in the
+        # 2026-09-03 catch-up) and avoids the risk of a value containing a comma being misread
+        # as a column boundary.
+        cohorts.to_json(orient="records", date_format="iso"),
         "",
         "## UE Model (AI) tab - matured-loans-only unit economics",
         "This tab replicates the master UE Model workbook's 'For AI' sheet. Figures below with "
@@ -2225,7 +2790,7 @@ def _build_lending_chat_context(
         "against a small realized-loss sample.",
         f"Revenue (interest, full book): ${ue_model_ai_data['revenue']:,.0f}. "
         f"Origination Income (full book): ${ue_model_ai_data['origination_income']:,.0f}.",
-        "Implied Interest (annualized nominal APR, amortization-solved, full book): "
+        "Estimated APR (Product Interest Rate / avg weighted monthly term x 12 x 2, full book): "
         + fmt(ue_model_ai_data["implied_interest"]),
         f"Losses (matured-only $, owed-paid): ${ue_model_ai_data['losses_dollar']:,.0f}. "
         f"Losses as a literal % of total book GBV: {fmt(ue_model_ai_data['losses_pct_of_gbv'])}.",
@@ -2238,8 +2803,6 @@ def _build_lending_chat_context(
         + fmt(ue_model_ai_data["product_margin"]),
         "User-entered Cost of Finance (% p.a., 0 unless the user filled it in): "
         + fmt(ue_model_ai_data["cost_of_finance_pct"]),
-        "Net Unit Economics (simplified proxy, NOT a true XIRR/XNPV cash-flow figure): "
-        + fmt(ue_model_ai_data["net_ue_simple"]),
         "'IRR of cash flow' and the workbook's true cash-flow-basis 'Net Unit Economics' are NOT "
         "computed by this app - they'd need a full monthly repayment/loss/cost schedule.",
     ]
@@ -2256,7 +2819,12 @@ def _render_ai_chat_tab(context: str) -> None:
     st.caption(
         "Ask about the metrics and calculations on the other tabs. The assistant only sees the "
         "aggregated summary statistics below (cohort tables and portfolio-level figures) - never "
-        "individual loan rows - so it can't answer questions about a specific loan ID."
+        "individual loan rows - so it can't answer questions about a specific loan ID. It's also "
+        "restricted to this portfolio's data - it won't answer general-knowledge questions."
+    )
+    st.warning(
+        "AI-generated - it can make mistakes. Please verify anything important against the "
+        "other tabs before relying on it."
     )
     with st.expander("What the assistant can see"):
         st.text(context)
@@ -2287,6 +2855,7 @@ def _render_ai_chat_tab(context: str) -> None:
                 answer = f"Unable to get a response: {e}"
             st.markdown(answer)
         st.session_state["ai_chat_history"].append({"role": "assistant", "content": answer})
+        _save_profile_snapshot()
 
 
 def _write_custom_charts_sheet(writer, export_charts):
@@ -2404,121 +2973,6 @@ def _download_google_sheet(url: str) -> tuple[bytes, str]:
     return data, name
 
 
-GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-GOOGLE_DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
-GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
-# OAuth callback lands back on the app itself (the redirect URI registered in the
-# Google Cloud console) with ?code=...&state=... in the query string. For local
-# runs that's http://localhost:8501; override via GOOGLE_REDIRECT_URI for cloud.
-GDRIVE_TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".google_drive_token.json")
-
-
-def _get_google_client_id():
-    try:
-        return st.secrets.get("GOOGLE_CLIENT_ID")
-    except Exception:
-        return os.environ.get("GOOGLE_CLIENT_ID")
-
-
-def _get_google_client_secret():
-    try:
-        return st.secrets.get("GOOGLE_CLIENT_SECRET")
-    except Exception:
-        return os.environ.get("GOOGLE_CLIENT_SECRET")
-
-
-def _google_redirect_uri() -> str:
-    uri = None
-    try:
-        uri = st.secrets.get("GOOGLE_REDIRECT_URI")
-    except Exception:
-        pass
-    uri = uri or os.environ.get("GOOGLE_REDIRECT_URI")
-    return uri or "http://localhost:8501"
-
-
-def _load_gdrive_token_file() -> dict | None:
-    try:
-        with open(GDRIVE_TOKEN_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _save_gdrive_token_file(token: dict) -> None:
-    try:
-        with open(GDRIVE_TOKEN_FILE, "w", encoding="utf-8") as f:
-            json.dump(token, f, indent=2)
-    except OSError:
-        pass
-
-
-def _google_auth_url(state: str) -> str:
-    return (
-        f"{GOOGLE_AUTH_URL}?client_id={quote(_get_google_client_id())}"
-        f"&redirect_uri={quote(_google_redirect_uri())}"
-        f"&response_type=code&scope={quote(GOOGLE_DRIVE_SCOPE)}"
-        f"&access_type=offline&prompt=consent&state={quote(state)}"
-    )
-
-
-def _exchange_google_code(code: str) -> dict:
-    resp = requests.post(
-        GOOGLE_TOKEN_URL,
-        data={
-            "code": code,
-            "client_id": _get_google_client_id(),
-            "client_secret": _get_google_client_secret(),
-            "redirect_uri": _google_redirect_uri(),
-            "grant_type": "authorization_code",
-        },
-        timeout=30,
-        verify=_ca_bundle_path(),
-    )
-    resp.raise_for_status()
-    token = resp.json()
-    token["expires_at"] = time.time() + int(token.get("expires_in", 3600))
-    return token
-
-
-def _refresh_google_token(refresh_token: str) -> dict:
-    resp = requests.post(
-        GOOGLE_TOKEN_URL,
-        data={
-            "client_id": _get_google_client_id(),
-            "client_secret": _get_google_client_secret(),
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-        },
-        timeout=30,
-        verify=_ca_bundle_path(),
-    )
-    resp.raise_for_status()
-    token = resp.json()
-    token["expires_at"] = time.time() + int(token.get("expires_in", 3600))
-    return token
-
-
-def _gdrive_token() -> dict | None:
-    token = st.session_state.get("gdrive_token")
-    if not token:
-        token = _load_gdrive_token_file()
-        if token:
-            st.session_state["gdrive_token"] = token
-    return token
-
-
-def _gdrive_access_token(token: dict) -> str:
-    if time.time() >= token.get("expires_at", 0) - 60 and token.get("refresh_token"):
-        refreshed = _refresh_google_token(token["refresh_token"])
-        refreshed["refresh_token"] = token["refresh_token"]
-        st.session_state["gdrive_token"] = refreshed
-        _save_gdrive_token_file(refreshed)
-        return refreshed["access_token"]
-    return token["access_token"]
-
-
 def _list_drive_files(access_token: str) -> list[dict]:
     query = (
         "(mimeType='application/vnd.google-apps.spreadsheet' or "
@@ -2594,9 +3048,14 @@ def _render_gdrive_picker() -> dict | None:
 
     token = _gdrive_token()
     if not token:
+        # In practice unreachable once Google sign-in is configured (the login
+        # gate already obtains a Drive-scoped token) - kept as a fallback path,
+        # fixed to use the same process-global state store as the login gate
+        # (see _issue_oauth_state) since st.session_state can't survive the
+        # redirect round-trip either.
         code = st.query_params.get("code")
         state = st.query_params.get("state")
-        if code and state and state == st.session_state.get("gdrive_state"):
+        if code and state and _consume_oauth_state(state) is not None:
             try:
                 with st.spinner("Connecting to Google Drive..."):
                     token = _exchange_google_code(code)
@@ -2606,19 +3065,22 @@ def _render_gdrive_picker() -> dict | None:
                 st.stop()
                 return None
             st.query_params.clear()
-            if token.get("refresh_token"):
-                _save_gdrive_token_file(token)
             st.session_state["gdrive_token"] = token
             st.rerun()
             return None
-        state_token = secrets.token_urlsafe(16)
-        st.session_state["gdrive_state"] = state_token
+        state_param = _issue_oauth_state(None)
         st.markdown("**Pick a file from your Google Drive**")
         st.caption(
             "Connect your Google account to browse and load files directly from your "
             "Drive. Only read access is requested; your files stay in your account."
         )
-        st.link_button("Connect Google Drive", _google_auth_url(state_token))
+        auth_url = _google_auth_url(state_param)
+        st.markdown(
+            f'<a href="{auth_url}" target="_self" style="display:inline-block;padding:0.5em '
+            '1em;border:1px solid rgba(49,51,63,0.2);border-radius:0.5em;text-decoration:none;">'
+            "Connect Google Drive</a>",
+            unsafe_allow_html=True,
+        )
         st.stop()
         return None
 
@@ -2731,46 +3193,103 @@ def _detect_restored_session(file_bytes: bytes, name: str) -> dict | None:
         return None
 
 
-data_source = st.radio(
-    "Data source",
-    ["Local file", "Google Sheets / Drive link", "My Google Drive"],
-    key="data_source",
-    horizontal=True,
-)
+def _save_profile_snapshot() -> None:
+    """Best-effort auto-save of the current upload + mapping/settings + Ask AI
+    chat history to this user's saved profile (local disk or their own Drive,
+    depending on auth mode - see _store_save_profile), so it can be resumed
+    via the "Resume my saved session" data source later. Silently gives up
+    if there's nothing to save yet - this is a convenience, never something
+    that should block the actual analysis."""
+    upload_bytes = st.session_state.get("_current_upload_bytes")
+    if not upload_bytes:
+        return
+    _store_save_profile(
+        upload_bytes=upload_bytes,
+        upload_name=st.session_state.get("_current_upload_name") or "upload",
+        mapping=st.session_state.get("analysis_mapping"),
+        currency=st.session_state.get("analysis_currency"),
+        gi_overrides=st.session_state.get("analysis_gi_overrides"),
+        analysis_context=st.session_state.get("analysis_context", ""),
+        chat_history=st.session_state.get("ai_chat_history", []),
+    )
+
 
 uploaded = None
 file_id = None
 file_name = None
 gdrive_pick = None
-if data_source == "Local file":
-    uploaded = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xlsx"], key="uploader")
-    if not uploaded:
-        st.info("Upload a contract-level file to begin.")
+profile = None
+
+_share_token = st.query_params.get("share")
+if _share_token:
+    if st.session_state.get("_share_cache_token") != _share_token:
+        st.session_state["_share_cache_token"] = _share_token
+        st.session_state["_share_cache_data"] = _store_load_share(_share_token)
+    profile = st.session_state["_share_cache_data"]
+    if profile is None:
+        st.error("This share link is invalid or has expired.")
         st.stop()
-    file_id = uploaded.file_id
-    file_name = uploaded.name
-elif data_source == "Google Sheets / Drive link":
-    gs_url = st.text_input(
-        "Paste a Google Sheets or Google Drive link",
-        placeholder="https://docs.google.com/spreadsheets/d/<ID>/edit#gid=0",
-        key="gs_url_input",
+    data_source = "Shared link"
+    file_id = "share:" + _share_token
+    file_name = profile["upload_name"]
+    st.info(
+        f"Viewing an analysis shared by **{profile.get('shared_by', 'a colleague')}** - "
+        "mapping and inputs below have been pre-filled to match it. Anything you change or "
+        "ask here is saved to your own account only, never back into the shared link."
     )
-    if not gs_url.strip():
-        st.info("Paste a Google Sheets / Google Drive link to begin.")
-        st.stop()
-    try:
-        doc_id = _extract_google_id(gs_url)
-    except ValueError as e:
-        st.error(str(e))
-        st.stop()
-    file_id = "gs:" + doc_id
-    file_name = f"Google Sheet ({doc_id})"
 else:
-    gdrive_pick = _render_gdrive_picker()
-    if gdrive_pick is None:
-        st.stop()
-    file_id = gdrive_pick["file_id"]
-    file_name = gdrive_pick["file_name"]
+    _data_source_options = ["Local file", "Google Sheets / Drive link", "My Google Drive"]
+    if _store_has_profile():
+        _data_source_options.insert(0, "Resume my saved session")
+    data_source = st.radio(
+        "Data source",
+        _data_source_options,
+        key="data_source",
+        horizontal=True,
+    )
+
+    if data_source == "Resume my saved session":
+        profile = _store_load_profile()
+        if profile is None:
+            st.error("No saved session found - pick another data source to begin.")
+            st.stop()
+        file_id = "profile:" + current_user
+        file_name = profile["upload_name"]
+        st.caption(
+            f"Resuming '{profile['upload_name']}', saved "
+            f"{_dt.fromtimestamp(profile['saved_at']):%Y-%m-%d %H:%M}."
+        )
+    elif data_source == "Local file":
+        uploaded = st.file_uploader(
+            "Choose a CSV or Excel file", type=["csv", "xlsx"], key="uploader"
+        )
+        if not uploaded:
+            st.info("Upload a contract-level file to begin.")
+            st.stop()
+        file_id = uploaded.file_id
+        file_name = uploaded.name
+    elif data_source == "Google Sheets / Drive link":
+        gs_url = st.text_input(
+            "Paste a Google Sheets or Google Drive link",
+            placeholder="https://docs.google.com/spreadsheets/d/<ID>/edit#gid=0",
+            key="gs_url_input",
+        )
+        if not gs_url.strip():
+            st.info("Paste a Google Sheets / Google Drive link to begin.")
+            st.stop()
+        try:
+            doc_id = _extract_google_id(gs_url)
+        except ValueError as e:
+            st.error(str(e))
+            st.stop()
+        file_id = "gs:" + doc_id
+        file_name = f"Google Sheet ({doc_id})"
+    else:
+        gdrive_pick = _render_gdrive_picker()
+        if gdrive_pick is None:
+            st.stop()
+        file_id = gdrive_pick["file_id"]
+        file_name = gdrive_pick["file_name"]
 
 if st.session_state.get("uploaded_file_id") != file_id:
     st.session_state["uploaded_file_id"] = file_id
@@ -2785,7 +3304,9 @@ if st.session_state.get("uploaded_file_id") != file_id:
         st.session_state.pop(f"map_{target}", None)
 
 try:
-    if data_source == "Local file":
+    if data_source in ("Resume my saved session", "Shared link"):
+        raw = _read_tabular_file(_NamedBytes(profile["upload_bytes"], profile["upload_name"]))
+    elif data_source == "Local file":
         raw = _read_tabular_file(uploaded)
     elif data_source == "Google Sheets / Drive link":
         if st.session_state.get("gs_download_id") != file_id:
@@ -2808,15 +3329,29 @@ if raw.empty or not len(raw.columns):
     st.error(f"'{file_name}' has no data to read.")
     st.stop()
 
+if data_source in ("Resume my saved session", "Shared link"):
+    _source_bytes = profile["upload_bytes"]
+elif data_source == "Local file":
+    _source_bytes = _read_uploaded_bytes(uploaded)
+elif data_source == "Google Sheets / Drive link":
+    _source_bytes = st.session_state.get("gs_bytes")
+else:
+    _source_bytes = gdrive_pick["data"] if gdrive_pick else None
+st.session_state["_current_upload_bytes"] = _source_bytes
+st.session_state["_current_upload_name"] = file_name
+
 if st.session_state.get("restored_session_checked_id") != file_id:
     st.session_state["restored_session_checked_id"] = file_id
-    if data_source == "Local file":
-        _source_bytes = _read_uploaded_bytes(uploaded)
-    elif data_source == "Google Sheets / Drive link":
-        _source_bytes = st.session_state.get("gs_bytes")
+    if data_source in ("Resume my saved session", "Shared link"):
+        restored = {
+            "mapping": profile.get("mapping"),
+            "currency": profile.get("currency"),
+            "gi_overrides": profile.get("gi_overrides") or {},
+        }
+        st.session_state["analysis_context"] = profile.get("analysis_context", "")
+        st.session_state["ai_chat_history"] = profile.get("chat_history", [])
     else:
-        _source_bytes = gdrive_pick["data"] if gdrive_pick else None
-    restored = _detect_restored_session(_source_bytes, file_name) if _source_bytes else None
+        restored = _detect_restored_session(_source_bytes, file_name) if _source_bytes else None
     st.session_state["restored_session"] = restored
 
 _active_model_fields = {c for c, _ in INPUT_COLUMNS} | _LENDING_EXTRA_FIELDS
@@ -2882,29 +3417,56 @@ if cached_mapping:
     )
 
 # AI auto-fill: guess the best column mapping for this file's headers (per model).
+# A field whose exact template name is already present in raw.columns (post-alias
+# normalization, see _normalize_columns above) is a 100% programmatic match - skip asking the AI
+# about it entirely, and only send the AI the fields/columns that are still unresolved. Cuts
+# unnecessary API calls (and the tokens/cost that come with them) whenever a file's headers
+# already line up with the template, per Niraj's suggestion in the 2026-09-03 catch-up.
 guess_key = f"ai_mapping_guess_{_cache_key(raw.columns)}"
 if guess_key not in st.session_state:
-    if _get_deepinfra_api_key():
+    programmatic_matches = {target: target for target, _ in INPUT_COLUMNS if target in raw.columns}
+    remaining_fields = [(t, r) for t, r in INPUT_COLUMNS if t not in programmatic_matches]
+    remaining_columns = [c for c in raw.columns if c not in programmatic_matches.values()]
+    ai_part = {}
+    if remaining_fields and _get_deepinfra_api_key():
         try:
-            with st.spinner("Asking the AI to auto-fill the column mapping..."):
-                st.session_state[guess_key] = _suggest_mapping(
-                    list(raw.columns),
-                    INPUT_COLUMNS,
+            with st.spinner("Asking the AI to auto-fill the remaining column mappings..."):
+                ai_part = _suggest_mapping(
+                    remaining_columns,
+                    remaining_fields,
                     _ai_context_text(max_chars=20000, per_doc=6000),
                 )
         except Exception as e:
-            st.session_state[guess_key] = {}
             st.warning(f"AI auto-fill wasn't available ({e}). You can still map columns manually.")
-    else:
-        st.session_state[guess_key] = {}
-ai_guess = st.session_state.get(guess_key) or {}
+    st.session_state[guess_key] = {
+        "mapping": {**programmatic_matches, **ai_part},
+        "ai_fields": set(ai_part.keys()),
+    }
+_guess_state = st.session_state.get(guess_key) or {"mapping": {}, "ai_fields": set()}
+ai_guess = _guess_state["mapping"]
+ai_guessed_fields = _guess_state["ai_fields"]
+if ai_guessed_fields:
+    st.warning(
+        "The mapping(s) below for **"
+        + ", ".join(sorted(ai_guessed_fields))
+        + "** were suggested by AI (no exact column-name match was found) - please verify "
+        "them before running the analysis."
+    )
 restored_session = st.session_state.get("restored_session")
 restored_gi = (restored_session or {}).get("gi_overrides", {})
 if restored_session:
-    st.info(
-        "This file was exported from a previous session - mapping and inputs below have "
-        "been pre-filled to match it. Review and click 'Run analysis' to reproduce it."
-    )
+    if data_source == "Resume my saved session":
+        st.info(
+            "Resumed from your saved session - mapping and inputs below have been "
+            "pre-filled to match it. Review and click 'Run analysis' to continue."
+        )
+    elif data_source != "Shared link":
+        # "Shared link" already showed its own "Viewing an analysis shared by..." info
+        # banner above, right where the data source was resolved - avoid a duplicate.
+        st.info(
+            "This file was exported from a previous session - mapping and inputs below have "
+            "been pre-filled to match it. Review and click 'Run analysis' to reproduce it."
+        )
 
 with st.form("column_mapping"):
     st.subheader("Map your columns to the Data Input template")
@@ -3046,6 +3608,7 @@ if submitted:
     st.session_state["analysis_gi_overrides"] = overrides
     st.session_state["analysis_ran"] = True
     _save_cache(MAPPING_CACHE_PATH, _cache_key(raw.columns), mapping)
+    _save_profile_snapshot()
 
 if not st.session_state.get("analysis_ran"):
     st.info("Map your file's columns above, then click 'Run analysis' to compute all sheets.")
@@ -3146,11 +3709,16 @@ tabs = st.tabs(tab_names)
 
 with tabs[0]:
     st.subheader("Summary")
-    if "Loan Status" in df.columns:
-        status = df["Loan Status"].astype(str).str.strip().str.lower()
-        gbv_df = df[status == "active"]
-    else:
-        gbv_df = df
+    # "Outstanding" means still within its expected term, not yet matured (Reached T+3? =
+    # False) - a loan past maturity with an unrecovered shortfall is a credit loss (tracked
+    # separately via the Loss Rate metrics below), not an outstanding balance still being
+    # collected. Relying on a Loan Status label instead would be fragile: many tapes don't
+    # have that column at all (silently pulling in the whole loan history), and even where
+    # it exists the status vocabulary isn't standardized across deals.
+    gbv_df = df[~df["Reached T+3?"]]
+    if "Loan Status" in gbv_df.columns:
+        status = gbv_df["Loan Status"].astype(str).str.strip().str.lower()
+        gbv_df = gbv_df[status == "active"]
     if gbv_df.empty:
         outstanding_gbv = None
     else:
@@ -3168,8 +3736,11 @@ with tabs[0]:
     c2.metric(
         "Outstanding GBV",
         f"{outstanding_gbv:,.0f}" if outstanding_gbv is not None else "n/a",
-        help="Principal + expected interest + expected fees - amount paid, "
-        "for loans with status 'active' only. n/a when no active loans.",
+        help="Principal + expected interest + expected fees - amount paid, for loans that "
+        "haven't yet reached maturity (Reached T+3? = False), plus any with a 'Loan Status' "
+        "of 'active' where that column exists. Matured loans' unrecovered shortfall is a "
+        "credit loss, captured by the Loss Rate metrics instead - not counted here. n/a when "
+        "no loans qualify.",
     )
     c3.metric(
         "Loss Rate",
@@ -3183,9 +3754,38 @@ with tabs[0]:
         "bad loss could get for the worst cohorts.",
     )
     c5.metric(
-        "Interest Rate",
+        "Product Interest Rate",
         fmt(ue_data["Average Interest %"]),
-        help="Total expected interest as a share of total principal across all loans.",
+        help="This is the product interest rate over the term of the loans (i.e. not to be "
+        "confused with the APR or an Annualized Interest Rate).",
+    )
+
+    matured_for_snapshot = df[df["Reached T+3?"]]
+    matured_paid = matured_for_snapshot["Total Paid"].sum()
+    matured_due = (
+        matured_for_snapshot["Total Due"].sum()
+        if "Total Due" in matured_for_snapshot.columns
+        else float("nan")
+    )
+    pvd_ratio = matured_paid / matured_due if matured_due else float("nan")
+    # Exclude any loan missing either Term (days) or Principal Value from BOTH the numerator
+    # and denominator - a loan with an unknown term must not be treated as having a 0-day
+    # term, which is what including its principal in the denominator alone would imply.
+    _term_ok = matured_for_snapshot[["Term (days)", "Principal Value"]].dropna()
+    matured_principal_snap = _term_ok["Principal Value"].sum()
+    weighted_avg_term_snap = (
+        (_term_ok["Term (days)"] * _term_ok["Principal Value"]).sum() / matured_principal_snap
+        if matured_principal_snap
+        else float("nan")
+    )
+    portfolio_rates = principal_weighted_average_rates(df)
+    weighted_avg_term_months_snap = (
+        weighted_avg_term_snap / 30.4375 if pd.notna(weighted_avg_term_snap) else float("nan")
+    )
+    apr_proxy = (
+        (ue_data["Average Interest %"] / weighted_avg_term_months_snap) * 12
+        if weighted_avg_term_months_snap
+        else float("nan")
     )
 
     st.markdown("---")
@@ -3211,9 +3811,14 @@ with tabs[0]:
                 "Total cash collected from borrowers to date.",
             ),
             (
-                "Avg Fee",
+                "Expected Interest %",
+                fmt(ue_data["Average Interest %"]),
+                "Total expected interest as a share of total principal across all loans.",
+            ),
+            (
+                "Expected Fee %",
                 fmt(ue_data["Average Fee %"]),
-                "Total expected fees as a share of total principal.",
+                "Total expected fees as a share of total principal across all loans.",
             ),
             (
                 "Avg Loan Value",
@@ -3221,17 +3826,65 @@ with tabs[0]:
                 "Average principal amount per loan.",
             ),
             (
-                "Avg Loan Term",
-                fmt(ue_data["Average Expected Term"], "{:,.1f} days"),
-                "Principal-weighted average loan term (days).",
-            ),
-            (
                 "Avg Total Revenue",
                 fmt(ltv_data["Average Total Revenue %"]),
                 "Expected interest + fees as a share of total principal.",
             ),
+            (
+                "PvD",
+                fmt(pvd_ratio),
+                "Paid-vs-Due ratio (Total Paid / Total Due) across matured loans "
+                "(Reached T+3? = True) in the whole portfolio.",
+            ),
+            (
+                "Weighted Avg Term (matured)",
+                fmt(weighted_avg_term_snap, "{:,.1f} days"),
+                "Principal-weighted average term (days) across matured loans only - a loan "
+                "missing either Term (days) or Principal Value is excluded from both the "
+                "average and its weight, rather than being counted as a 0-day term.",
+            ),
+            (
+                "APR Proxy",
+                fmt(apr_proxy),
+                "Avg Annualized Flat Interest Rate: Product Interest Rate divided by the "
+                "Weighted Avg Term (matured), in months, times 12 - a simple flat-rate "
+                "annualization (no compounding, no amortization solve), not the same "
+                "calculation as the EAR below.",
+            ),
+            (
+                "EAR",
+                fmt(portfolio_rates["EAR"]),
+                "Effective Annual Rate: principal-weighted average, across all loans, of the "
+                "periodic rate that amortizes Principal to the full amount owed - using the "
+                "loan's real installment (Payment per Period) where available, else a synthetic "
+                "owed/term estimate - annualized by compounding: (1 + rate)^periods per year - 1.",
+            ),
         ]
         _render_snapshot_table(snapshot_rows)
+        solved_pct = (
+            f"{portfolio_rates['n_solved']}/{portfolio_rates['n_total']}"
+            if portfolio_rates["n_total"]
+            else "0/0"
+        )
+        st.caption(
+            f"APR/EAR solved for {solved_pct} loans "
+            f"({portfolio_rates['n_valid_inputs']} had usable inputs, "
+            f"{portfolio_rates['n_converged']} of those converged). "
+            "Amount owed is always Principal + Interest + Fee (never Total Due, which is "
+            "often a to-date collections figure rather than the full lifetime amount owed). "
+            f"Real Payment per Period available for {portfolio_rates['n_real_pmt']} loan(s) "
+            "(others use a synthetic owed/term estimate)."
+        )
+        if "Payment Frequency" not in df.columns:
+            st.caption(
+                "No 'Payment Frequency' column was mapped, so EAR/APR assume a fixed 12 "
+                "periods/year (monthly) compounding cycle for every loan, regardless of its "
+                "real term - for a short-term book, EAR is highly sensitive to that "
+                "assumption (a 5-10 day loan compounded at its own real cycle length instead "
+                "of monthly can look several times higher). Treat EAR as useful for spotting "
+                "relative shifts within this deal over time, not as directly comparable "
+                "against another deal with a different average term."
+            )
 
     with chart_col:
         st.subheader("Cohort Loss Rates")
@@ -3379,73 +4032,17 @@ if is_lending:
             f"{len(display_cohorts)} monthly cohorts.",
         )
 
-        table_tab, stats_tab = st.tabs(["Table", "Stats"])
-        with table_tab:
-            _render_cohorts_grid(cohort_view)
+        _render_cohorts_grid(cohort_view)
 
-            st.markdown("#### Principal by Cohorts")
-            _render_custom_visualizations_tab(
-                {
-                    "Cohorts (table above)": cohort_view,
-                    "Cohorts (all, unfiltered)": display_cohorts,
-                    "Data Input (loan-level)": df,
-                },
-                key_prefix="cohorts_cv",
-                header=False,
-                simple=True,
-            )
-        with stats_tab:
-            # Compare normalized calendar periods, not raw Cohort timestamps -
-            # .isin() on datetime columns is fragile to subtle dtype mismatches
-            # (precision/backend) between the two sides, which can silently
-            # match nothing instead of erroring.
-            qualifying_periods = pd.to_datetime(cohort_view["Cohort"]).dt.to_period("M")
-            cohort_loans = df[
-                pd.to_datetime(df["Cohort"]).dt.to_period("M").isin(qualifying_periods)
-            ]
-            avg_rates = principal_weighted_average_rates(cohort_loans)
-            _render_snapshot_table(
-                [
-                    (
-                        "PvD",
-                        fmt(cohort_view["PvD Ratio"].mean()),
-                        "Average Paid-vs-Due ratio (Total Paid / Total Due) across the cohorts shown in "
-                        "the table.",
-                    ),
-                    (
-                        "Weighted Avg Term",
-                        fmt(cohort_view["Weighted Avg Term"].mean(), "{:,.1f} days"),
-                        "Average, across the cohorts shown in the table, of each cohort's own "
-                        "principal-weighted average term (days).",
-                    ),
-                    (
-                        "APR",
-                        fmt(avg_rates["APR"]),
-                        "Nominal APR: principal-weighted average, across loans in the cohorts shown, of "
-                        "the periodic rate that amortizes Principal to the full amount owed - using the "
-                        "loan's real installment (Payment per Period) where available, else a synthetic "
-                        "owed/term estimate - annualized as rate x periods per year.",
-                    ),
-                    (
-                        "EAR",
-                        fmt(avg_rates["EAR"]),
-                        "Effective Annual Rate: the same implied periodic rate as APR, annualized by "
-                        "compounding - (1 + rate)^periods per year - 1 - instead of a simple multiply.",
-                    ),
-                ]
-            )
-            solved_pct = (
-                f"{avg_rates['n_solved']}/{avg_rates['n_total']}" if avg_rates["n_total"] else "0/0"
-            )
-            st.caption(
-                f"APR/EAR solved for {solved_pct} loans in view "
-                f"({avg_rates['n_valid_inputs']} had usable inputs, "
-                f"{avg_rates['n_converged']} of those converged). "
-                "Amount owed is always Principal + Interest + Fee (never Total Due, which is "
-                "often a to-date collections figure rather than the full lifetime amount owed). "
-                f"Real Payment per Period available for {avg_rates['n_real_pmt']} loan(s) "
-                "(others use a synthetic owed/term estimate)."
-            )
+        st.markdown("#### Explore Cohort Data")
+        _render_custom_visualizations_tab(
+            {"Cohorts (table above)": cohort_view},
+            key_prefix="cohorts_cv",
+            header=False,
+            simple=True,
+            fixed_x="Cohort",
+            y_label="Metric",
+        )
 
     with tabs[3]:
         st.subheader("LTV Calculator")
@@ -3488,12 +4085,25 @@ if is_lending:
                 "Rolled hedge?", LTV_CALC_HEDGE_TYPES, key="ltvcalc_rolled_hedge"
             )
 
+        loss_rate_fallback_notes = []
+        if pd.isna(green_loss):
+            green_loss, floor_notes = ltv_calculator_sector_min_loss_rate(
+                calc_segmentation, calc_data_source
+            )
+            loss_rate_fallback_notes = [
+                "No computable Loss Rate for this portfolio (95th %ile Loss is n/a) - using the "
+                f"Min Sector Loss Rate for '{calc_segmentation}' ({calc_data_source}) instead: "
+                f"{fmt(green_loss)}."
+            ] + floor_notes
+
         result = None
         if pd.isna(green_interest) or pd.isna(green_loss) or green_term_bucket is None:
             st.warning(
                 "Can't compute the LTV waterfall - one of the green inputs above is n/a for this portfolio."
             )
         else:
+            for note in loss_rate_fallback_notes:
+                st.info(note)
             result = ltv_calculator_compute(
                 gross_interest=green_interest,
                 term_months=green_term_bucket,
@@ -3512,49 +4122,21 @@ if is_lending:
             st.markdown("---")
             st.markdown("#### Outputs - Suggested LTV")
 
-            st.subheader("LTGBV")
-            _render_snapshot_table(
-                [
-                    (
-                        "No FX Adjustment",
-                        fmt(result["ltgbv_no_fx"]),
-                        "LTGBV before any FX adjustment: 1 minus the selected stress loss.",
-                    ),
-                    (
-                        "With FX Adjustment (High)",
-                        fmt(result["ltgbv_high"]),
-                        "LTGBV (no FX) divided by (1 + selected FX devaluation, high end).",
-                    ),
-                    (
-                        "With FX Adjustment (Low)",
-                        fmt(result["ltgbv_low"]),
-                        "LTGBV (no FX) divided by (1 + selected FX devaluation, low end).",
-                    ),
-                ]
-            )
-
-            st.subheader("Advance on Principal (LTV)")
-            _render_snapshot_table(
-                [
-                    (
-                        "No FX Adjustment",
-                        fmt(result["ltv_no_fx"]),
-                        "LTGBV (no FX) grossed up by (1 + weighted avg. gross interest).",
-                    ),
-                    (
-                        "With FX Adjustment (High)",
-                        fmt(result["ltv_high"]),
-                        "LTGBV (FX high) grossed up by (1 + weighted avg. gross interest).",
-                    ),
-                    (
-                        "With FX Adjustment (Low)",
-                        fmt(result["ltv_low"]),
-                        "LTGBV (FX low) grossed up by (1 + weighted avg. gross interest).",
-                    ),
-                ]
+            _render_matrix_table(
+                row_labels=["FX High", "No FX", "FX Low"],
+                col_labels=["Advance on Principal", "Advance on GBV"],
+                values=[
+                    [fmt(result["ltv_high"]), fmt(result["ltgbv_high"])],
+                    [fmt(result["ltv_no_fx"]), fmt(result["ltgbv_no_fx"])],
+                    [fmt(result["ltv_low"]), fmt(result["ltgbv_low"])],
+                ],
+                big_row=0,
             )
             st.caption(
-                "Both LTGBV and LTV limits must be complied with (source: Receivables sheet, cell C44)."
+                "FX High is the stressed, headline scenario. Advance on Principal = Advance on "
+                "GBV grossed up by (1 + weighted avg. gross interest). Both Advance on GBV and "
+                "Advance on Principal limits must be complied with (source: Receivables sheet, "
+                "cell C44)."
             )
 
             st.markdown("---")
@@ -3649,7 +4231,9 @@ if is_lending:
                     (
                         "95th %ile Loss",
                         fmt(green_loss),
-                        "95th percentile loss rate at T+3, pulled from this analysis.",
+                        "95th percentile loss rate at T+3, pulled from this analysis - or, when "
+                        "that's n/a for this portfolio, the Min Sector Loss Rate used as a "
+                        "fallback (see the note above).",
                     ),
                     (
                         "Stress Loss",
@@ -3657,7 +4241,7 @@ if is_lending:
                         f"Loss rate multiplied by the credit stress factor ({result['credit_stress_factor']:g}x).",
                     ),
                     (
-                        "Minimum Loss Rate",
+                        "Min Sector Loss Rate",
                         fmt(result["minimum_stress_loss"]),
                         "Sector-minimum stress loss floor for the selected segmentation and data source.",
                     ),
@@ -3798,7 +4382,13 @@ if is_lending:
 
 with tabs[1]:
     st.subheader("Data Checks")
-    checks_tab, data_tab = st.tabs(["Checks", "Data Input"])
+    data_tab, checks_tab = st.tabs(["Data Input", "Checks"])
+    with data_tab:
+        st.caption(
+            f"{len(raw):,} rows x {len(raw.columns):,} columns uploaded. "
+            f"Computed columns (Cohort, Term, Reached T+3?) used in downstream sheets."
+        )
+        _render_data_input_grid(raw, height=400)
     with checks_tab:
         _render_data_quality_checks(
             dq_checks,
@@ -3807,12 +4397,6 @@ with tabs[1]:
             "escalate_variance",
             file_name,
         )
-    with data_tab:
-        st.caption(
-            f"{len(raw):,} rows x {len(raw.columns):,} columns uploaded. "
-            f"Computed columns (Cohort, Term, Reached T+3?) used in downstream sheets."
-        )
-        st.dataframe(raw, width="stretch", height=400)
 
 st.markdown("---")
 
@@ -4019,6 +4603,23 @@ def _build_lending_export_workbook(
     return buf.getvalue()
 
 
+def _add_chat_history_sheet(workbook_bytes: bytes, history: list) -> bytes:
+    """Append an 'AskAI Chat History' sheet (Role/Message columns, one row per turn) to an
+    already-built workbook's raw bytes. Deliberately NOT part of _build_lending_export_workbook
+    (which is @st.cache_data-cached on its inputs, expensive to rebuild, and would otherwise
+    need to be rebuilt from scratch on every single new chat message) - appending a sheet is a
+    cheap, purely programmatic post-process with no LLM call, so it stays outside that cache
+    and only runs when the user actually opts in via the checkbox at download time."""
+    wb = load_workbook(io.BytesIO(workbook_bytes))
+    ws = wb.create_sheet("AskAI Chat History")
+    ws.append(["Role", "Message"])
+    for msg in history:
+        ws.append([msg.get("role", ""), msg.get("content", "")])
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
 if is_lending:
     buf = _build_lending_export_workbook(
         df,
@@ -4037,13 +4638,47 @@ if is_lending:
     )
     file_name = f"SC_Analysis_Lending_{pd.Timestamp.now():%Y-%m-%d}.xlsx"
 
-st.download_button(
-    "Download full workbook as Excel",
-    buf,
-    file_name=file_name,
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
-st.caption(
-    "Sharing this with a colleague? They can open it directly in Excel, or upload it back "
-    "into this app - column mapping and General Inputs will be pre-filled to match this run."
-)
+chat_history = st.session_state.get("ai_chat_history", [])
+include_chat_download = False
+if chat_history:
+    include_chat_download = st.checkbox(
+        "Include the Ask AI chat history as an extra sheet in this download",
+        key="include_chat_history_download",
+    )
+download_bytes = _add_chat_history_sheet(buf, chat_history) if include_chat_download else buf
+
+_dl_col, _share_col = st.columns(2)
+with _dl_col:
+    st.download_button(
+        "Download full workbook as Excel",
+        download_bytes,
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+with _share_col:
+    _create_share_clicked = st.button("Create share link", key="create_share_link")
+
+if _create_share_clicked:
+    try:
+        _share_token = _store_create_share(
+            upload_bytes=st.session_state.get("_current_upload_bytes"),
+            upload_name=st.session_state.get("_current_upload_name") or "upload",
+            mapping=st.session_state.get("analysis_mapping"),
+            currency=st.session_state.get("analysis_currency"),
+            gi_overrides=st.session_state.get("analysis_gi_overrides"),
+            analysis_context=st.session_state.get("analysis_context", ""),
+            chat_history=st.session_state.get("ai_chat_history", []),
+        )
+        _base_url = (st.context.url or "").split("?")[0] or "http://localhost:8501"
+        st.session_state["last_share_link"] = f"{_base_url}?share={_share_token}"
+    except Exception as e:
+        st.error(f"Couldn't create a share link: {e}")
+if st.session_state.get("last_share_link"):
+    st.code(st.session_state["last_share_link"])
+    if _auth_mode() == "google":
+        st.caption(
+            f"Shared read-only with anyone at **{current_user.split('@', 1)[-1]}** who has "
+            "this link (never fully public) - revoke any time from your Drive."
+        )
+    else:
+        st.caption("Anyone with this link can open it - there's no access list yet.")
