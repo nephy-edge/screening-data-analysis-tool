@@ -596,11 +596,15 @@ def _render_google_login_gate() -> str:
     )
     state_param = _issue_oauth_state(st.query_params.get("share"))
     auth_url = _google_auth_url(state_param, scope=GOOGLE_LOGIN_SCOPE)
-    # A plain same-tab anchor, not st.link_button (which always opens a new
-    # tab) - same-tab keeps the user from ending up with a stale "Sign in"
-    # tab left open next to the one Google redirected back into.
+    # A plain anchor, not st.link_button (which always opens a new tab) -
+    # target="_top" (not "_self") because on Streamlit Community Cloud the
+    # app itself renders inside a wrapping frame; "_self" stayed trapped
+    # inside that frame, and Google's real sign-in page refuses to render
+    # inside any frame at all (shows a generic "you don't have access to
+    # this document" 403 instead) - "_top" forces navigation to the actual
+    # top-level browser tab regardless of any framing, on every host.
     st.markdown(
-        f'<a href="{auth_url}" target="_self" style="display:inline-block;padding:0.5em 1em;'
+        f'<a href="{auth_url}" target="_top" style="display:inline-block;padding:0.5em 1em;'
         'border:1px solid rgba(49,51,63,0.2);border-radius:0.5em;text-decoration:none;">'
         "Sign in with Google</a>",
         unsafe_allow_html=True,
@@ -3076,7 +3080,7 @@ def _render_gdrive_picker() -> dict | None:
         )
         auth_url = _google_auth_url(state_param)
         st.markdown(
-            f'<a href="{auth_url}" target="_self" style="display:inline-block;padding:0.5em '
+            f'<a href="{auth_url}" target="_top" style="display:inline-block;padding:0.5em '
             '1em;border:1px solid rgba(49,51,63,0.2);border-radius:0.5em;text-decoration:none;">'
             "Connect Google Drive</a>",
             unsafe_allow_html=True,
