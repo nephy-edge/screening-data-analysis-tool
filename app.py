@@ -596,19 +596,13 @@ def _render_google_login_gate() -> str:
     )
     state_param = _issue_oauth_state(st.query_params.get("share"))
     auth_url = _google_auth_url(state_param, scope=GOOGLE_LOGIN_SCOPE)
-    # A plain anchor, not st.link_button (which always opens a new tab) -
-    # target="_top" (not "_self") because on Streamlit Community Cloud the
-    # app itself renders inside a wrapping frame; "_self" stayed trapped
-    # inside that frame, and Google's real sign-in page refuses to render
-    # inside any frame at all (shows a generic "you don't have access to
-    # this document" 403 instead) - "_top" forces navigation to the actual
-    # top-level browser tab regardless of any framing, on every host.
-    st.markdown(
-        f'<a href="{auth_url}" target="_top" style="display:inline-block;padding:0.5em 1em;'
-        'border:1px solid rgba(49,51,63,0.2);border-radius:0.5em;text-decoration:none;">'
-        "Sign in with Google</a>",
-        unsafe_allow_html=True,
-    )
+    # st.link_button (opens a new tab, target="_blank") - not a same-tab/
+    # target="_top" anchor: Streamlit Community Cloud renders the app inside
+    # a sandboxed wrapping frame that doesn't permit top-level navigation
+    # from embedded content, so a raw <a target="_top"> link was silently
+    # inert there (worked locally, where nothing sandboxes it). A new tab
+    # is a proven-safe escape hatch from any such sandbox on every host.
+    st.link_button("Sign in with Google", auth_url)
     st.stop()
     return ""
 
@@ -3079,12 +3073,7 @@ def _render_gdrive_picker() -> dict | None:
             "Drive. Only read access is requested; your files stay in your account."
         )
         auth_url = _google_auth_url(state_param)
-        st.markdown(
-            f'<a href="{auth_url}" target="_top" style="display:inline-block;padding:0.5em '
-            '1em;border:1px solid rgba(49,51,63,0.2);border-radius:0.5em;text-decoration:none;">'
-            "Connect Google Drive</a>",
-            unsafe_allow_html=True,
-        )
+        st.link_button("Connect Google Drive", auth_url)
         st.stop()
         return None
 
