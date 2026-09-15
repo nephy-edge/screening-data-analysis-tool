@@ -10,19 +10,23 @@ any identity provider, and a share link grants access to anyone who has the
 link/token - there is no allow-list.
 
 Storage is deliberately simple - one directory per user under data/profiles/
-(keyed by their self-declared email, for "resume my own session") and one
-directory per share under data/shares/ (keyed by a random unguessable
-token, for "someone sent me a link"), each holding the relevant uploaded
-loan tape plus the mapping/settings/chat-history needed to reproduce that
-run. When real SSO lands, only the identity source changes (dummy text box
--> st.user.email); nothing here needs to change.
+(keyed by their self-declared email), holding one subdirectory per saved
+deal under sessions/<session_id>/ (a user can save and resume several deals
+independently - see list_profiles/save_profile/load_profile), plus one
+directory per share under data/shares/ (keyed by a random unguessable token,
+for "someone sent me a link"). Each session/share directory holds the
+uploaded loan tape plus the mapping/settings/chat-history needed to
+reproduce that run. When real SSO lands, only the identity source changes
+(dummy text box -> st.user.email); nothing here needs to change.
 """
 
+import hashlib
 import json
 import re
 import secrets
-import time
 from pathlib import Path
+
+from snapshot_common import snapshot_fields
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 PROFILES_DIR = _DATA_DIR / "profiles"
@@ -34,14 +38,12 @@ def _safe_id(user_id: str) -> str:
     return slug or "unknown"
 
 
-def _gi_overrides_to_json(gi_overrides: dict | None) -> dict:
-    if not gi_overrides:
-        return {}
-    out = dict(gi_overrides)
-    extraction_date = out.get("extraction_date")
-    if hasattr(extraction_date, "isoformat"):
-        out["extraction_date"] = extraction_date.isoformat()
-    return out
+def _safe_session_id(session_id: str) -> str:
+    # Unlike _safe_id (user emails, where case-folding is desirable), a
+    # session_id is an opaque, case-sensitive random token - lowercasing it
+    # would risk two distinct generated ids colliding on disk.
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", (session_id or "").strip())
+    return slug or "unknown"
 
 
 def _save_snapshot(
@@ -52,25 +54,48 @@ def _save_snapshot(
     mapping: dict | None,
     currency: str | None,
     gi_overrides: dict | None,
+    exclude_rule: dict | None = None,
+    active_status_values: list | None = None,
     analysis_context: str = "",
     chat_history: list | None = None,
+    label: str | None = None,
     extra: dict | None = None,
 ) -> None:
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     upload_ext = Path(upload_name or "upload").suffix or ".bin"
     upload_file = f"upload{upload_ext}"
-    (snapshot_dir / upload_file).write_bytes(upload_bytes)
+    upload_hash = hashlib.sha256(upload_bytes).hexdigest()
+
+    # Skip rewriting the (potentially large) loan tape to disk when its
+    # content hasn't changed since the last save - e.g. every AI chat
+    # question re-saves the profile but only the chat history changed.
+    state_path = snapshot_dir / "state.json"
+    previous_hash = None
+    if state_path.exists():
+        try:
+            previous_hash = json.loads(state_path.read_text(encoding="utf-8")).get(
+                "upload_hash"
+            )
+        except Exception:
+            previous_hash = None
+    if previous_hash != upload_hash or not (snapshot_dir / upload_file).exists():
+        (snapshot_dir / upload_file).write_bytes(upload_bytes)
 
     state = {
         "schema": 1,
-        "saved_at": time.time(),
-        "upload_name": upload_name,
+        "label": label or upload_name,
         "upload_file": upload_file,
-        "mapping": mapping,
-        "currency": currency,
-        "gi_overrides": _gi_overrides_to_json(gi_overrides),
-        "analysis_context": analysis_context,
-        "chat_history": chat_history or [],
+        "upload_hash": upload_hash,
+        **snapshot_fields(
+            upload_name=upload_name,
+            mapping=mapping,
+            currency=currency,
+            gi_overrides=gi_overrides,
+            exclude_rule=exclude_rule,
+            active_status_values=active_status_values,
+            analysis_context=analysis_context,
+            chat_history=chat_history,
+        ),
         **(extra or {}),
     }
     (snapshot_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
@@ -89,39 +114,63 @@ def _load_snapshot(snapshot_dir: Path) -> dict | None:
     return state
 
 
-def has_profile(user_id: str) -> bool:
-    return (PROFILES_DIR / _safe_id(user_id) / "state.json").exists()
+def _session_dir(user_id: str, session_id: str) -> Path:
+    # "legacy" is the pre-multi-session flat layout (state.json/upload.*
+    # directly under the user dir, no sessions/ subdirectory) - kept in place
+    # rather than migrated, so a profile saved before this feature existed is
+    # still listed and resumable.
+    if session_id == "legacy":
+        return PROFILES_DIR / _safe_id(user_id)
+    return PROFILES_DIR / _safe_id(user_id) / "sessions" / _safe_session_id(session_id)
 
 
-def save_profile(
-    user_id: str,
-    *,
-    upload_bytes: bytes,
-    upload_name: str,
-    mapping: dict | None,
-    currency: str | None,
-    gi_overrides: dict | None,
-    analysis_context: str = "",
-    chat_history: list | None = None,
-) -> None:
-    """Persist this user's current upload + settings + chat history, replacing
-    any previously saved profile for them (one saved session per user)."""
-    _save_snapshot(
-        PROFILES_DIR / _safe_id(user_id),
-        upload_bytes=upload_bytes,
-        upload_name=upload_name,
-        mapping=mapping,
-        currency=currency,
-        gi_overrides=gi_overrides,
-        analysis_context=analysis_context,
-        chat_history=chat_history,
-    )
+def list_profiles(user_id: str) -> list[dict]:
+    """Return this user's saved deals as [{"session_id", "label", "saved_at"}],
+    newest first, for the "Resume my saved session" picker."""
+    out = []
+    sessions_dir = PROFILES_DIR / _safe_id(user_id) / "sessions"
+    if sessions_dir.is_dir():
+        for session_dir in sessions_dir.iterdir():
+            state_path = session_dir / "state.json"
+            if not state_path.exists():
+                continue
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            out.append({
+                "session_id": session_dir.name,
+                "label": state.get("label") or state.get("upload_name") or session_dir.name,
+                "saved_at": state.get("saved_at", 0),
+            })
+    legacy_state_path = PROFILES_DIR / _safe_id(user_id) / "state.json"
+    if legacy_state_path.exists():
+        try:
+            state = json.loads(legacy_state_path.read_text(encoding="utf-8"))
+            out.append({
+                "session_id": "legacy",
+                "label": state.get("label") or state.get("upload_name") or "Saved session",
+                "saved_at": state.get("saved_at", 0),
+            })
+        except Exception:
+            pass
+    out.sort(key=lambda s: s["saved_at"], reverse=True)
+    return out
 
 
-def load_profile(user_id: str) -> dict | None:
-    """Return the saved state dict (plus "upload_bytes") for this user, or
-    None if nothing is saved / the saved data can't be read."""
-    return _load_snapshot(PROFILES_DIR / _safe_id(user_id))
+def save_profile(user_id: str, session_id: str, **snapshot_kwargs) -> None:
+    """Persist this deal's current upload + settings + chat history under its
+    own session_id, replacing any previous save under that same id - each
+    deal a user saves gets its own independently resumable record (see
+    list_profiles)."""
+    _save_snapshot(_session_dir(user_id, session_id), **snapshot_kwargs)
+
+
+def load_profile(user_id: str, session_id: str) -> dict | None:
+    """Return the saved state dict (plus "upload_bytes") for this user's given
+    saved session, or None if nothing is saved under that id / it can't be
+    read."""
+    return _load_snapshot(_session_dir(user_id, session_id))
 
 
 def create_share(
@@ -132,6 +181,8 @@ def create_share(
     mapping: dict | None,
     currency: str | None,
     gi_overrides: dict | None,
+    exclude_rule: dict | None = None,
+    active_status_values: list | None = None,
     analysis_context: str = "",
     chat_history: list | None = None,
 ) -> str:
@@ -148,6 +199,8 @@ def create_share(
         mapping=mapping,
         currency=currency,
         gi_overrides=gi_overrides,
+        exclude_rule=exclude_rule,
+        active_status_values=active_status_values,
         analysis_context=analysis_context,
         chat_history=chat_history,
         extra={"shared_by": shared_by},
