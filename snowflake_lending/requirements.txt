@@ -1,0 +1,7 @@
+snowflake-snowpark-python>=1.20
+python-dotenv
+# Makes Python trust the Windows certificate store instead of its own
+# bundled CA list - needed on networks with a TLS-inspecting corporate
+# proxy (its root CA is trusted by Windows but not by Python otherwise),
+# which otherwise fails with "certificate verify failed" against Snowflake.
+pip-system-certs
