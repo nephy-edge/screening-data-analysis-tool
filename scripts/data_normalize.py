@@ -24,7 +24,15 @@ def _norm_key(value) -> str:
 
 
 def _clean_numeric(series) -> pd.Series:
-    s = series.astype(str).str.strip()
+    s = series.astype(str)
+    # Fast path: if no value contains any character the transforms below would
+    # change ($, £, €, %, whitespace, parentheses, commas), the strip and all
+    # three regex passes are no-ops, so skip them. The single str.contains scan
+    # replaces three full vectorized regex passes over every row per numeric
+    # column - measured ~1-2 min of extra wall time on a 4M-row lending tape.
+    if not s.str.contains(r"[$,£€\s%(),]", regex=True, na=False).any():
+        return s
+    s = s.str.strip()
     s = s.str.replace(r"[\$,£€\s%]", "", regex=True)
     s = s.str.replace(r"\(([^)]*)\)", r"-\1", regex=True)
     s = s.str.replace(",", "", regex=False)

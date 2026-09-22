@@ -39,4 +39,33 @@ def build_asset_view(df, gi):
     idx = av.index[has_closed & ~no_open]
     av.loc[idx, "next_contract_date"] = open_starts.reindex(idx)
     av["time_to_redeploy"] = (av["next_contract_date"] - av["max_closed_date"]).dt.days
+
+    # Per-asset value + delinquency fields for the LTV / covenant analysis.
+    # initial_asset_value is constant per asset (cost on the first lease); the
+    # current Lendable value is the most recent (most depreciated) estimate, i.e.
+    # the min across the asset's contract rows (extraction-date value for open
+    # contracts, value-at-close for closed ones).
+    if "initial_asset_value" in df.columns:
+        av["initial_asset_value"] = g["initial_asset_value"].min()
+    else:
+        av["initial_asset_value"] = av["asset_cost"]
+    if "lendable_asset_value" in df.columns:
+        av["lendable_asset_value"] = g["lendable_asset_value"].min()
+    else:
+        av["lendable_asset_value"] = np.nan
+
+    # Asset-level DSLP = days since the most recent payment across the asset's
+    # contracts (falls back to the most recent closed_date for closed contracts).
+    if "last_payment_date" in df.columns:
+        av["last_payment_date"] = g["last_payment_date"].max()
+        av["dslp_days"] = (extraction_date - av["last_payment_date"]).dt.days
+    else:
+        av["last_payment_date"] = pd.NaT
+        av["dslp_days"] = np.nan
+
+    # Guide: "an active asset is defined as an asset with positive current value
+    # that has not been sold to third parties or end customers." Screening proxy:
+    # positive Lendable current value AND currently on an open contract (paid-off /
+    # sold and fully depreciated assets fall out).
+    av["is_active_asset"] = (av["lendable_asset_value"] > 0) & (av["open_count"] >= 1)
     return av.reset_index()

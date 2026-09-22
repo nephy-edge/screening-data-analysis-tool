@@ -521,6 +521,47 @@ def _rental_variance_check(cohorts: "pd.DataFrame") -> list:
     return checks
 
 
+def _status_mapping_check(gi, raw: pd.DataFrame) -> list[dict]:
+    """Flags when a large share of this file's own `status` values aren't
+    covered by General Inputs' status_map (open_label/closed_label/
+    paidoff_label - see rental_analysis/general_inputs.py's DEFAULT_STATUS_MAP,
+    which only recognises "Closed"/"Open"/"Repaid"/"Active"/"Write-off"
+    exactly). status_mapping = raw["status"].map(status_map) silently returns
+    NaN for anything else, and NaN never equals open_label/closed_label
+    anywhere downstream (last_active_date, churn_rate, redeployed,
+    days_to_recovery in data_input.py/lease_cohorts.py) - so an unrecognised
+    status vocabulary doesn't error, it just silently zeroes out Churn
+    Analysis (PCTILE_95/AVG_CHURN/STRESS_CHURN all computing to exactly 0)
+    and can distort recovered/redeployed figures. This is the same failure
+    mode already documented for the legacy Excel workbooks (the Status field
+    never taking the literal value the churn formula filtered on) - this
+    check can't fix a status vocabulary mismatch (status_map isn't yet
+    user-editable in the UI), only make it visible instead of silent."""
+    checks: list[dict] = []
+    if raw is None or "status" not in raw.columns or raw.empty:
+        return checks
+    status_map = getattr(gi, "status_map", None) or {}
+    mapped = raw["status"].map(status_map)
+    unmapped_frac = mapped.isna().mean()
+    if unmapped_frac > 0.1:
+        sample = sorted(set(raw.loc[mapped.isna(), "status"].dropna().astype(str)))[:8]
+        checks.append({
+            "level": "warning",
+            "check_id": "status_map_coverage",
+            "message": (
+                f"**{unmapped_frac:.0%} of rows have a Status value not recognised by the "
+                f"open/closed/paid-off mapping** (recognised: {', '.join(sorted(status_map.keys()))}) "
+                f"- unrecognised values seen: {', '.join(sample)}{'…' if len(sample) == 8 else ''}. "
+                "An unrecognised status is silently treated as neither open nor closed, which "
+                "zeroes out Churn Analysis (PCTILE_95/AVG_CHURN/STRESS_CHURN) and can distort "
+                "recovered/redeployed figures - the same failure mode documented in the legacy "
+                "Excel templates (the Status field never matching the literal string the churn "
+                "formula filtered on)."
+            ),
+        })
+    return checks
+
+
 def _rental_data_quality_checks(
     raw: pd.DataFrame,
     cohorts: pd.DataFrame,
@@ -537,4 +578,6 @@ def _rental_data_quality_checks(
         checks += _cohort_threshold_check(gi, cohorts, filtered)
     if gi is not None and ue_data is not None:
         checks += _useful_life_sanity_check(gi, ue_data)
+    if gi is not None:
+        checks += _status_mapping_check(gi, raw)
     return checks

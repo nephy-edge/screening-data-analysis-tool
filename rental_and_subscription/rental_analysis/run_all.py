@@ -18,7 +18,10 @@ from rental_analysis.ue_analysis import UeAnalysis
 from rental_analysis.ts_covenants import build_ts_covenants
 from rental_analysis.general_analysis import describe as general_analysis
 
-DATE_COLS = ["start_date", "expected_end_date", "closed_date", "asset_recovery_date", "recovery_date"]
+DATE_COLS = [
+    "start_date", "expected_end_date", "closed_date", "asset_recovery_date",
+    "recovery_date", "last_payment_date",
+]
 
 
 def run(contract_csv_path):
@@ -73,7 +76,7 @@ def run(contract_csv_path):
             print(f"  {k}: {v}")
     print()
 
-    ue = UeAnalysis(df, av, curve, gi.as_calc_dict())
+    ue = UeAnalysis(df, av, curve, gi.as_calc_dict(), churn)
     print("=" * 60)
     print("UNIT ECONOMICS ANALYSIS")
     print("=" * 60)
@@ -81,7 +84,7 @@ def run(contract_csv_path):
         print(f"  {k}: {v}")
     print()
 
-    ltv = LtvAnalysis(df, churn, gi.as_calc_dict())
+    ltv = LtvAnalysis(df, churn, gi.as_calc_dict(), av)
     print("=" * 60)
     print("LTV ANALYSIS")
     print("=" * 60)
@@ -89,7 +92,9 @@ def run(contract_csv_path):
         print(f"  {k}: {v}")
     print()
 
-    ts = build_ts_covenants(ue.as_dict(), ltv.as_dict(), curve)
+    ts = build_ts_covenants(
+        ue.as_dict(), ltv.as_dict(), curve, gi.as_calc_dict().get("debt_service_180d")
+    )
     print("=" * 60)
     print("TS COVENANTS")
     print("=" * 60)

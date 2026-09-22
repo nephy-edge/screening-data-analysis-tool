@@ -1,6 +1,10 @@
-"""Renders the sign-in screen (real Google OAuth when configured, otherwise
-a temporary self-declared-email fallback) and reports the active auth mode
-for the rest of the app to branch on."""
+"""Renders the sign-in screen (Cognito via Streamlit's native OIDC support
+when the container is running on the ECS Express deployment, real Google
+OAuth when a Google client is configured, otherwise a temporary
+self-declared-email fallback) and reports the active auth mode for the rest
+of the app to branch on."""
+
+import os
 
 import streamlit as st
 from google_oauth import (
@@ -114,7 +118,38 @@ def _render_google_login_gate() -> str:
     return ""
 
 
+def _render_cognito_login_gate() -> str:
+    """Streamlit's native OIDC login (st.login/st.user), backed by AWS
+    Cognito. Only reached when COGNITO_CLIENT_ID is set - i.e. the ECS
+    Express deployment, where docker-entrypoint.sh has rendered the [auth]
+    block those credentials feed into - so local dev and any Streamlit
+    Cloud / Google-sign-in deployment are unaffected.
+
+    Fails closed: st.user only gains is_logged_in once [auth] is actually
+    configured; without it, reading the attribute raises AttributeError. A
+    bare getattr(st.user, "is_logged_in", False) would fail OPEN instead -
+    serving an internet-facing app with no gate at all - so this checks
+    hasattr first and refuses to serve rather than let that exception fall
+    through."""
+    if not hasattr(st.user, "is_logged_in"):
+        st.error("Authentication is misconfigured - refusing to serve.")
+        st.stop()
+        return ""
+    if not st.user.is_logged_in:
+        st.subheader("Sign in")
+        st.caption("Sign in with your Lendable account to continue.")
+        st.button("Log in", on_click=st.login, type="primary")
+        st.stop()
+        return ""
+    email = (st.user.email or "").strip().lower()
+    st.session_state["current_user"] = email
+    st.session_state["auth_mode"] = "cognito"
+    return email
+
+
 def _render_login_gate() -> str:
+    if os.environ.get("COGNITO_CLIENT_ID"):
+        return _render_cognito_login_gate()
     _restore_session_from_cookie()
     if st.session_state.get("current_user"):
         return st.session_state["current_user"]

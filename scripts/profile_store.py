@@ -26,24 +26,11 @@ import re
 import secrets
 from pathlib import Path
 
-from snapshot_common import snapshot_fields
+from snapshot_common import safe_id as _safe_id, safe_session_id as _safe_session_id, snapshot_fields
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 PROFILES_DIR = _DATA_DIR / "profiles"
 SHARES_DIR = _DATA_DIR / "shares"
-
-
-def _safe_id(user_id: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", (user_id or "").strip().lower())
-    return slug or "unknown"
-
-
-def _safe_session_id(session_id: str) -> str:
-    # Unlike _safe_id (user emails, where case-folding is desirable), a
-    # session_id is an opaque, case-sensitive random token - lowercasing it
-    # would risk two distinct generated ids colliding on disk.
-    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", (session_id or "").strip())
-    return slug or "unknown"
 
 
 def _save_snapshot(

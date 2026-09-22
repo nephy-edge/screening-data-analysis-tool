@@ -4,6 +4,7 @@ plus the small on-disk JSON cache their results are memoized through."""
 
 import json
 import os
+import re
 
 import requests
 import streamlit as st
@@ -201,6 +202,120 @@ def _suggest_mapping(
         if vals:
             active_status_values = vals
     return mapping, exclude_suggestion, active_status_values
+
+
+def _suggest_derived_column(columns: list, request: str) -> dict:
+    """Ask DeepSeek V4 Flash (via DeepInfra) to translate a user's
+    natural-language request into a safe arithmetic formula for deriving a new
+    column, e.g. "Expected Interest = Gross Loan Value - Principal Value" ->
+    {"name": "Expected Interest", "formula": "Gross Loan Value - Principal
+    Value"}. Returns {} when no API key is configured; raises on
+    network/parsing errors so the caller can surface a clear message. The model
+    only writes the formula - the value is never computed by the LLM, only by
+    the deterministic evaluator (web_api/derive_columns.py)."""
+    api_key = _get_deepinfra_api_key()
+    if not api_key:
+        return {}
+    system_prompt = app_config.render_prompt(
+        app_config.AI_PROMPTS["derive_suggestion"],
+        columns=", ".join(str(c) for c in columns),
+        request=request,
+    ).strip()
+
+    resp = requests.post(
+        DEEPINFRA_CHAT_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": DEEPINFRA_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": request},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": app_config.AI["derive_suggestion_max_tokens"],
+        },
+        timeout=app_config.AI["request_timeout_seconds"],
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    parsed = json.loads(content)
+    name = str(parsed.get("name") or "").strip()
+    formula = str(parsed.get("formula") or "").strip()
+    if not name or not formula:
+        return {}
+    # Only keep formulas whose referenced columns all exist - never ship a
+    # formula that references a column the file doesn't actually have.
+    valid = {str(c) for c in columns}
+    from derive_columns import _collect_cols, _parse_formula
+
+    try:
+        referenced = set(_collect_cols(_parse_formula(formula)))
+    except Exception:
+        return {}
+    if referenced - valid:
+        return {}
+    return {"name": name, "formula": formula}
+
+
+# Same forbidden-keyword list the warehouse Query API itself enforces
+# server-side (redshift-api/app/main.py's _validate_read_only) - that's the
+# real enforcement boundary; this is just a fast, clear client-side check so
+# a bad translation surfaces immediately instead of after a round trip.
+_REDSHIFT_FORBIDDEN_SQL = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|MERGE|DROP|TRUNCATE|ALTER|CREATE|GRANT|"
+    r"REVOKE|COPY|UNLOAD|CALL|VACUUM|REINDEX|REFRESH|COMMENT)\b",
+    re.IGNORECASE,
+)
+
+
+def _suggest_redshift_filter(table: str, columns: list, request: str) -> dict:
+    """Ask DeepSeek V4 Flash (via DeepInfra) to translate a user's
+    natural-language description into a SQL WHERE condition for filtering a
+    warehouse table fetch, e.g. "active loans from 2024 onwards" ->
+    {"where": "STATUS = 'ACTIVE' AND ORIGINATION_DATE >= '2024-01-01'"}.
+    Returns {} when no API key is configured, the model declined (too
+    vague), or the result fails the safety checks below; raises on network/
+    parsing errors so the caller can surface a clear message. The suggested
+    condition is shown to the user to review/edit before it's ever run -
+    this only has to be a good starting point, not perfect."""
+    api_key = _get_deepinfra_api_key()
+    if not api_key:
+        return {}
+    system_prompt = app_config.render_prompt(
+        app_config.AI_PROMPTS["redshift_filter_suggestion"],
+        table=table,
+        columns=", ".join(str(c) for c in columns),
+        request=request,
+    ).strip()
+
+    resp = requests.post(
+        DEEPINFRA_CHAT_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": DEEPINFRA_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": request},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": app_config.AI["redshift_filter_suggestion_max_tokens"],
+        },
+        timeout=app_config.AI["request_timeout_seconds"],
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    parsed = json.loads(content)
+    where = str(parsed.get("where") or "").strip().rstrip(";")
+    if not where:
+        return {}
+    # Never ship something that isn't a plain condition: a stray semicolon
+    # (a second statement), or a write/DDL keyword despite the prompt.
+    if ";" in where or _REDSHIFT_FORBIDDEN_SQL.search(where):
+        return {}
+    return {"where": where}
+
 
 
 def _suggest_escalation_writeup(filename: str, facts: list, model_name: str) -> dict:

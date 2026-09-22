@@ -68,31 +68,61 @@ from template_analysis.ltv_calculator import (  # noqa: E402
 )
 from template_analysis.ue_analysis import UeAnalysis as LendingUeAnalysis  # noqa: E402
 
+import document_text  # noqa: E402
 import drive_store  # noqa: E402
 import profile_store  # noqa: E402
+import s3_store  # noqa: E402
 from data_normalize import _clean_numeric, _coerce_dates, _format_normalize  # noqa: E402
 from html_tables import (  # noqa: E402
-    _render_big_number_card, _render_matrix_table, _render_snapshot_table, _ue_model_badge, fmt,
+    _render_big_number_card,
+    _render_matrix_table,
+    _render_snapshot_table,
+    _ue_model_badge,
+    fmt,
 )
 from quality_checks import (  # noqa: E402
-    _lending_data_quality_checks, _rental_data_quality_checks, _validate_mapping,
+    _lending_data_quality_checks,
+    _rental_data_quality_checks,
+    _validate_mapping,
+)
+from summary_metrics import (  # noqa: E402
+    lending_summary_metrics,
+    rental_summary_metrics,
 )
 from ca_bundle import _ca_bundle_path  # noqa: E402
 from ai_client import (  # noqa: E402
-    _ask_data_chatbot, _cache_key, _get_deepinfra_api_key, _invalidate_ai_mapping_guesses,
-    _load_cache, _save_cache, _suggest_escalation_writeup, _suggest_mapping,
+    _ask_data_chatbot,
+    _cache_key,
+    _get_deepinfra_api_key,
+    _invalidate_ai_mapping_guesses,
+    _load_cache,
+    _save_cache,
+    _suggest_escalation_writeup,
+    _suggest_mapping,
 )
 from chat_context import _build_lending_chat_context, _build_rental_chat_context  # noqa: E402
 from integrations import (  # noqa: E402
-    _fetch_usd_fx_rates, _get_redshift_api_key, _get_redshift_api_url, _get_slack_webhook_url,
-    _redshift_fetch_loan_tape, _redshift_list_borrowers, _send_slack_feedback,
+    _fetch_usd_fx_rates,
+    _get_redshift_api_key,
+    _get_redshift_api_url,
+    _get_slack_webhook_url,
+    _redshift_fetch_loan_tape,
+    _redshift_list_borrowers,
+    _send_slack_feedback,
 )
 from google_oauth import (  # noqa: E402
-    _exchange_google_code, _gdrive_access_token, _gdrive_token, _get_google_client_id,
-    _get_google_client_secret, _google_auth_url, _google_redirect_uri,
+    _exchange_google_code,
+    _gdrive_access_token,
+    _gdrive_token,
+    _get_google_client_id,
+    _get_google_client_secret,
+    _google_auth_url,
+    _google_redirect_uri,
 )
 from session_cookie import (  # noqa: E402
-    _clear_session_cookie_and_reload, _consume_oauth_state, _issue_oauth_state,
+    _clear_session_cookie_and_reload,
+    _consume_oauth_state,
+    _issue_oauth_state,
 )
 from login_gates import _auth_mode, _render_login_gate  # noqa: E402
 
@@ -102,19 +132,25 @@ from login_gates import _auth_mode, _render_login_gate  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "rental_and_subscription"))
 
 from rental_analysis.asset_view import (  # noqa: E402
-    build_asset_view, count_missing_asset_id_rows,
+    build_asset_view,
+    count_missing_asset_id_rows,
 )
 from rental_analysis.churn_analysis import ChurnAnalysis  # noqa: E402
 from rental_analysis.cohorts_for_x_or_more_loans import filter_cohorts  # noqa: E402
 from rental_analysis.data_input import (  # noqa: E402
-    REQUIRED_COLUMNS, OPTIONAL_COLUMNS, apply_fallbacks, process_data_input,
+    REQUIRED_COLUMNS,
+    OPTIONAL_COLUMNS,
+    apply_fallbacks,
+    process_data_input,
 )
 from rental_analysis.general_analysis import describe as general_analysis  # noqa: E402
 from rental_analysis.general_inputs import (  # noqa: E402
-    DEFAULT_STATUS_MAP, GeneralInputs,
+    DEFAULT_STATUS_MAP,
+    GeneralInputs,
 )
 from rental_analysis.lease_cohorts import (  # noqa: E402
-    build_cohorts, count_unparsed_cohort_rows,
+    build_cohorts,
+    count_unparsed_cohort_rows,
 )
 from rental_analysis.ltv_analysis import LtvAnalysis  # noqa: E402
 from rental_analysis.repayment_curve import build_repayment_curve  # noqa: E402
@@ -124,7 +160,9 @@ from rental_analysis.ue_analysis import UeAnalysis  # noqa: E402
 # export_workbook imports from both template_analysis and rental_analysis, so
 # it can only be imported after both sys.path.insert calls above.
 from export_workbook import (  # noqa: E402
-    _add_chat_history_sheet, _build_lending_export_workbook, _build_rental_export_workbook,
+    _add_chat_history_sheet,
+    _build_lending_export_workbook,
+    _build_rental_export_workbook,
 )
 
 
@@ -341,8 +379,8 @@ render_cover(
     "Structured Credit Analysis - LTV & Unit Economics",
     "Upload loan-level portfolio data, map your columns to the Data Input "
     "template, and the analysis is computed automatically across all sheets."
-    if _model_key == "lending" else
-    "Upload contract-level lease/rental data, map your columns to the Data Input "
+    if _model_key == "lending"
+    else "Upload contract-level lease/rental data, map your columns to the Data Input "
     "template, and the analysis is computed automatically across all sheets.",
 )
 
@@ -359,13 +397,31 @@ model_key = st.selectbox(
 if st.session_state.get("_active_model") != model_key:
     st.session_state["_active_model"] = model_key
     for k in (
-        "uploaded_file_id", "analysis_ran", "analysis_mapping", "analysis_mapping_warnings",
-        "analysis_gi_overrides", "analysis_currency", "analysis_exclude_rule",
-        "analysis_active_status_values", "restored_session", "restored_session_checked_id",
-        "derived_columns", "dc_ai_suggestion", "custom_chart_cards", "custom_chart_next_id",
-        "export_charts", "context_files", "context_documents", "context_doc_ids",
-        "gs_download_id", "gs_bytes", "gs_name", "ai_chat_history", "analysis_context",
-        "data_source", "uploader",
+        "uploaded_file_id",
+        "analysis_ran",
+        "analysis_mapping",
+        "analysis_mapping_warnings",
+        "analysis_gi_overrides",
+        "analysis_currency",
+        "analysis_exclude_rule",
+        "analysis_active_status_values",
+        "restored_session",
+        "restored_session_checked_id",
+        "derived_columns",
+        "dc_ai_suggestion",
+        "custom_chart_cards",
+        "custom_chart_next_id",
+        "export_charts",
+        "context_files",
+        "context_documents",
+        "context_doc_ids",
+        "gs_download_id",
+        "gs_bytes",
+        "gs_name",
+        "ai_chat_history",
+        "analysis_context",
+        "data_source",
+        "uploader",
     ):
         st.session_state.pop(k, None)
 is_lending = model_key == "lending"
@@ -375,6 +431,8 @@ is_lending = model_key == "lending"
 def _cached_list_profiles(auth_mode: str, identity: str) -> list:
     if auth_mode == "google":
         return drive_store.list_profiles(identity)
+    if auth_mode == "cognito":
+        return s3_store.list_profiles(identity)
     return profile_store.list_profiles(identity)
 
 
@@ -396,7 +454,8 @@ def _store_list_profiles() -> list:
         except Exception:
             return []
         return _cached_list_profiles("google", token)
-    return _cached_list_profiles("dummy", st.session_state.get("current_user", ""))
+    identity = st.session_state.get("current_user", "")
+    return _cached_list_profiles(_auth_mode(), identity)
 
 
 def _store_load_profile(session_id: str) -> dict | None:
@@ -406,19 +465,24 @@ def _store_load_profile(session_id: str) -> dict | None:
         except Exception:
             return None
         return drive_store.load_profile(token, session_id)
-    return profile_store.load_profile(st.session_state.get("current_user", ""), session_id)
+    identity = st.session_state.get("current_user", "")
+    if _auth_mode() == "cognito":
+        return s3_store.load_profile(identity, session_id)
+    return profile_store.load_profile(identity, session_id)
 
 
 def _store_save_profile(session_id: str, **snapshot_kwargs) -> None:
     """Best-effort: never raises, since auto-save must not block the analysis."""
     try:
-        if _auth_mode() == "google":
+        auth_mode = _auth_mode()
+        identity = st.session_state.get("current_user", "")
+        if auth_mode == "google":
             token = _gdrive_access_token(st.session_state["gdrive_token"])
             drive_store.save_profile(token, session_id, **snapshot_kwargs)
+        elif auth_mode == "cognito":
+            s3_store.save_profile(identity, session_id, **snapshot_kwargs)
         else:
-            profile_store.save_profile(
-                st.session_state.get("current_user", ""), session_id, **snapshot_kwargs
-            )
+            profile_store.save_profile(identity, session_id, **snapshot_kwargs)
     except Exception:
         pass
 
@@ -428,6 +492,8 @@ def _store_create_share(**snapshot_kwargs) -> str:
     if _auth_mode() == "google":
         token = _gdrive_access_token(st.session_state["gdrive_token"])
         return drive_store.create_share(token, current_user, **snapshot_kwargs)
+    if _auth_mode() == "cognito":
+        return s3_store.create_share(current_user, **snapshot_kwargs)
     return profile_store.create_share(current_user, **snapshot_kwargs)
 
 
@@ -438,6 +504,8 @@ def _store_load_share(share_id: str) -> dict | None:
         except Exception:
             return None
         return drive_store.load_share(token, share_id)
+    if _auth_mode() == "cognito":
+        return s3_store.load_share(share_id)
     return profile_store.load_share(share_id)
 
 
@@ -446,12 +514,20 @@ _user_bar_l, _user_bar_r = st.columns([5, 1], vertical_alignment="center")
 with _user_bar_l:
     if _auth_mode() == "google":
         st.caption(f"Signed in as **{current_user}** via Google")
+    elif _auth_mode() == "cognito":
+        st.caption(f"Signed in as **{current_user}**")
     else:
         st.caption(f"Signed in as **{current_user}** (temporary sign-in, not yet real SSO)")
 with _user_bar_r:
     if st.button("Log out", key="logout_btn"):
-        st.session_state.clear()
-        _clear_session_cookie_and_reload()
+        if _auth_mode() == "cognito":
+            # Streamlit's native auth owns its own session cookie - separate
+            # from session_cookie.py, which the google/dummy paths use - so
+            # it needs its own logout call, not a clear-and-reload.
+            st.logout()
+        else:
+            st.session_state.clear()
+            _clear_session_cookie_and_reload()
 
 feedback_col = st.columns([5, 1], vertical_alignment="bottom")[1]
 
@@ -529,17 +605,28 @@ RENTAL_CONFIG = dict(
     id_field="contract_id",
     input_columns=[(c, True) for c in REQUIRED_COLUMNS] + [(c, False) for c in OPTIONAL_COLUMNS],
     date_fields={
-        "start_date", "expected_end_date", "closed_date", "asset_recovery_date",
-        "recovery_date", "last_payment_date",
+        "start_date",
+        "expected_end_date",
+        "closed_date",
+        "asset_recovery_date",
+        "recovery_date",
+        "last_payment_date",
     },
     numeric_fields={
-        "downpayment", "total_contract_value", "monthly_expected_payment",
-        "amount_expected_to_date", "total_paid", "cost_of_asset",
-        "current_asset_value", "recovery_amount",
+        "downpayment",
+        "total_contract_value",
+        "monthly_expected_payment",
+        "amount_expected_to_date",
+        "total_paid",
+        "cost_of_asset",
+        "current_asset_value",
+        "recovery_amount",
     },
     dayfirst=False,
     primary_date_field="start_date",
-    mapping_cache_path=os.path.join(os.path.expanduser("~"), ".rental_sc_analysis_column_mappings.json"),
+    mapping_cache_path=os.path.join(
+        os.path.expanduser("~"), ".rental_sc_analysis_column_mappings.json"
+    ),
     needs_status_map=True,
     domain_hint="rental/lease contract-level dataset",
 )
@@ -549,7 +636,9 @@ DATE_FIELDS = active_cfg["date_fields"]
 NUMERIC_FIELDS = active_cfg["numeric_fields"]
 REQUIRED_FIELDS = {t for t, required in INPUT_COLUMNS if required}
 MAPPING_CACHE_PATH = active_cfg["mapping_cache_path"]
-STATUS_CACHE_PATH = os.path.join(os.path.expanduser("~"), ".rental_sc_analysis_status_mappings.json")
+STATUS_CACHE_PATH = os.path.join(
+    os.path.expanduser("~"), ".rental_sc_analysis_status_mappings.json"
+)
 
 
 def _read_uploaded_bytes(uploaded) -> bytes:
@@ -560,115 +649,26 @@ def _read_uploaded_bytes(uploaded) -> bytes:
         return uploaded.read()
 
 
-def _extract_pdf_text(data: bytes) -> str:
-    try:
-        from pypdf import PdfReader
-    except ImportError:
-        raise RuntimeError("PDF support requires the 'pypdf' package (pip install pypdf).")
-    reader = PdfReader(io.BytesIO(data))
-    parts = []
-    for page in reader.pages:
-        text = page.extract_text() or ""
-        if text.strip():
-            parts.append(text)
-    return "\n".join(parts)
-
-
-def _extract_excel_text(data: bytes) -> str:
-    from openpyxl import load_workbook
-
-    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-    lines = []
-    try:
-        for ws in wb.worksheets:
-            lines.append(f"=== Sheet: {ws.title} ===")
-            for n, row in enumerate(ws.iter_rows(values_only=True), 1):
-                vals = [str(v) for v in row if v is not None]
-                if vals:
-                    lines.append(" | ".join(vals))
-                if n >= 2000:
-                    lines.append("...[sheet truncated at 2000 rows]")
-                    break
-    finally:
-        wb.close()
-    return "\n".join(lines)
-
-
-def _extract_docx_text(data: bytes) -> str:
-    try:
-        from docx import Document
-    except ImportError:
-        raise RuntimeError(
-            "Word support requires the 'python-docx' package (pip install python-docx)."
-        )
-    doc = Document(io.BytesIO(data))
-    parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
-    for table in doc.tables:
-        for row in table.rows:
-            parts.append(" | ".join(c.text.strip() for c in row.cells))
-    return "\n".join(parts)
-
-
-def _extract_text_file(data: bytes) -> str:
-    for enc in ("utf-8-sig", "utf-8", "latin-1"):
-        try:
-            return data.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
-
-
 def _extract_document_text(uploaded) -> dict:
-    """Extract readable text from an uploaded document so it can be included in
-    AI context. Returns {"name", "text", "error"}; a missing/unsupported parser
-    or a parse failure surfaces as an "error" note instead of breaking upload."""
-    name = uploaded.name or "document"
-    suffix = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-    data = _read_uploaded_bytes(uploaded)
-    try:
-        if suffix == "pdf":
-            text = _extract_pdf_text(data)
-        elif suffix in ("xlsx", "xlsm"):
-            text = _extract_excel_text(data)
-        elif suffix == "docx":
-            text = _extract_docx_text(data)
-        elif suffix in ("txt", "csv", "md", "json", "log"):
-            text = _extract_text_file(data)
-        else:
-            return {
-                "name": name,
-                "text": "",
-                "error": f"Unsupported file type '.{suffix}' - use PDF, Excel, Word (.docx), or text files.",
-            }
-    except Exception as e:
-        return {"name": name, "text": "", "error": str(e)}
-    return {"name": name, "text": text, "error": None}
+    """Extract readable text from a Streamlit-uploaded document - see
+    scripts/document_text.py (shared with web_api/main.py's
+    /api/context-docs so both apps extract identically)."""
+    return document_text.extract_document_text(uploaded.name, _read_uploaded_bytes(uploaded))
 
 
 def _truncate_text(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"\n...[truncated, {len(text) - limit:,} chars omitted]"
+    return document_text.truncate_text(text, limit)
 
 
 def _ai_context_text(max_chars: int = 60000, per_doc: int = 15000) -> str:
     """Combine the user's free-text notes with text extracted from uploaded
     documents into one prompt block, truncated to keep AI calls bounded."""
-    parts = []
-    notes = st.session_state.get("analysis_context", "").strip()
-    if notes:
-        parts.append("## Additional context notes\n" + notes)
-    for doc in st.session_state.get("context_documents", []):
-        if doc.get("error"):
-            parts.append(
-                f"## Uploaded document: {doc['name']}\n[Could not be used: {doc['error']}]"
-            )
-        else:
-            parts.append(
-                f"## Uploaded document: {doc['name']}\n" + _truncate_text(doc["text"], per_doc)
-            )
-    text = "\n\n".join(parts)
-    return _truncate_text(text, max_chars) if len(text) > max_chars else text
+    return document_text.combine_context_text(
+        st.session_state.get("analysis_context", ""),
+        st.session_state.get("context_documents", []),
+        max_chars=max_chars,
+        per_doc=per_doc,
+    )
 
 
 def _render_ue_model_ai_tab(df: pd.DataFrame, ue_data: dict) -> None:
@@ -1668,6 +1668,7 @@ def _render_custom_visualizations_tab(
             st.session_state["export_charts"] = []
             st.rerun()
 
+
 def _render_ai_chat_tab(context: str) -> None:
     st.subheader("Ask AI")
     st.caption(
@@ -1935,11 +1936,15 @@ def _parse_uploaded(file_bytes: bytes, name: str, sheet_name: str | None) -> pd.
     cached value is never corrupted in place."""
     if name.endswith(".csv"):
         return pd.read_csv(io.BytesIO(file_bytes))
-    xls = pd.ExcelFile(io.BytesIO(file_bytes))
+    # engine="calamine" (a Rust reader) vs pandas' openpyxl default: ~16x
+    # faster end-to-end on a real 23.8MB/39k-row upload (49.7s -> 3.0s, most
+    # of it openpyxl's ~38.7s just to open the workbook), output verified
+    # byte-identical (df.equals() True) on that same file - openpyxl scales
+    # badly with workbook size since it eagerly builds an in-memory object
+    # model of the whole file.
+    xls = pd.ExcelFile(io.BytesIO(file_bytes), engine="calamine")
     df = xls.parse(sheet_name)
-    unnamed_frac = sum(str(c).startswith("Unnamed:") for c in df.columns) / max(
-        len(df.columns), 1
-    )
+    unnamed_frac = sum(str(c).startswith("Unnamed:") for c in df.columns) / max(len(df.columns), 1)
     if unnamed_frac >= 0.5:
         preview = xls.parse(sheet_name, header=None, nrows=10)
         for i in range(1, len(preview)):
@@ -1970,7 +1975,7 @@ def _read_tabular_file(uploaded, key_suffix: str = "") -> pd.DataFrame:
             return _parse_uploaded(file_bytes, name, None)
 
     with st.spinner("Reading file..."):
-        xls = pd.ExcelFile(io.BytesIO(file_bytes))
+        xls = pd.ExcelFile(io.BytesIO(file_bytes), engine="calamine")
         # "_App Session" is a hidden bookkeeping sheet this app writes into
         # its own exports (see _detect_restored_session) - never a candidate
         # for loan-level data, so hide it from the picker entirely.
@@ -2162,9 +2167,7 @@ else:
             )
             if multi_mode == "Analyze one file":
                 names = [f.name for f in uploaded_files]
-                picked_name = st.selectbox(
-                    "Which file?", options=names, key="active_upload_name"
-                )
+                picked_name = st.selectbox("Which file?", options=names, key="active_upload_name")
                 uploaded = next(f for f in uploaded_files if f.name == picked_name)
                 file_id = uploaded.file_id
                 file_name = uploaded.name
@@ -2213,11 +2216,11 @@ else:
         redshift_row_limit = st.number_input(
             "Max rows to fetch",
             min_value=100,
-            max_value=2_000_000,
             value=100_000,
             step=1000,
             key="redshift_row_limit",
-            help="Loan tapes can be very large - raise this if you need the full portfolio.",
+            help="Loan tapes can be very large - raise this if you need the full portfolio. "
+            "The warehouse API itself has no row cap.",
         )
         file_id = f"redshift:{redshift_borrower}:{int(redshift_row_limit)}"
         file_name = f"{redshift_borrower}_loan_tape.csv"
@@ -2688,7 +2691,10 @@ with st.container(border=True):
             funding_cost_pct = st.number_input(
                 "Funding cost (% p.a.)",
                 value=float(restored_gi.get("funding_cost_pct", 0.13)),
-                min_value=0.0, max_value=1.0, step=0.01, format="%.4f",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.01,
+                format="%.4f",
                 help="Lendable's cost of funding, per annum, as a share of the asset cost - netted "
                 "out of the UE margin over the useful life (Guide: UE = cash margin after the cost "
                 "of funding and direct costs).",
@@ -2697,7 +2703,10 @@ with st.container(border=True):
             direct_cost_pct = st.number_input(
                 "Direct cost (% p.a.)",
                 value=float(restored_gi.get("direct_cost_pct", 0.02)),
-                min_value=0.0, max_value=1.0, step=0.01, format="%.4f",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.01,
+                format="%.4f",
                 help="Direct operating/service cost, per annum, as a share of the asset cost - "
                 "netted out of the UE margin over the useful life.",
             )
@@ -2705,7 +2714,9 @@ with st.container(border=True):
             debt_service_180d = st.number_input(
                 "Debt service due over next 180 days",
                 value=float(restored_gi.get("debt_service_180d") or 0.0),
-                min_value=0.0, step=1000.0, format="%.0f",
+                min_value=0.0,
+                step=1000.0,
+                format="%.0f",
                 help="Total facility debt service payments due to Lendable over the following 180 "
                 "days. This is a facility-level input (not in the borrower tape) - required to "
                 "compute the Receivables Coverage Ratio covenant; leave 0 to show it as n/a.",
@@ -2715,7 +2726,10 @@ with st.container(border=True):
             fx_deval_pct = st.number_input(
                 "FX devaluation (95th %ile, % p.a.)",
                 value=float(restored_gi.get("fx_deval_pct") or 0.0),
-                min_value=0.0, max_value=1.0, step=0.01, format="%.4f",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.01,
+                format="%.4f",
                 help="The 95th percentile FX devaluation over the receivable term (up to 24 months), "
                 "used as the FX-risk component of the asset-value LTV. Enter 0 to ignore FX.",
             )
@@ -2729,11 +2743,17 @@ with st.container(border=True):
         st.subheader("Lendable status labels")
         sc1, sc2, sc3 = st.columns(3)
         with sc1:
-            open_label = st.text_input("Status used for active", value=restored_gi.get("open_label", "Open"))
+            open_label = st.text_input(
+                "Status used for active", value=restored_gi.get("open_label", "Open")
+            )
         with sc2:
-            closed_label = st.text_input("Status used for canceled", value=restored_gi.get("closed_label", "Closed"))
+            closed_label = st.text_input(
+                "Status used for canceled", value=restored_gi.get("closed_label", "Closed")
+            )
         with sc3:
-            paidoff_label = st.text_input("Status used for paid-off", value=restored_gi.get("paidoff_label", "Paid-off"))
+            paidoff_label = st.text_input(
+                "Status used for paid-off", value=restored_gi.get("paidoff_label", "Paid-off")
+            )
 
     submitted = st.button("Run analysis", key="run_analysis_button")
 
@@ -2746,7 +2766,9 @@ if submitted:
         # Expected Interest can be derived (Gross Loan Value - Principal Value) instead of
         # mapped directly, since many lenders only supply the loan's total value.
         and not (
-            t == "Expected Interest" and mapping.get("Gross Loan Value") and mapping.get("Principal Value")
+            t == "Expected Interest"
+            and mapping.get("Gross Loan Value")
+            and mapping.get("Principal Value")
         )
     ]
     if missing_required:
@@ -2787,19 +2809,21 @@ if submitted:
             "min_loans_per_cohort": min_loans_per_cohort,
         }
         if not is_lending:
-            overrides.update({
-                "months_since_default": months_since_default,
-                "useful_life_years": useful_life_years,
-                "churn_stress_multiplier": churn_stress_multiplier,
-                "open_label": open_label,
-                "closed_label": closed_label,
-                "paidoff_label": paidoff_label,
-                "funding_cost_pct": funding_cost_pct,
-                "direct_cost_pct": direct_cost_pct,
-                "debt_service_180d": debt_service_180d if debt_service_180d else None,
-                "fx_deval_pct": fx_deval_pct if fx_deval_pct else None,
-                "fx_discount_50pct": fx_discount_50pct,
-            })
+            overrides.update(
+                {
+                    "months_since_default": months_since_default,
+                    "useful_life_years": useful_life_years,
+                    "churn_stress_multiplier": churn_stress_multiplier,
+                    "open_label": open_label,
+                    "closed_label": closed_label,
+                    "paidoff_label": paidoff_label,
+                    "funding_cost_pct": funding_cost_pct,
+                    "direct_cost_pct": direct_cost_pct,
+                    "debt_service_180d": debt_service_180d if debt_service_180d else None,
+                    "fx_deval_pct": fx_deval_pct if fx_deval_pct else None,
+                    "fx_discount_50pct": fx_discount_50pct,
+                }
+            )
         st.session_state["analysis_gi_overrides"] = overrides
         st.session_state["analysis_ran"] = True
         _save_cache(MAPPING_CACHE_PATH, _cache_key(raw.columns), mapping)
@@ -2808,6 +2832,7 @@ if submitted:
 if not st.session_state.get("analysis_ran"):
     st.info("Map your file's columns above, then click 'Run analysis' to compute all sheets.")
     st.stop()
+
 
 @st.cache_data(
     show_spinner=False,
@@ -2892,13 +2917,21 @@ def _compute_rental_analysis(raw, gi_calc):
     churn = ChurnAnalysis(cohorts, gi_calc)
     ue = UeAnalysis(df, av, curve, gi_calc, churn)
     ltv = LtvAnalysis(df, churn, gi_calc, av)
-    ts = build_ts_covenants(
-        ue.as_dict(), ltv.as_dict(), curve, gi_calc.get("debt_service_180d")
-    )
+    ts = build_ts_covenants(ue.as_dict(), ltv.as_dict(), curve, gi_calc.get("debt_service_180d"))
     ue_data, ltv_data, ca_data = ue.as_dict(), ltv.as_dict(), churn.as_dict()
     return (
-        df, av, curve, cohorts, filtered, churn, ue_data, ltv_data, ca_data, ts,
-        fallback_notes, exclusion_notes,
+        df,
+        av,
+        curve,
+        cohorts,
+        filtered,
+        churn,
+        ue_data,
+        ltv_data,
+        ca_data,
+        ts,
+        fallback_notes,
+        exclusion_notes,
     )
 
 
@@ -3012,7 +3045,10 @@ with st.status("Running analysis...", state="running") as _analysis_status:
         status_key = _cache_key(raw_statuses)
         cached_status_map = _load_cache(STATUS_CACHE_PATH, status_key) or {}
         seed = [
-            {"Client status": s, "Lendable status": cached_status_map.get(s, DEFAULT_STATUS_MAP.get(s, ""))}
+            {
+                "Client status": s,
+                "Lendable status": cached_status_map.get(s, DEFAULT_STATUS_MAP.get(s, "")),
+            }
             for s in raw_statuses
         ]
         st.subheader("Status mapping")
@@ -3056,8 +3092,18 @@ with st.status("Running analysis...", state="running") as _analysis_status:
         gi_overrides["status_map"] = status_map
         gi = GeneralInputs(raw, **gi_overrides)
         (
-            df, av, curve, cohorts, filtered, churn, ue_data, ltv_data, ca_data, ts,
-            fallback_notes, exclusion_notes,
+            df,
+            av,
+            curve,
+            cohorts,
+            filtered,
+            churn,
+            ue_data,
+            ltv_data,
+            ca_data,
+            ts,
+            fallback_notes,
+            exclusion_notes,
         ) = _compute_rental_analysis(raw, gi.as_calc_dict())
         lending_chart_data = None
         dq_checks = _rental_data_quality_checks(raw, cohorts, RENTAL_CONFIG, gi, filtered, ue_data)
@@ -3085,42 +3131,49 @@ else:
 
 if is_lending:
     tab_names = [
-        "Summary", "Data Checks", "Cohorts", "LTV Analysis",
-        "Unit Economics Analysis", "Custom Visualizations", "Ask AI",
+        "Summary",
+        "Data Checks",
+        "Cohorts",
+        "LTV Analysis",
+        "Unit Economics Analysis",
+        "Custom Visualizations",
+        "Ask AI",
     ]
 else:
     tab_names = [
-        "Summary", "Data Checks", "Asset View", "Unit Economics Analysis",
-        "Churn Analysis", "LTV Analysis", "TS Covenants", "General Analysis",
-        "Custom Visualizations", "Ask AI",
+        "Summary",
+        "Data Checks",
+        "Asset View",
+        "Unit Economics Analysis",
+        "Churn Analysis",
+        "LTV Analysis",
+        "TS Covenants",
+        "General Analysis",
+        "Custom Visualizations",
+        "Ask AI",
     ]
 tabs = st.tabs(tab_names)
 if is_lending:
     with tabs[0]:
         st.subheader("Summary")
-        # "Outstanding" means still within its expected term, not yet matured (Reached T+3? =
-        # False) - a loan past maturity with an unrecovered shortfall is a credit loss (tracked
-        # separately via the Loss Rate metrics below), not an outstanding balance still being
-        # collected. The Loan Status values that additionally count as "still active" are
-        # user-picked in the "Loan status" mapping section (vocabulary isn't standardized across
-        # deals - "active" isn't assumed) - an empty selection skips this filter entirely, same
-        # as when Loan Status isn't mapped.
-        gbv_df = df[~df["Reached T+3?"]]
-        _active_status_values = st.session_state.get("analysis_active_status_values") or []
-        if "Loan Status" in gbv_df.columns and _active_status_values:
-            gbv_df = gbv_df[gbv_df["Loan Status"].astype(str).isin(_active_status_values)]
-        if gbv_df.empty:
-            outstanding_gbv = None
-        else:
-            principal = gbv_df["Principal Value"].sum()
-            interest = gbv_df["Expected Interest"].sum()
-            fees = gbv_df["Expected Fee"].sum()
-            paid = gbv_df["Total Paid"].sum()
-            outstanding_gbv = principal + interest + fees - paid
+        # Every figure on this tab comes from the shared summary_metrics module
+        # so the Streamlit Summary tab and the React app's Summary screen
+        # (web_api/main.py serves the same dict) can't drift apart. The Loan
+        # Status values that count as "still active" are user-picked in the
+        # "Loan status" mapping section (vocabulary isn't standardized across
+        # deals - "active" isn't assumed).
+        _summary = lending_summary_metrics(
+            df,
+            gi,
+            ue_data,
+            ltv_data,
+            active_status_values=st.session_state.get("analysis_active_status_values"),
+        )
+        outstanding_gbv = _summary["outstandingGbv"]
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric(
             "Data up to",
-            str(gi.extraction_date.date()),
+            _summary["dataUpTo"],
             help="As-of date of the loan tape (the most recent disbursement date in the data).",
         )
         c2.metric(
@@ -3151,73 +3204,50 @@ if is_lending:
             "confused with the APR or an Annualized Interest Rate).",
         )
 
-        matured_for_snapshot = df[df["Reached T+3?"]]
-        matured_paid = matured_for_snapshot["Total Paid"].sum()
-        matured_due = (
-            matured_for_snapshot["Total Due"].sum()
-            if "Total Due" in matured_for_snapshot.columns
-            else float("nan")
-        )
-        pvd_ratio = matured_paid / matured_due if matured_due else float("nan")
-        # Exclude any loan missing either Term (days) or Principal Value from BOTH the numerator
-        # and denominator - a loan with an unknown term must not be treated as having a 0-day
-        # term, which is what including its principal in the denominator alone would imply.
-        _term_ok = matured_for_snapshot[["Term (days)", "Principal Value"]].dropna()
-        matured_principal_snap = _term_ok["Principal Value"].sum()
-        weighted_avg_term_snap = (
-            (_term_ok["Term (days)"] * _term_ok["Principal Value"]).sum() / matured_principal_snap
-            if matured_principal_snap
-            else float("nan")
-        )
-        weighted_avg_term_months_snap = (
-            weighted_avg_term_snap / 30.4375 if pd.notna(weighted_avg_term_snap) else float("nan")
-        )
-        apr_proxy = (
-            (ue_data["Average Interest %"] / weighted_avg_term_months_snap) * 12
-            if weighted_avg_term_months_snap
-            else float("nan")
-        )
+        pvd_ratio = _summary["pvd"]
+        weighted_avg_term_snap = _summary["weightedAvgTermMatured"]
+        apr_proxy = _summary["aprProxy"]
 
         st.markdown("---")
         snapshot_col, chart_col = st.columns([1, 1.3])
         with snapshot_col:
             st.subheader("Portfolio Snapshot")
-            date_range = f"{df['Disbursement Date'].min().date()} to {gi.extraction_date.date()}"
+            date_range = f"{_summary['dateRangeStart']} to {_summary['dateRangeEnd']}"
             snapshot_rows = [
                 (
                     "Date Range",
                     date_range,
                     "From the earliest disbursement date to the tape as-of date.",
                 ),
-                ("Loans", f"{len(df):,}", "Total number of loan records in the tape."),
+                ("Loans", f"{_summary['loans']:,}", "Total number of loan records in the tape."),
                 (
                     "Value of Principal Disbursed",
-                    f"${df['Principal Value'].sum():,.0f}",
+                    f"${_summary['principalDisbursed']:,.0f}",
                     "Total principal amount lent across all loans.",
                 ),
                 (
                     "Total Collected",
-                    f"${df['Total Paid'].sum():,.0f}",
+                    f"${_summary['totalCollected']:,.0f}",
                     "Total cash collected from borrowers to date.",
                 ),
                 (
                     "Expected Interest %",
-                    fmt(ue_data["Average Interest %"]),
+                    fmt(_summary["expectedInterestPct"]),
                     "Total expected interest as a share of total principal across all loans.",
                 ),
                 (
                     "Expected Fee %",
-                    fmt(ue_data["Average Fee %"]),
+                    fmt(_summary["expectedFeePct"]),
                     "Total expected fees as a share of total principal across all loans.",
                 ),
                 (
                     "Avg Loan Value",
-                    f"${ue_data['Average Principal Amount']:,.0f}",
+                    f"${_summary['avgLoanValue']:,.0f}",
                     "Average principal amount per loan.",
                 ),
                 (
                     "Avg Total Revenue",
-                    fmt(ltv_data["Average Total Revenue %"]),
+                    fmt(_summary["avgTotalRevenuePct"]),
                     "Expected interest + fees as a share of total principal.",
                 ),
                 (
@@ -3262,7 +3292,9 @@ if is_lending:
                     ),
                     tooltip=[
                         alt.Tooltip("Cohort:T"),
-                        alt.Tooltip("Total Principal:Q", format=",.0f", title="Principal Disbursed"),
+                        alt.Tooltip(
+                            "Total Principal:Q", format=",.0f", title="Principal Disbursed"
+                        ),
                         alt.Tooltip("Loan Count:Q", title="Loans"),
                     ],
                 )
@@ -3288,7 +3320,9 @@ if is_lending:
                         return None
                     ref = pd.DataFrame({"v": [value], "label": [label], "xa": [x_anchor]})
                     rule = (
-                        alt.Chart(ref).mark_rule(color=color, strokeDash=[6, 6]).encode(y=alt.Y("v:Q"))
+                        alt.Chart(ref)
+                        .mark_rule(color=color, strokeDash=[6, 6])
+                        .encode(y=alt.Y("v:Q"))
                     )
                     text = (
                         alt.Chart(ref)
@@ -3758,67 +3792,116 @@ if is_lending:
 else:
     with tabs[0]:
         st.subheader("Summary")
-        closed_contracts = int((df["status_mapping"] == gi.closed_label).sum())
-        open_contracts = int((df["status_mapping"] == gi.open_label).sum())
+        # Shared with the React app's Summary screen - see summary_metrics.py.
+        _summary = rental_summary_metrics(df, av, gi, ue_data, ltv_data, ts)
         s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Contracts", f"{len(av):,}")
-        s2.metric("MRR", fmt(ltv_data["mrr"], "{:,.0f}"))
+        s1.metric("Contracts", f"{_summary['contracts']:,}")
+        s2.metric("MRR", fmt(_summary["mrr"], "{:,.0f}"))
         s3.metric(
             "Avg MRR per Active Contract",
-            f"{ltv_data['mrr'] / open_contracts:,.0f}" if open_contracts else "n/a",
+            f"{_summary['avgMrrPerActiveContract']:,.0f}"
+            if _summary["avgMrrPerActiveContract"] is not None
+            else "n/a",
             help="MRR divided by currently-open contracts. A quick sanity check on revenue per unit.",
         )
-        s4.metric("Average Useful Life (m)", fmt(ltv_data["avg_useful_life_m"], "{:.1f}"))
+        s4.metric("Average Useful Life (m)", fmt(_summary["avgUsefulLifeM"], "{:.1f}"))
         r1, r2, r3, r4, r5 = st.columns(5)
-        r1.metric("95th %ile Churn", fmt(ltv_data["pctile_95_churn"], "{:.2%}"))
-        r2.metric("Stressed Churn", fmt(ltv_data["stressed_churn"], "{:.2%}"))
+        r1.metric("95th %ile Churn", fmt(_summary["pctile95Churn"], "{:.2%}"))
+        r2.metric("Stressed Churn", fmt(_summary["stressedChurn"], "{:.2%}"))
         r3.metric(
             "Contracts Churned",
-            fmt(closed_contracts / len(df)) if len(df) else "n/a",
+            fmt(_summary["contractsChurned"])
+            if _summary["contractsChurned"] is not None
+            else "n/a",
             help="Share of contracts closed (terminated) rather than paid off or still active.",
         )
-        r4.metric("Defaulted contracts > 3mo", fmt(ltv_data["n_defaulted_gt_3m"], "{:.0f}"))
-        r5.metric("% recovered", fmt(ltv_data["pct_recovered"]))
+        r4.metric("Defaulted contracts > 3mo", fmt(_summary["defaultedGt3m"], "{:.0f}"))
+        r5.metric("% recovered", fmt(_summary["pctRecovered"]))
         y1, y2, y3 = st.columns(3)
-        y1.metric("Loss (non-recoverability)", fmt(ltv_data["loss_non_recoverability"]))
-        y2.metric("MRR / average cost", fmt(ltv_data["mrr_over_avg_cost"], "{:.2%}"))
-        y3.metric("Average Collection Rate", fmt(ltv_data["avg_collection_rate"]))
+        y1.metric("Loss (non-recoverability)", fmt(_summary["lossNonRecoverability"]))
+        y2.metric("MRR / average cost", fmt(_summary["mrrOverAvgCost"], "{:.2%}"))
+        y3.metric("Average Collection Rate", fmt(_summary["avgCollectionRate"]))
         st.markdown("---")
         st.subheader("LTV & UE highlights")
         z1, z2, z3, z4 = st.columns(4)
         z1.metric(
-            "Asset LTV (max 95%)", fmt(ltv_data["ltv_asset_value"], "{:.1%}"),
+            "Asset LTV (max 95%)",
+            fmt(_summary["assetLtv"], "{:.1%}"),
             help="Guide asset-value LTV: (recoverability + subscription support)/(1 + FX), capped at 95%.",
         )
         z2.metric(
-            "Net UE margin", fmt(ue_data["net_margin"]),
+            "Net UE margin",
+            fmt(_summary["netUeMargin"]),
             help="Gross margin minus Lendable's cost of funding and direct costs over the useful life.",
         )
         z3.metric(
-            "Asset DSLP30", fmt(ltv_data["asset_dslp30"]),
+            "Asset DSLP30",
+            fmt(_summary["assetDslp30"]),
             help="% of active asset value with no payment in the last 30 days.",
         )
         z4.metric(
-            "Receivables Coverage (180d)", fmt(ts["receivables_coverage_observed"]),
+            "Receivables Coverage (180d)",
+            fmt(_summary["receivablesCoverage180d"]),
             help="180 days of performing receivables over the facility's debt service due over the next 180 days.",
         )
         st.markdown("---")
         st.subheader("Portfolio Snapshot")
-        date_range = f"{df['start_date'].min().date()} to {gi.extraction_date.date()}"
-        _render_snapshot_table([
-            ("Date Range", date_range, "From the earliest contract start date to the tape as-of date."),
-            ("Contracts", f"{len(df):,}", "Total number of contract records in the tape."),
-            ("Unique Assets", f"{len(av):,}", "Total number of unique assets."),
-            ("Total Collected", f"${df['total_paid'].sum():,.0f}", "Total cash collected from customers to date."),
-            ("Total Cost of Assets", f"${df['cost_of_asset'].sum():,.0f}", "Total acquisition cost of the assets."),
-            ("Downpayment %", fmt(ue_data["downpayment_pct"]), "Total downpayments as a share of total asset cost."),
-            ("Lease Tenor (m)", fmt(ue_data["lease_tenor_m"], "{:.1f}"), "Cost-weighted average lease term in months."),
-            ("Margin", fmt(ue_data["margin"]), "Total scheduled payments over asset cost minus 1."),
-            ("PvD", fmt(ue_data["pvd"]), "Total paid over total expected to date."),
-            ("Utilisation Rate", fmt(ue_data["utilisation_rate"]), "Share of assets currently on an open contract."),
-            ("Historical % Collected on Principal", fmt(ue_data["historical_pct_collected_on_principal"]),
-             "Collections (incl. recovery) over the initial asset cost for assets that reached term."),
-        ])
+        date_range = f"{_summary['dateRangeStart']} to {_summary['dateRangeEnd']}"
+        _render_snapshot_table(
+            [
+                (
+                    "Date Range",
+                    date_range,
+                    "From the earliest contract start date to the tape as-of date.",
+                ),
+                (
+                    "Contracts",
+                    f"{_summary['contractRecords']:,}",
+                    "Total number of contract records in the tape.",
+                ),
+                (
+                    "Unique Assets",
+                    f"{_summary['uniqueAssets']:,}",
+                    "Total number of unique assets.",
+                ),
+                (
+                    "Total Collected",
+                    f"${_summary['totalCollected']:,.0f}",
+                    "Total cash collected from customers to date.",
+                ),
+                (
+                    "Total Cost of Assets",
+                    f"${_summary['totalCostOfAssets']:,.0f}",
+                    "Total acquisition cost of the assets.",
+                ),
+                (
+                    "Downpayment %",
+                    fmt(_summary["downpaymentPct"]),
+                    "Total downpayments as a share of total asset cost.",
+                ),
+                (
+                    "Lease Tenor (m)",
+                    fmt(_summary["leaseTenorM"], "{:.1f}"),
+                    "Cost-weighted average lease term in months.",
+                ),
+                (
+                    "Margin",
+                    fmt(_summary["margin"]),
+                    "Total scheduled payments over asset cost minus 1.",
+                ),
+                ("PvD", fmt(_summary["pvd"]), "Total paid over total expected to date."),
+                (
+                    "Utilisation Rate",
+                    fmt(_summary["utilisationRate"]),
+                    "Share of assets currently on an open contract.",
+                ),
+                (
+                    "Historical % Collected on Principal",
+                    fmt(_summary["historicalPctCollectedOnPrincipal"]),
+                    "Collections (incl. recovery) over the initial asset cost for assets that reached term.",
+                ),
+            ]
+        )
 
     with tabs[1]:
         st.subheader("Data Checks")
@@ -3851,21 +3934,33 @@ else:
         c4.metric("Utilisation Rate", fmt(ue_data["utilisation_rate"]))
         c1, c2, c3 = st.columns(3)
         c1.metric("PvD", fmt(ue_data["pvd"]))
-        c2.metric("Historical % Collected on Principal", fmt(ue_data["historical_pct_collected_on_principal"]))
-        c3.metric("Monthly Observed Repayment", fmt(ue_data["monthly_observed_repayment"], "{:.2%}"))
+        c2.metric(
+            "Historical % Collected on Principal",
+            fmt(ue_data["historical_pct_collected_on_principal"]),
+        )
+        c3.metric(
+            "Monthly Observed Repayment", fmt(ue_data["monthly_observed_repayment"], "{:.2%}")
+        )
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Funding Cost (% p.a.)", fmt(ue_data["funding_cost_pct"], "{:.2%}"))
         c2.metric("Direct Cost (% p.a.)", fmt(ue_data["direct_cost_pct"], "{:.2%}"))
-        c3.metric("Cost of Funding over Life", fmt(ue_data["cost_of_funding_over_life_pct"], "{:.2%}"))
+        c3.metric(
+            "Cost of Funding over Life", fmt(ue_data["cost_of_funding_over_life_pct"], "{:.2%}")
+        )
         c4.metric("Net UE Margin", fmt(ue_data["net_margin"]))
         curve_chart = curve.dropna(subset=["pct_avg_collection"])
         if not curve_chart.empty:
             st.altair_chart(
-                alt.Chart(curve_chart).mark_line(point=True).encode(
+                alt.Chart(curve_chart)
+                .mark_line(point=True)
+                .encode(
                     x=alt.X("mob:Q", title="Month on Books"),
-                    y=alt.Y("pct_avg_collection:Q", title="% Avg collection", axis=alt.Axis(format="%")),
+                    y=alt.Y(
+                        "pct_avg_collection:Q", title="% Avg collection", axis=alt.Axis(format="%")
+                    ),
                     tooltip=["mob", alt.Tooltip("pct_avg_collection:Q", format=".2%")],
-                ).properties(title="High level repayment curve", height=350),
+                )
+                .properties(title="High level repayment curve", height=350),
                 width="stretch",
             )
         st.dataframe(curve, width="stretch", height=300)
@@ -3884,21 +3979,27 @@ else:
         residual = ca_data.get("residual_curve")
         if residual is not None and not residual.empty:
             st.altair_chart(
-                alt.Chart(residual).mark_line().encode(
+                alt.Chart(residual)
+                .mark_line()
+                .encode(
                     x=alt.X("month:Q", title="Month"),
                     y=alt.Y("residual_value:Q", title="Residual portfolio"),
                     tooltip=["month", alt.Tooltip("residual_value:Q", format=".2%")],
-                ).properties(title="Expected residual portfolio by month", height=300),
+                )
+                .properties(title="Expected residual portfolio by month", height=300),
                 width="stretch",
             )
         churn_chart = cohorts.dropna(subset=["churn_rate"])
         if not churn_chart.empty:
             st.altair_chart(
-                alt.Chart(churn_chart).mark_line(point=True).encode(
+                alt.Chart(churn_chart)
+                .mark_line(point=True)
+                .encode(
                     x=alt.X("cohort:T", title="Cohort"),
                     y=alt.Y("churn_rate:Q", title="Churn Rate", axis=alt.Axis(format="%")),
                     tooltip=["cohort:T", alt.Tooltip("churn_rate:Q", format=".2%")],
-                ).properties(title="Churn Rate per Cohort", height=300),
+                )
+                .properties(title="Churn Rate per Cohort", height=300),
                 width="stretch",
             )
         st.markdown("**Lease Cohorts**")
@@ -3942,25 +4043,35 @@ else:
     with tabs[6]:
         st.subheader("TS Covenants")
         st.markdown("**Performance Covenants**")
-        for m in (6, 12, 24):
-            val = ts[f"paid_at_{m}m_over_cost"]
-            suffix = fmt(val) if pd.notna(val) else "n/a (insufficient data)"
-            st.write(f"Paid at {m} months over asset acquisition cost: {suffix}")
-        st.metric("Option 2 - Avg Monthly Paid over Avg Cost of Asset", fmt(ts["option2_observed"], "{:.2%}"))
+        pc_cols = st.columns(3)
+        for col, m in zip(pc_cols, (6, 12, 24)):
+            col.metric(
+                f"Paid at {m}m over asset cost",
+                fmt(ts[f"paid_at_{m}m_over_cost"]),
+                help="Cumulative payments over asset acquisition cost at this many months on "
+                "book. n/a when the portfolio has no contracts old enough to reach this point.",
+            )
+        st.metric(
+            "Option 2 - Avg Monthly Paid over Avg Cost of Asset",
+            fmt(ts["option2_observed"], "{:.2%}"),
+        )
         st.markdown("**Recoverability Covenants**")
         st.metric(
-            "Recovery Rate (observed)", fmt(ts["recovery_rate_observed"]),
+            "Recovery Rate (observed)",
+            fmt(ts["recovery_rate_observed"]),
             help="Contracts repossessed/insured (proxy: redeployed) over contracts defaulted in the "
             "last 12 months (>= 3 months prior).",
         )
         st.markdown("**Asset-level Covenants**")
         c1, c2 = st.columns(2)
         c1.metric(
-            "Asset DSLP30 (observed)", fmt(ts["asset_dslp30_observed"]),
+            "Asset DSLP30 (observed)",
+            fmt(ts["asset_dslp30_observed"]),
             help="% of active asset value with no payment in the last 30 days.",
         )
         c2.metric(
-            "Receivables Coverage (180d)", fmt(ts["receivables_coverage_observed"]),
+            "Receivables Coverage (180d)",
+            fmt(ts["receivables_coverage_observed"]),
             help="180 days of performing receivables over the facility's debt service due over the "
             "next 180 days. n/a when the debt-service input is 0.",
         )
@@ -3973,11 +4084,14 @@ else:
         orig = cohorts[["cohort", "value_of_leases"]].dropna()
         if not orig.empty:
             st.altair_chart(
-                alt.Chart(orig).mark_bar().encode(
+                alt.Chart(orig)
+                .mark_bar()
+                .encode(
                     x=alt.X("cohort:T", title="Cohort"),
                     y=alt.Y("value_of_leases:Q", title="Value of Leases"),
                     tooltip=["cohort:T", alt.Tooltip("value_of_leases:Q", format=",.0f")],
-                ).properties(title="New lease value per month", height=350),
+                )
+                .properties(title="New lease value per month", height=350),
                 width="stretch",
             )
 
@@ -3995,7 +4109,15 @@ else:
 
     with tabs[9]:
         chat_context = _build_rental_chat_context(
-            gi, df, av, cohorts, ue_data, ltv_data, ca_data, ts, dq_checks,
+            gi,
+            df,
+            av,
+            cohorts,
+            ue_data,
+            ltv_data,
+            ca_data,
+            ts,
+            dq_checks,
             user_context=_ai_context_text(max_chars=60000, per_doc=15000),
         )
         _render_ai_chat_tab(chat_context)

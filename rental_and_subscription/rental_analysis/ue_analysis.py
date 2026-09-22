@@ -5,11 +5,14 @@ import pandas as pd
 
 
 class UeAnalysis:
-    def __init__(self, df, asset_view, curve, gi):
+    def __init__(self, df, asset_view, curve, gi, churn=None):
         self.df = df
         self.av = asset_view
         self.curve = curve
         self.gi = gi
+        self.churn = churn
+        # Guide: "Monthly Avg Churn ... Input for implied % Collected on Principal".
+        self.avg_churn = churn.avg_churn() if churn is not None else np.nan
 
     def avg_original_asset_value(self):
         return self.df[self.df["first_asset_lease"]]["cost_of_asset"].mean()
@@ -74,9 +77,23 @@ class UeAnalysis:
     def pct_collected_estimate_ii(self):
         return self.monthly_observed_repayment() * self.lease_tenor_m()
 
+    def pct_collected_estimate_iii(self):
+        """Implied % collected from the monthly observed repayment run off at the
+        average monthly churn over the useful life - the Guide's "Monthly Avg
+        Churn is an input for implied % Collected on Principal"."""
+        c = self.avg_churn
+        tenor = self.lease_tenor_m()
+        monthly = self.monthly_observed_repayment()
+        if pd.isna(c) or pd.isna(tenor) or pd.isna(monthly) or tenor <= 0:
+            return np.nan
+        n = max(int(round(tenor)), 1)
+        survival_sum = sum((1 - c) ** t for t in range(n))
+        return monthly * survival_sum
+
     def historical_pct_collected_on_principal(self):
         candidates = [v for v in (
-            self.pct_collected_historical(), self.pct_collected_estimate_ii(), self.pct_collected_estimate(),
+            self.pct_collected_historical(), self.pct_collected_estimate_ii(),
+            self.pct_collected_estimate(), self.pct_collected_estimate_iii(),
         ) if pd.notna(v)]
         return min(candidates) if candidates else np.nan
 
@@ -92,6 +109,29 @@ class UeAnalysis:
     def monthly_avg_actual_payment_pct(self):
         return self.monthly_avg_contractual_payment_pct() * self.pvd()
 
+    def funding_cost_pct(self):
+        return self.gi.get("funding_cost_pct", 0.0)
+
+    def direct_cost_pct(self):
+        return self.gi.get("direct_cost_pct", 0.0)
+
+    def cost_of_funding_over_life_pct(self):
+        """Lendable's cost of funding + direct costs, grossed up over the useful
+        life: annual % of asset cost x tenor(m)/12."""
+        tenor = self.lease_tenor_m()
+        if pd.isna(tenor):
+            return np.nan
+        return (self.funding_cost_pct() + self.direct_cost_pct()) * tenor / 12
+
+    def net_margin(self):
+        """Guide: UE = cash margin after taking into account Lendable's cost of
+        funding and any direct costs."""
+        m = self.margin()
+        c = self.cost_of_funding_over_life_pct()
+        if pd.isna(m) or pd.isna(c):
+            return np.nan
+        return m - c
+
     def as_dict(self):
         return {
             "avg_original_asset_value": self.avg_original_asset_value(),
@@ -106,8 +146,13 @@ class UeAnalysis:
             "pct_collected_estimate": self.pct_collected_estimate(),
             "monthly_observed_repayment": self.monthly_observed_repayment(),
             "pct_collected_estimate_ii": self.pct_collected_estimate_ii(),
+            "pct_collected_estimate_iii": self.pct_collected_estimate_iii(),
             "historical_pct_collected_on_principal": self.historical_pct_collected_on_principal(),
             "expected_monthly_collection": self.expected_monthly_collection(),
             "monthly_avg_contractual_payment_pct": self.monthly_avg_contractual_payment_pct(),
             "monthly_avg_actual_payment_pct": self.monthly_avg_actual_payment_pct(),
+            "funding_cost_pct": self.funding_cost_pct(),
+            "direct_cost_pct": self.direct_cost_pct(),
+            "cost_of_funding_over_life_pct": self.cost_of_funding_over_life_pct(),
+            "net_margin": self.net_margin(),
         }

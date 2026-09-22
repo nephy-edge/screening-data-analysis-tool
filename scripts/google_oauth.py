@@ -31,17 +31,25 @@ GOOGLE_LOGIN_SCOPE = (
 
 
 def _get_google_client_id():
+    # st.secrets.get(...) returns None (not an exception) when the key is
+    # simply absent from a secrets.toml that does exist - `or` falls
+    # through to the environment in that case too, not just when secrets.toml
+    # itself is missing (a bare `try/return` here would swallow a
+    # GOOGLE_CLIENT_ID that's only set via os.environ/.env, exactly the
+    # config the FastAPI backend uses - see web_api/main.py's load_dotenv()).
     try:
-        return st.secrets.get("GOOGLE_CLIENT_ID")
+        value = st.secrets.get("GOOGLE_CLIENT_ID")
     except Exception:
-        return os.environ.get("GOOGLE_CLIENT_ID")
+        value = None
+    return value or os.environ.get("GOOGLE_CLIENT_ID")
 
 
 def _get_google_client_secret():
     try:
-        return st.secrets.get("GOOGLE_CLIENT_SECRET")
+        value = st.secrets.get("GOOGLE_CLIENT_SECRET")
     except Exception:
-        return os.environ.get("GOOGLE_CLIENT_SECRET")
+        value = None
+    return value or os.environ.get("GOOGLE_CLIENT_SECRET")
 
 
 def _google_redirect_uri() -> str:
@@ -54,23 +62,28 @@ def _google_redirect_uri() -> str:
     return uri or "http://localhost:8501"
 
 
-def _google_auth_url(state: str, scope: str = GOOGLE_DRIVE_SCOPE) -> str:
+def _google_auth_url(state: str, scope: str = GOOGLE_DRIVE_SCOPE, redirect_uri: str | None = None) -> str:
     return (
         f"{GOOGLE_AUTH_URL}?client_id={quote(_get_google_client_id())}"
-        f"&redirect_uri={quote(_google_redirect_uri())}"
+        f"&redirect_uri={quote(redirect_uri or _google_redirect_uri())}"
         f"&response_type=code&scope={quote(scope)}"
         f"&access_type=offline&prompt=consent&state={quote(state)}"
     )
 
 
-def _exchange_google_code(code: str) -> dict:
+def _exchange_google_code(code: str, redirect_uri: str | None = None) -> dict:
+    """`redirect_uri` must exactly match whatever URI was used to obtain
+    `code` from _google_auth_url - Google's token endpoint rejects a
+    mismatch. Defaults to this app's own (Streamlit) redirect for existing
+    callers; a different caller (e.g. the React app's own callback route,
+    a separate registered redirect URI) passes its own explicitly."""
     resp = requests.post(
         GOOGLE_TOKEN_URL,
         data={
             "code": code,
             "client_id": _get_google_client_id(),
             "client_secret": _get_google_client_secret(),
-            "redirect_uri": _google_redirect_uri(),
+            "redirect_uri": redirect_uri or _google_redirect_uri(),
             "grant_type": "authorization_code",
         },
         timeout=30,

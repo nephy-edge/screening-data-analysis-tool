@@ -14,7 +14,7 @@ REQUIRED_COLUMNS = [
 OPTIONAL_COLUMNS = [
     "expected_end_date", "closed_date", "asset_recovery_date",
     "total_contract_value", "amount_expected_to_date", "current_asset_value",
-    "recovery_date", "recovery_amount",
+    "recovery_date", "recovery_amount", "last_payment_date",
 ]
 
 
@@ -141,5 +141,18 @@ def process_data_input(df, gi):
     df.loc[~is_open & df["closed_date"].isna(), "last_active_date"] = extraction_month
     has_close = ~is_open & df["closed_date"].notna()
     df.loc[has_close, "last_active_date"] = df.loc[has_close, "closed_date"].dt.to_period("M").dt.to_timestamp()
+
+    # Days since last payment (DSLP) - input for the Asset DSLP30 covenant and for
+    # the MRR / Receivables collateral eligibility (Guide: active <= DSLP30).
+    # Client-provided last_payment_date is authoritative; for closed contracts the
+    # closed_date is a reasonable proxy for "last payment". Open contracts without
+    # a last_payment_date stay unknown (NaN).
+    if "last_payment_date" in df.columns:
+        lp = pd.to_datetime(df["last_payment_date"], errors="coerce", dayfirst=True)
+    else:
+        lp = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    lp = lp.where(lp.notna(), df["closed_date"])
+    df["last_payment_date"] = lp
+    df["days_since_last_payment"] = (extraction_date - lp).dt.days
 
     return df
