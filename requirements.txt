@@ -3,11 +3,30 @@ streamlit==1.61.1
 pandas==3.0.5
 numpy==2.4.6
 openpyxl==3.1.5
+# Excel READ engine (pd.ExcelFile(..., engine="calamine")) - ~16x faster than
+# openpyxl's default on real uploads (measured: 49.7s -> 3.0s on a 23.8MB
+# file), output verified byte-identical. openpyxl stays for WRITING exports
+# (scripts/export_workbook.py needs its formula/chart support) and for
+# scripts/document_text.py's unrelated read path.
+python-calamine==0.8.2
 altair==6.2.2
 streamlit-aggrid==1.2.1.post2
 numpy-financial==1.0.0
 requests==2.34.2
 certifi==2026.7.22
-python-dotenv==1.1.1
+boto3==1.43.96
+Authlib==1.8.0
+httpx==0.28.1
+# >= 1.2.2 clears a symlink-following flaw in set_key (arbitrary file overwrite
+# via the cross-device rename fallback). This app only calls load_dotenv(), so
+# it was never reachable here -- bumped to close the alert rather than to fix
+# an exploitable path.
+python-dotenv==1.2.3
 pypdf==6.16.2
 python-docx==1.2.0
+# FastAPI web API (web_api/main.py -- the React app's engine backend). Pinned
+# to match the local venv (Python 3.11+).
+fastapi==0.118.2
+uvicorn==0.32.1
+pydantic==2.10.3
+python-multipart==0.0.32

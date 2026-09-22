@@ -7,3 +7,6 @@ textColor = "#1c2a31"
 
 [server]
 headless = true
+# MB; default is 200. Streamlit Community Cloud's own reverse proxy may still
+# cap real-world uploads below this even though the app itself accepts it.
+maxUploadSize = 1024

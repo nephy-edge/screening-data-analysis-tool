@@ -22,6 +22,9 @@ env/
 # change - a shared on-disk token cache was a correctness bug, not just a
 # secrets risk).
 .google_drive_token.json
+# Per-session Google Drive token store for the React app (keyed by the
+# signed session id, so no cross-user leak - see web_api/main.py).
+data/.google_session_tokens.json
 
 # Local session/state
 PROGRESS.md
@@ -36,6 +39,9 @@ PROGRESS.md
 .claude/
 .devcontainer/
 certs/
+
+# Runtime logs (dev servers write here; never part of the deployed app)
+logs/
 
 # Client/source workbooks — contains raw Astranova portfolio data; do not publish
 docs/

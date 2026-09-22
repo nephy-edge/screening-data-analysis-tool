@@ -25,3 +25,23 @@ jobs:
 
       - name: Run tests
         run: pytest
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck + build
+        # The build script runs `tsc --noEmit && vite build`, so this covers
+        # both type-checking and that the SPA produces a deployable dist/.
+        run: npm run build
