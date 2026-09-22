@@ -62,3 +62,6 @@ scripts/*.xml
 # with raw client workbook dumps (sheet contents, real file paths); never
 # publish
 scripts/archive/
+
+# Local dev-server log (vite writes here; never part of the deployed app).
+web/vite_dev.log

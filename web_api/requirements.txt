@@ -1,0 +1,6 @@
+# SC Analysis Engine API (FastAPI)
+# starlette is pinned to the range Streamlit 1.61.1 accepts (>=0.46,<1.4).
+fastapi==0.118.2
+starlette==0.48.0
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
