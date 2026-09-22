@@ -599,7 +599,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'saveStart' });
       try {
         await saveProfile({
-          identity: state.auth.user,
           sessionId: state.sessionId,
           label,
           ingestId: ingest.ingestId,
@@ -621,7 +620,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // duplicate (mirrors app.py's "Resume my saved session" picker).
     const resumeProfile = async (sessionId: string) => {
       if (!state.auth.user) throw new Error('Not signed in.');
-      const payload = await loadProfile(sessionId, state.auth.user);
+      const payload = await loadProfile(sessionId);
       dispatch({ type: 'restoreProfile', payload, sessionId });
       return payload.analysisResult != null;
     };
@@ -645,7 +644,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'shareStart' });
       try {
         const { token } = await createShare({
-          identity: state.auth.user,
           ingestId: ingest.ingestId,
           mapping: ingest.mapping,
           generalInputs:

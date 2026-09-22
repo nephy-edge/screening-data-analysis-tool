@@ -24,7 +24,7 @@ export function Sidebar({ open, onClose, onResumed }: SidebarProps) {
 
   useEffect(() => {
     if (!open || !state.auth.user) return;
-    listProfiles(state.auth.user)
+    listProfiles()
       .then(setProfiles)
       .catch(() => setProfilesError('Could not load your saved runs.'));
   }, [open, state.auth.user]);

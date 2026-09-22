@@ -576,9 +576,13 @@ export function computeLtvCalculator(input: {
   return post<LtvCalculatorResponse>('/ltv-calculator', input);
 }
 
-/** Save/resume/share - backed by scripts/s3_store.py (`identity` is a
- * self-declared string for dummy sign-in, or the verified Google email, see
- * LoginScreen.tsx). */
+/** Save/resume/share - backed by scripts/s3_store.py.
+ *
+ * None of these take an identity: the server reads it from the HMAC-signed
+ * session cookie (_require_identity in web_api/main.py) and ignores anything
+ * the client claims. Sending it was how one user could read another's saved
+ * deals by changing an email in the query string. The cookie rides along
+ * automatically, so every call here must stay same-origin/credentialed. */
 export interface SavedProfileMeta {
   session_id: string;
   label: string;
@@ -586,7 +590,6 @@ export interface SavedProfileMeta {
 }
 
 export function saveProfile(input: {
-  identity: string;
   sessionId: string;
   label: string;
   ingestId: string;
@@ -603,8 +606,8 @@ export function saveProfile(input: {
   return post<{ ok: boolean }>('/profiles/save', input);
 }
 
-export function listProfiles(identity: string): Promise<SavedProfileMeta[]> {
-  return get<SavedProfileMeta[]>(`/profiles?identity=${encodeURIComponent(identity)}`);
+export function listProfiles(): Promise<SavedProfileMeta[]> {
+  return get<SavedProfileMeta[]>('/profiles');
 }
 
 /** The restore payload for a loaded profile/share: a fresh ingestId for the
@@ -629,12 +632,11 @@ export interface RestorePayload {
   analysisResult: (AnalysisResponse | RentalResponse) | null;
 }
 
-export function loadProfile(sessionId: string, identity: string): Promise<RestorePayload> {
-  return get<RestorePayload>(`/profiles/${encodeURIComponent(sessionId)}?identity=${encodeURIComponent(identity)}`);
+export function loadProfile(sessionId: string): Promise<RestorePayload> {
+  return get<RestorePayload>(`/profiles/${encodeURIComponent(sessionId)}`);
 }
 
 export function createShare(input: {
-  identity: string;
   ingestId: string;
   mapping: Record<string, string>;
   generalInputs: Record<string, unknown>;

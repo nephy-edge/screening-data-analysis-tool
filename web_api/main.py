@@ -16,6 +16,7 @@ The React dev server (web/) proxies ``/api/**`` to this server (port 8000).
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import os
 import re
@@ -39,7 +40,7 @@ from dotenv import load_dotenv
 
 import config as app_config
 from config import UE_MODEL_COST_DEFAULTS
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
 # Same .env app.py loads at import (google_oauth.py's _get_google_client_id
@@ -267,6 +268,29 @@ def _require_gdrive_session(request: Request) -> str:
     if session is None:
         raise HTTPException(status_code=401, detail="Not signed in.")
     return session["sid"]
+
+
+def _require_identity(request: Request) -> str:
+    """The caller's VERIFIED identity, from the HMAC-signed session cookie.
+
+    Every endpoint that reads or writes per-user storage must key off this
+    rather than an `identity` the client sends. s3_store enforces access
+    control in application code - a user's data is private only because
+    nothing reads outside their own users/<safe_id>/ prefix - so letting the
+    client name the prefix let anyone list and load anyone else's saved deal
+    by changing an email in a query string.
+
+    Note this is only as strong as the sign-in that issued the cookie: under
+    the "temporary sign-in" fallback (/api/auth/dummy, used when Google isn't
+    configured) the email is self-declared and unverified by design. With
+    Google configured the identity is verified, and the cookie is signed
+    either way, so a user can no longer read a DIFFERENT identity's data
+    without having signed in as them.
+    """
+    session = _read_react_session(request)
+    if session is None:
+        raise HTTPException(status_code=401, detail="Not signed in.")
+    return session["email"]
 
 
 def _extract_google_id(url: str) -> str:
@@ -602,6 +626,64 @@ INGESTS: dict[str, pd.DataFrame] = {}
 # see _ingest_raw_bytes, which fills it in lazily on first actual need.
 INGEST_RAW: dict[str, tuple[Optional[bytes], str]] = {}
 
+# Both registries are bounded, because nothing else ever removes from them:
+# an ingest has no "session ended" signal (the browser can close mid-deal, and
+# a save/share may re-register the same id much later), so without a cap a
+# long-running task accumulates every loan tape and every original upload it
+# has ever seen until it is OOM-killed. That also contradicts the intent
+# above - "we do not linger on the user's data longer than the interaction
+# needs it" - which was a comment, not behaviour.
+#
+# Eviction is oldest-first by last use, and additionally drops anything idle
+# past the TTL, so a busy hour cannot push out an ingest someone is still
+# working on while an abandoned one survives. Both registries are keyed
+# identically and evicted together, so _ingest_raw_bytes can never find raw
+# bytes for a DataFrame that is gone (or vice versa).
+_INGEST_MAX = int(os.environ.get("SC_INGEST_MAX", "32"))
+_INGEST_TTL_SECONDS = int(os.environ.get("SC_INGEST_TTL_HOURS", "8")) * 3600
+# Two clocks on purpose. LRU order uses a monotonic counter, not the wall
+# clock: time.time() has ~15ms resolution on Windows, so several ingests
+# registered in the same tick share a timestamp and min() then evicts an
+# arbitrary one - including the one the user is actively analysing. The wall
+# clock is kept only for the TTL, where coarse resolution is irrelevant.
+_INGEST_LAST_USED: dict[str, float] = {}
+_INGEST_USE_SEQ: dict[str, int] = {}
+_ingest_use_counter = itertools.count()
+
+
+def _touch_ingest(ingest_id: str) -> None:
+    """Mark an ingest as in-use so eviction treats it as live."""
+    _INGEST_LAST_USED[ingest_id] = time.time()
+    _INGEST_USE_SEQ[ingest_id] = next(_ingest_use_counter)
+
+
+def _evict_ingests() -> None:
+    """Drop expired ingests, then the least-recently-used until under cap."""
+    now = time.time()
+    for key in [k for k, t in _INGEST_LAST_USED.items() if now - t > _INGEST_TTL_SECONDS]:
+        _drop_ingest(key)
+    while len(INGESTS) > _INGEST_MAX:
+        oldest = min(_INGEST_USE_SEQ, key=_INGEST_USE_SEQ.get, default=None)
+        if oldest is None:
+            break
+        _drop_ingest(oldest)
+
+
+def _drop_ingest(ingest_id: str) -> None:
+    INGESTS.pop(ingest_id, None)
+    INGEST_RAW.pop(ingest_id, None)
+    _INGEST_LAST_USED.pop(ingest_id, None)
+    _INGEST_USE_SEQ.pop(ingest_id, None)
+
+
+def _get_ingest(ingest_id: str) -> Optional[pd.DataFrame]:
+    """INGESTS.get + keep-alive, so an ingest being actively analysed is not
+    evicted out from under the user by other uploads."""
+    df = INGESTS.get(ingest_id)
+    if df is not None:
+        _touch_ingest(ingest_id)
+    return df
+
 
 def _default_sheet(sheets: list[str]) -> Optional[str]:
     """Prefer "Data Input" when present (e.g. re-uploading this app's own
@@ -761,6 +843,8 @@ def _register_ingest(
     ingest_id = ingest_id or uuid.uuid4().hex[:12]
     INGESTS[ingest_id] = df
     INGEST_RAW[ingest_id] = (file_bytes, name)
+    _touch_ingest(ingest_id)
+    _evict_ingests()
     return {
         "ingestId": ingest_id,
         "name": name,
@@ -785,10 +869,11 @@ def _ingest_raw_bytes(ingest_id: str) -> tuple[bytes, str]:
     raw = INGEST_RAW.get(ingest_id)
     if raw is None:
         raise HTTPException(status_code=404, detail="ingestId not found (upload may have expired).")
+    _touch_ingest(ingest_id)
     file_bytes, name = raw
     if file_bytes is not None:
         return file_bytes, name
-    df = INGESTS.get(ingest_id)
+    df = _get_ingest(ingest_id)
     if df is None:
         raise HTTPException(status_code=404, detail="ingestId not found (upload may have expired).")
     file_bytes = df.to_csv(index=False).encode("utf-8")
@@ -878,8 +963,8 @@ def merge_ingest(body: MergeIngestBody) -> dict[str, Any]:
     ingestId) from the result, so nothing downstream - column mapping,
     save/resume/share, analysis - needs any special handling for a merged
     dataset; it's indistinguishable from a single-file upload from here."""
-    df1 = INGESTS.get(body.primaryIngestId)
-    df2 = INGESTS.get(body.secondaryIngestId)
+    df1 = _get_ingest(body.primaryIngestId)
+    df2 = _get_ingest(body.secondaryIngestId)
     if df1 is None or df2 is None:
         raise HTTPException(status_code=404, detail="ingestId not found (upload may have expired).")
 
@@ -1220,7 +1305,7 @@ def ingest_data(body: DataGridBody) -> dict[str, Any]:
     """Return the mapped canonical rows for the current ingest + mapping, so
     the Data-Checks "Data Input" nested tab can render the uploaded data grid
     (mirrors app.py's `_render_data_input_grid(raw)`)."""
-    raw = INGESTS.get(body.ingestId)
+    raw = _get_ingest(body.ingestId)
     if raw is None:
         raise HTTPException(status_code=404, detail="ingestId not found (upload may have expired).")
     rows = _canonical_rows_from_mapping(raw, body.mapping, _derived_dicts(body.derivedColumns))
@@ -1269,7 +1354,7 @@ def _resolve_lending_df(body: LendingAnalyseBody) -> pd.DataFrame:
     app.py's own _coerce_dates(raw, DATE_FIELDS, dayfirst) call, which runs
     on the raw upload for the same reason."""
     if body.ingest:
-        raw = INGESTS.get(body.ingest.ingestId)
+        raw = _get_ingest(body.ingest.ingestId)
         if raw is None:
             raise HTTPException(
                 status_code=404, detail="ingestId not found (upload may have expired)."
@@ -1571,7 +1656,7 @@ def _resolve_rental_df(body: RentalAnalyseBody) -> pd.DataFrame:
     datetime and absent optional date columns pre-declared as NaT so the
     engine's date arithmetic works under pandas 3.0."""
     if body.ingest:
-        raw = INGESTS.get(body.ingest.ingestId)
+        raw = _get_ingest(body.ingest.ingestId)
         if raw is None:
             raise HTTPException(
                 status_code=404, detail="ingestId not found (upload may have expired)."
@@ -2167,9 +2252,6 @@ def _restore_payload(profile: dict[str, Any]) -> dict[str, Any]:
 
 
 class SaveProfileBody(BaseModel):
-    identity: str = Field(
-        ..., description="Self-declared, unverified identity string (see LoginScreen.tsx)."
-    )
     sessionId: str = Field(
         ..., description="Client-generated id identifying this deal across saves."
     )
@@ -2183,13 +2265,15 @@ class SaveProfileBody(BaseModel):
 
 
 @app.post("/api/profiles/save")
-def save_profile(body: SaveProfileBody) -> dict[str, bool]:
+def save_profile(
+    body: SaveProfileBody, identity: str = Depends(_require_identity)
+) -> dict[str, bool]:
     """Save this deal's current upload + mapping/inputs/chat history under
     the caller's identity, for the "Resume my saved session" picker -
     scripts/s3_store.py does the actual persistence (unmodified)."""
     upload_bytes, upload_name = _ingest_raw_bytes(body.ingestId)
     s3_store.save_profile(
-        body.identity,
+        identity,
         body.sessionId,
         upload_bytes=upload_bytes,
         upload_name=upload_name,
@@ -2201,7 +2285,7 @@ def save_profile(body: SaveProfileBody) -> dict[str, bool]:
         analysis_context=body.analysisContext,
         analysis_result=body.analysisResult,
     )
-    _PROFILES_CACHE.pop(body.identity, None)
+    _PROFILES_CACHE.pop(identity, None)
     return {"ok": True}
 
 
@@ -2217,7 +2301,7 @@ _PROFILES_CACHE_TTL = 30.0
 
 
 @app.get("/api/profiles")
-def list_profiles(identity: str) -> list[dict[str, Any]]:
+def list_profiles(identity: str = Depends(_require_identity)) -> list[dict[str, Any]]:
     cached = _PROFILES_CACHE.get(identity)
     if cached and time.time() - cached[0] < _PROFILES_CACHE_TTL:
         return cached[1]
@@ -2227,7 +2311,7 @@ def list_profiles(identity: str) -> list[dict[str, Any]]:
 
 
 @app.get("/api/profiles/{session_id}")
-def load_profile(session_id: str, identity: str) -> dict[str, Any]:
+def load_profile(session_id: str, identity: str = Depends(_require_identity)) -> dict[str, Any]:
     profile = s3_store.load_profile(identity, session_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="No saved session found under that id.")
@@ -2235,7 +2319,6 @@ def load_profile(session_id: str, identity: str) -> dict[str, Any]:
 
 
 class CreateShareBody(BaseModel):
-    identity: str = Field(..., description="Self-declared identity of the person sharing.")
     ingestId: str
     mapping: dict[str, str] = Field(default_factory=dict)
     generalInputs: dict[str, Any] = Field(default_factory=dict)
@@ -2245,13 +2328,15 @@ class CreateShareBody(BaseModel):
 
 
 @app.post("/api/share")
-def create_share(body: CreateShareBody) -> dict[str, str]:
+def create_share(
+    body: CreateShareBody, identity: str = Depends(_require_identity)
+) -> dict[str, str]:
     """Snapshot this deal under a new random token anyone with the link can
     load (no allow-list - matches s3_store.create_share's documented
     behaviour). Returns the token; the frontend turns it into a link."""
     upload_bytes, upload_name = _ingest_raw_bytes(body.ingestId)
     token = s3_store.create_share(
-        body.identity,
+        identity,
         upload_bytes=upload_bytes,
         upload_name=upload_name,
         mapping=body.mapping,

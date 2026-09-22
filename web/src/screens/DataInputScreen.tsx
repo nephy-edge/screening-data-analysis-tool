@@ -115,7 +115,7 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
 
   useEffect(() => {
     if (!state.auth.user) return;
-    listProfiles(state.auth.user).then(setProfiles).catch(() => setProfiles([]));
+    listProfiles().then(setProfiles).catch(() => setProfiles([]));
   }, [state.auth.user]);
 
   // Lending only - the warehouse API exposes lending loan tapes, not Rental
