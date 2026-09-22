@@ -13,6 +13,7 @@ every loan tape it has ever parsed until it is OOM-killed.
 """
 
 import sys
+
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
@@ -33,9 +34,7 @@ def seen(monkeypatch):
     """Record the identity s3_store is actually called with."""
     calls = []
     monkeypatch.setattr(m.s3_store, "list_profiles", lambda ident: calls.append(ident) or [])
-    monkeypatch.setattr(
-        m.s3_store, "load_profile", lambda ident, sid: calls.append(ident) or None
-    )
+    monkeypatch.setattr(m.s3_store, "load_profile", lambda ident, sid: calls.append(ident) or None)
     m._PROFILES_CACHE.clear()
     return calls
 
@@ -138,14 +137,82 @@ def test_an_ingest_in_active_use_is_not_evicted_by_newer_uploads(monkeypatch):
 
 
 def test_expired_ingests_are_dropped(monkeypatch):
-    monkeypatch.setattr(m, "_INGEST_TTL_SECONDS", 0)
+    monkeypatch.setattr(m, "_INGEST_TTL_SECONDS", 3600)
     m.INGESTS.clear()
     m.INGEST_RAW.clear()
     m._INGEST_LAST_USED.clear()
     m._INGEST_USE_SEQ.clear()
 
     stale = _register(0)["ingestId"]
+    # Backdate it rather than using a zero TTL: "now - last_used > 0" is false
+    # within a single clock tick (~15ms on Windows), which made this flaky.
+    m._INGEST_LAST_USED[stale] -= 7200
     _register(1)  # registering anything runs eviction
 
     assert stale not in m.INGESTS
     assert stale not in m.INGEST_RAW
+
+
+# --- route-level session enforcement ---------------------------------------
+#
+# The ingest/analyse/export/AI routes had no auth at all: anyone who could
+# reach the URL could upload a tape, run the engine and spend the AI budget.
+# A middleware guards them centrally so a route added later is protected
+# without anyone remembering to decorate it - these pin that, and pin the
+# public allow-list so a careless prefix change can't lock out sign-in.
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("post", "/api/ingest"),
+        ("post", "/api/ingest/merge"),
+        ("post", "/api/analyse/lending"),
+        ("post", "/api/analyse/rental"),
+        ("post", "/api/export/lending"),
+        ("post", "/api/ai/suggest-mapping"),
+        ("post", "/api/ai/chat/lending"),
+        ("post", "/api/ltv-calculator"),
+    ],
+)
+def test_data_routes_reject_anonymous_callers(client, method, path):
+    r = getattr(client, method)(path, json={})
+    assert r.status_code == 401, f"{path} answered {r.status_code} without a session"
+
+
+@pytest.mark.parametrize("path", ["/api/health", "/api/auth/config"])
+def test_public_routes_stay_reachable_without_a_session(client, path):
+    assert client.get(path).status_code == 200
+
+
+def test_sign_in_routes_are_reachable_anonymously(client):
+    """Guarding /api/auth/* would make signing in impossible."""
+    # /api/auth/me is public but answers 401 without a cookie - that is the
+    # endpoint reporting "not signed in", not the middleware refusing it.
+    assert client.get("/api/auth/me").status_code == 401
+    # ...and signing in anonymously has to work, or nobody can ever get a
+    # cookie. Checked second: it sets one on this client.
+    assert client.post("/api/auth/dummy", json={"email": "a@lendable.io"}).status_code == 200
+    assert client.get("/api/auth/me").status_code == 200
+
+
+def test_anon_escape_hatch_is_opt_in(client, monkeypatch):
+    """SC_ALLOW_ANON_API exists for local dev and must default to off."""
+    assert client.post("/api/ltv-calculator", json={}).status_code == 401
+    monkeypatch.setenv("SC_ALLOW_ANON_API", "1")
+    # Now the middleware lets it through to the handler, which rejects the
+    # empty body on its own terms (422) rather than on auth.
+    assert client.post("/api/ltv-calculator", json={}).status_code != 401
+
+
+def test_oversized_uploads_are_refused(client, monkeypatch):
+    """The parse is fully in memory and a DataFrame is several times its
+    source file, so one large upload can OOM the task however few are kept."""
+    monkeypatch.setattr(m, "_MAX_UPLOAD_BYTES", 100)
+    _sign_in_as(client, "alice@lendable.io")
+    r = client.post(
+        "/api/ingest",
+        files={"file": ("big.csv", b"x" * 500, "text/csv")},
+    )
+    assert r.status_code == 413
+    assert "too large" in r.json()["detail"].lower()

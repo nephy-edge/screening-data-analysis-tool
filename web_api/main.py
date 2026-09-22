@@ -24,7 +24,7 @@ import secrets
 import sys
 import time
 import uuid
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
@@ -38,9 +38,9 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-import config as app_config
 from config import UE_MODEL_COST_DEFAULTS
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # Same .env app.py loads at import (google_oauth.py's _get_google_client_id
@@ -253,7 +253,9 @@ def _gdrive_access_token(sid: str) -> str:
     if token is None:
         raise HTTPException(
             status_code=403,
-            detail="Google Drive isn't connected for this session - sign out and back in with Google.",
+            detail=(
+                "Google Drive isn't connected for this session - sign out and back in with Google."
+            ),
         )
     if time.time() >= token.get("expires_at", 0) - 60 and token.get("refresh_token"):
         refreshed = _refresh_google_token(token["refresh_token"])
@@ -471,6 +473,43 @@ app = FastAPI(
 )
 
 
+# Paths under /api that are reachable without a session, because requiring one
+# would make signing in impossible (or, for a share link, defeat the point).
+# Everything else under /api requires a valid signed cookie - see
+# _require_session_middleware. This is an allow-list on purpose: a new route is
+# protected by default, and only becomes public by being named here.
+_PUBLIC_API_PREFIXES = (
+    "/api/health",
+    "/api/auth/",  # login-url, callback, dummy, me, logout, config
+    "/api/share/",  # loading a share is by unguessable token, by design
+)
+
+
+@app.middleware("http")
+async def _require_session_middleware(request: Request, call_next):
+    """Reject unauthenticated calls to the data and AI routes.
+
+    Guarding these in one place rather than per-route: the endpoints that
+    ingest tapes, run the engine, export workbooks and call the LLM had no
+    auth at all, so anyone who could reach the URL could upload data, run
+    analyses and spend the AI budget. A middleware means a route added later
+    is protected without anyone remembering to decorate it.
+
+    Set SC_ALLOW_ANON_API=1 to disable this (local development against a
+    dev server with no OAuth client configured). It must never be set on a
+    deployed service, which is why the default is to require a session.
+    """
+    path = request.url.path
+    if (
+        path.startswith("/api/")
+        and not path.startswith(_PUBLIC_API_PREFIXES)
+        and os.environ.get("SC_ALLOW_ANON_API") != "1"
+        and _read_react_session(request) is None
+    ):
+        return JSONResponse({"detail": "Not signed in."}, status_code=401)
+    return await call_next(request)
+
+
 # Canonical template fields the Lending engine requires (see LENDING_CONFIG).
 REQUIRED_FIELDS = [
     "Loan ID",
@@ -483,7 +522,7 @@ REQUIRED_FIELDS = [
 
 
 class GeneralInputsBody(BaseModel):
-    extractionDate: Optional[str] = None
+    extractionDate: str | None = None
     daysAfterTerm: int = 90
     minLoansPerCohort: int = 10
 
@@ -492,7 +531,10 @@ class DerivedColumn(BaseModel):
     name: str = Field(..., description="New column label (used as a mapping source).")
     formula: str = Field(
         ...,
-        description="Safe arithmetic formula over source columns, e.g. 'Gross Loan Value - Principal Value'.",
+        description=(
+            "Safe arithmetic formula over source columns, "
+            "e.g. 'Gross Loan Value - Principal Value'."
+        ),
     )
 
 
@@ -503,7 +545,10 @@ class LendingAnalyseIngest(BaseModel):
     )
     derivedColumns: list[DerivedColumn] = Field(
         default_factory=list,
-        description="Columns to derive server-side (name + formula) and add to the source columns the mapping can reference.",
+        description=(
+            "Columns to derive server-side (name + formula) and add to the source "
+            "columns the mapping can reference."
+        ),
     )
 
 
@@ -518,7 +563,7 @@ class ChartSpecBody(BaseModel):
     kind: str = Field(..., description="'Line', 'Bar', 'Area', or 'Scatter'.")
     xCol: str
     yCol: str
-    colorCol: Optional[str] = None
+    colorCol: str | None = None
     data: list[dict[str, Any]] = Field(
         default_factory=list, description="Aggregated rows keyed by xCol/yCol[/colorCol]."
     )
@@ -529,10 +574,10 @@ class LendingAnalyseBody(BaseModel):
         default_factory=list, description="Mapped rows keyed by canonical template field names."
     )
     generalInputs: GeneralInputsBody = Field(default_factory=GeneralInputsBody)
-    ingest: Optional[LendingAnalyseIngest] = None
+    ingest: LendingAnalyseIngest | None = None
     exportCharts: list[ChartSpecBody] = Field(default_factory=list)
     dedupeById: bool = False
-    selectedCohorts: Optional[list[str]] = Field(
+    selectedCohorts: list[str] | None = Field(
         default=None,
         description="Cohort month labels (e.g. '2025-06-01') to restrict the analysis to - "
         "the Cohorts tab's selection. None/empty means every cohort, same as today.",
@@ -540,7 +585,7 @@ class LendingAnalyseBody(BaseModel):
 
 
 class RentalGeneralInputsBody(BaseModel):
-    extractionDate: Optional[str] = None
+    extractionDate: str | None = None
     daysAfterTerm: int = 0
     monthsSinceDefault: int = 3
     minLoansPerCohort: int = 20
@@ -548,9 +593,9 @@ class RentalGeneralInputsBody(BaseModel):
     churnStressMultiplier: float = 1.7
     fundingCostPct: float = 0.13
     directCostPct: float = 0.02
-    fxDevalPct: Optional[float] = None
+    fxDevalPct: float | None = None
     fxDiscount50pct: bool = True
-    debtService180d: Optional[float] = None
+    debtService180d: float | None = None
 
 
 class RentalAnalyseIngest(BaseModel):
@@ -567,7 +612,7 @@ class RentalAnalyseBody(BaseModel):
         description="Mapped rows keyed by canonical rental template field names.",
     )
     generalInputs: RentalGeneralInputsBody = Field(default_factory=RentalGeneralInputsBody)
-    ingest: Optional[RentalAnalyseIngest] = None
+    ingest: RentalAnalyseIngest | None = None
     exportCharts: list[ChartSpecBody] = Field(default_factory=list)
     dedupeById: bool = False
 
@@ -624,7 +669,7 @@ INGESTS: dict[str, pd.DataFrame] = {}
 # raw file, matching app.py's own save/resume/share model). bytes is None
 # for an ingest with no original file (a merge or warehouse-fetch result) -
 # see _ingest_raw_bytes, which fills it in lazily on first actual need.
-INGEST_RAW: dict[str, tuple[Optional[bytes], str]] = {}
+INGEST_RAW: dict[str, tuple[bytes | None, str]] = {}
 
 # Both registries are bounded, because nothing else ever removes from them:
 # an ingest has no "session ended" signal (the browser can close mid-deal, and
@@ -639,6 +684,10 @@ INGEST_RAW: dict[str, tuple[Optional[bytes], str]] = {}
 # working on while an abandoned one survives. Both registries are keyed
 # identically and evicted together, so _ingest_raw_bytes can never find raw
 # bytes for a DataFrame that is gone (or vice versa).
+# Largest upload accepted, before parsing. The parse is fully in memory and a
+# DataFrame is several times its source file, so without a ceiling one large
+# upload can OOM the task regardless of how few are retained.
+_MAX_UPLOAD_BYTES = int(os.environ.get("SC_MAX_UPLOAD_MB", "200")) * 1024 * 1024
 _INGEST_MAX = int(os.environ.get("SC_INGEST_MAX", "32"))
 _INGEST_TTL_SECONDS = int(os.environ.get("SC_INGEST_TTL_HOURS", "8")) * 3600
 # Two clocks on purpose. LRU order uses a monotonic counter, not the wall
@@ -676,7 +725,7 @@ def _drop_ingest(ingest_id: str) -> None:
     _INGEST_USE_SEQ.pop(ingest_id, None)
 
 
-def _get_ingest(ingest_id: str) -> Optional[pd.DataFrame]:
+def _get_ingest(ingest_id: str) -> pd.DataFrame | None:
     """INGESTS.get + keep-alive, so an ingest being actively analysed is not
     evicted out from under the user by other uploads."""
     df = INGESTS.get(ingest_id)
@@ -685,7 +734,7 @@ def _get_ingest(ingest_id: str) -> Optional[pd.DataFrame]:
     return df
 
 
-def _default_sheet(sheets: list[str]) -> Optional[str]:
+def _default_sheet(sheets: list[str]) -> str | None:
     """Prefer "Data Input" when present (e.g. re-uploading this app's own
     export) rather than blindly taking whichever sheet is first."""
     if not sheets:
@@ -694,7 +743,7 @@ def _default_sheet(sheets: list[str]) -> Optional[str]:
 
 
 def _parse_upload(
-    file_bytes: bytes, name: str, sheet: Optional[str] = None
+    file_bytes: bytes, name: str, sheet: str | None = None
 ) -> tuple[pd.DataFrame, list[str]]:
     """Parse an uploaded CSV or XLSX the same way the Streamlit app does
     (see app.py `_parse_uploaded` / `_read_tabular_file`): CSV straight via
@@ -807,11 +856,11 @@ def health() -> dict[str, str]:
 
 
 def _register_ingest(
-    file_bytes: Optional[bytes],
+    file_bytes: bytes | None,
     name: str,
-    sheet: Optional[str] = None,
-    ingest_id: Optional[str] = None,
-    df: Optional[pd.DataFrame] = None,
+    sheet: str | None = None,
+    ingest_id: str | None = None,
+    df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Parse+register a raw upload (new, re-parsed at a different sheet, or
     restored from a save/share snapshot) and return the ingest response
@@ -892,6 +941,14 @@ async def ingest_file(file: UploadFile = File(...)) -> dict[str, Any]:
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file.")
+    if len(file_bytes) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"File is too large ({len(file_bytes) / 1024 / 1024:.0f}MB). "
+                f"The limit is {_MAX_UPLOAD_BYTES // 1024 // 1024}MB."
+            ),
+        )
     if not name.lower().endswith((".csv", ".xlsx", ".xls")):
         raise HTTPException(
             status_code=400, detail="Only CSV or Excel (.xlsx/.xls) files are supported."
@@ -933,10 +990,10 @@ class MergeIngestBody(BaseModel):
             "doesn't have that column."
         ),
     )
-    primaryKey: Optional[str] = Field(
+    primaryKey: str | None = Field(
         None, description="Join-key column in the primary file (mode='join')."
     )
-    secondaryKey: Optional[str] = Field(
+    secondaryKey: str | None = Field(
         None, description="Join-key column in the secondary file (mode='join')."
     )
     aggregation: Literal["sum", "last"] = Field(
@@ -946,7 +1003,8 @@ class MergeIngestBody(BaseModel):
             "joining, when it has more than one row per key (e.g. a raw payments/transactions "
             "file): 'sum' adds up numeric columns and takes the first non-key value of the rest "
             "(a payments file -> one 'total paid'-style row per loan); 'last' just keeps each "
-            "key's last row as-is (a snapshot/status file where only the latest row per key matters)."
+            "key's last row as-is (a snapshot/status file where only the latest "
+            "row per key matters)."
         ),
     )
 
@@ -1117,7 +1175,7 @@ class RedshiftTableStartBody(BaseModel):
     table: str
     database: str = "MAESTRO_SRC"
     limit: int = 100_000
-    where: Optional[str] = None
+    where: str | None = None
 
 
 def _validate_redshift_identifiers(database: str, schema: str, table: str) -> None:
@@ -1128,7 +1186,10 @@ def _validate_redshift_identifiers(database: str, schema: str, table: str) -> No
     ):
         raise HTTPException(
             status_code=422,
-            detail="Database/schema/table must be plain identifiers (letters, digits, underscores only).",
+            detail=(
+                "Database/schema/table must be plain identifiers "
+                "(letters, digits, underscores only)."
+            ),
         )
 
 
@@ -1187,7 +1248,7 @@ class ContextDocument(BaseModel):
 
     name: str
     text: str = ""
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @app.post("/api/context-docs")
@@ -1234,7 +1295,7 @@ def _frame_preview(df: pd.DataFrame) -> list[list[Any]]:
 def _canonical_rows_from_mapping(
     raw: pd.DataFrame,
     mapping: dict[str, str],
-    derived_columns: Optional[list[dict[str, Any]]] = None,
+    derived_columns: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build canonical (template-field-keyed) rows from a raw uploaded DataFrame
     and the user's field->source-column mapping. Mirrors app.py's mapping form:
@@ -1272,7 +1333,7 @@ def _canonical_rows_from_mapping(
     return rows
 
 
-def _derived_dicts(derived: Optional[list]) -> list[dict[str, Any]]:
+def _derived_dicts(derived: list | None) -> list[dict[str, Any]]:
     """Normalise a list of DerivedColumn pydantic models (or plain dicts) into
     [{name, formula}] for apply_derived_columns."""
     if not derived:
@@ -1418,7 +1479,7 @@ def _resolve_lending_df(body: LendingAnalyseBody) -> pd.DataFrame:
 def _compute_lending(
     df: pd.DataFrame,
     gi_body: GeneralInputsBody,
-    selected_cohorts: Optional[list[str]] = None,
+    selected_cohorts: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run the lending engine pipeline once and return every raw
     intermediate object (real DataFrames/GeneralInputs, not yet JSON-safe) -
@@ -1538,7 +1599,7 @@ def _ue_model_payload(processed: pd.DataFrame, ue_data: dict) -> dict[str, Any]:
 def _run_lending_engine(
     df: pd.DataFrame,
     gi_body: GeneralInputsBody,
-    selected_cohorts: Optional[list[str]] = None,
+    selected_cohorts: list[str] | None = None,
 ) -> dict[str, Any]:
     c = _compute_lending(df, gi_body, selected_cohorts)
     cohorts, filtered, chart_data = c["cohorts"], c["filtered"], c["chart_data"]
@@ -1826,7 +1887,10 @@ class EscalateVarianceBody(BaseModel):
     filename: str = Field("", description="Uploaded file name, for the AI borrower guess.")
     detail: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="The unexplained_variance check's detail rows: Cohort, <metricLabel>, Swing vs Prior Cohort (pp), Likely Contributing Factor(s).",
+        description=(
+            "The unexplained_variance check's detail rows: Cohort, <metricLabel>, "
+            "Swing vs Prior Cohort (pp), Likely Contributing Factor(s)."
+        ),
     )
 
 
@@ -1909,13 +1973,13 @@ class LtvCalcBody(BaseModel):
         0.0, ge=0.0, le=1.0, description="Hedge rate (0 if unhedged, else % OTM as a decimal)."
     )
     rolledHedge: str = Field("Roll", description="'Roll' or 'Term'.")
-    averageInterest: Optional[float] = Field(
+    averageInterest: float | None = Field(
         None, description="Weighted avg gross interest (decimal), from the analysis."
     )
-    termDays: Optional[float] = Field(
+    termDays: float | None = Field(
         None, description="Weighted avg receivable term (days), from the analysis."
     )
-    lossRate: Optional[float] = Field(
+    lossRate: float | None = Field(
         None, description="95th %ile loss rate (decimal) at T+3, from the analysis."
     )
 
@@ -1957,7 +2021,10 @@ def ltv_calculator(body: LtvCalcBody) -> dict[str, Any]:
         return {
             "options": _ltv_calc_options(),
             "ok": False,
-            "warning": "Can't compute the LTV waterfall - one of the green inputs above is n/a for this portfolio.",
+            "warning": (
+                "Can't compute the LTV waterfall - one of the green inputs above "
+                "is n/a for this portfolio."
+            ),
             "greenInterest": green_interest,
             "greenTermBucket": green_term_bucket,
             "greenLoss": green_loss,
@@ -2029,7 +2096,7 @@ class SuggestMappingBody(BaseModel):
     columns: list[str] = Field(..., description="Raw uploaded file's column headers.")
     context: str = ""
     documents: list[ContextDocument] = Field(default_factory=list)
-    knownLoanStatusColumn: Optional[str] = None
+    knownLoanStatusColumn: str | None = None
 
 
 @app.post("/api/ai/suggest-mapping")
@@ -2065,7 +2132,10 @@ class DeriveColumnBody(BaseModel):
     )
     request: str = Field(
         ...,
-        description="User's natural-language request, e.g. 'Expected Interest = Gross Loan Value - Principal Value'.",
+        description=(
+            "User's natural-language request, e.g. "
+            "'Expected Interest = Gross Loan Value - Principal Value'."
+        ),
     )
 
 
@@ -2133,7 +2203,8 @@ def _build_lending_chat_context_lite(
     lines = [
         "## Lending portfolio - summary statistics",
         f"Loans: {len(df):,}. Mapped/computed columns: {', '.join(map(str, df.columns))}.",
-        f"Data extraction date: {gi.extraction_date.date()}. Days after term (T+3 cutoff): {gi.days_after_term}.",
+        f"Data extraction date: {gi.extraction_date.date()}. "
+        f"Days after term (T+3 cutoff): {gi.days_after_term}.",
         f"Minimum loans per cohort (template threshold): {gi.min_loans_per_cohort}.",
         f"Value of Principal Disbursed: ${df['Principal Value'].sum():,.0f}.",
         f"Total Collected: ${df['Total Paid'].sum():,.0f}.",
@@ -2141,9 +2212,11 @@ def _build_lending_chat_context_lite(
         "## Overview metrics",
         f"Average Loss (owed vs paid, matured loans): {ue_data.get('Average Loss')}.",
         f"Average Principal Amount per loan: ${ue_data.get('Average Principal Amount', 0):,.0f}.",
-        f"Average Fee %: {ue_data.get('Average Fee %')}. Average Interest %: {ue_data.get('Average Interest %')}.",
+        f"Average Fee %: {ue_data.get('Average Fee %')}. "
+        f"Average Interest %: {ue_data.get('Average Interest %')}.",
         f"95th Percentile Loss Rate across cohorts: {ltv_data.get('95th Percentile Losses')}.",
-        f"Average Total Revenue % (interest+fees / principal): {ltv_data.get('Average Total Revenue %')}.",
+        "Average Total Revenue % (interest+fees / principal): "
+        f"{ltv_data.get('Average Total Revenue %')}.",
         "",
         "## Cohorts",
         f"{len(cohorts)} monthly cohorts by Disbursement Date with at least one matured loan. "
