@@ -429,18 +429,21 @@ def _useful_life_sanity_check(gi, ue_data: dict) -> list[dict]:
     tenor_years = tenor_m / 12
     ratio = tenor_years / gi.useful_life_years
     if ratio < 0.5 or ratio > 2.0:
-        checks.append({
-            "level": "warning",
-            "check_id": "useful_life_mismatch",
-            "message": (
-                f"**Useful life of asset ({gi.useful_life_years:.1f}yr) looks far from this "
-                f"file's own average lease tenor ({tenor_years:.1f}yr)** - this is a per-deal "
-                "Excel assumption (real files range from 3 to 5+ years), not something derived "
-                "from the data. A mismatch here distorts the repayment curve's cohort buckets and "
-                "the LTV/Unit Economics figures built on top of it. Confirm the intended asset "
-                "life for this deal and adjust it in the General Inputs form above if needed."
-            ),
-        })
+        checks.append(
+            {
+                "level": "warning",
+                "check_id": "useful_life_mismatch",
+                "message": (
+                    f"**Useful life of asset ({gi.useful_life_years:.1f}yr) looks far from this "
+                    f"file's own average lease tenor ({tenor_years:.1f}yr)** - this is a per-deal "
+                    "Excel assumption (real files range from 3 to 5+ years), not something derived "
+                    "from the data. A mismatch here distorts the repayment curve's "
+                    "cohort buckets and "
+                    "the LTV/Unit Economics figures built on top of it. Confirm the intended asset "
+                    "life for this deal and adjust it in the General Inputs form above if needed."
+                ),
+            }
+        )
     return checks
 
 
@@ -465,9 +468,7 @@ def _rental_variance_check(cohorts: "pd.DataFrame") -> list:
         by_month["new_leases"] > 0
     )
     avg_lease_value_pct = avg_lease_value.pct_change().loc[flagged.index]
-    pvd_delta = (
-        by_month["pvd"].diff().loc[flagged.index] if "pvd" in by_month.columns else None
-    )
+    pvd_delta = by_month["pvd"].diff().loc[flagged.index] if "pvd" in by_month.columns else None
 
     def _diagnose(idx):
         causes = []
@@ -495,29 +496,37 @@ def _rental_variance_check(cohorts: "pd.DataFrame") -> list:
                     f"PvD ratio shifted {pvd * 100:+.0f}pp vs prior cohort - "
                     "possible collections/servicing change"
                 )
-        return "; ".join(causes) if causes else (
-            "No obvious data-driven cause - likely a genuine portfolio "
-            "event, escalate to Borrower"
+        return (
+            "; ".join(causes)
+            if causes
+            else (
+                "No obvious data-driven cause - likely a genuine portfolio "
+                "event, escalate to Borrower"
+            )
         )
 
-    detail = pd.DataFrame({
-        "Cohort": pd.to_datetime(flagged["cohort"]).dt.strftime("%b %Y"),
-        "Churn Rate (%)": (flagged["churn_rate"] * 100).round(1).values,
-        "Swing vs Prior Cohort (pp)": (flagged_deltas * 100).round(1).values,
-        "Likely Contributing Factor(s)": [_diagnose(i) for i in flagged.index],
-    })
-    checks.append({
-        "level": "warning",
-        "check_id": "unexplained_variance",
-        "message": (
-            f"**Unexplained variance** - {len(detail)} cohort(s) show a churn-rate "
-            "swing of more than 5 percentage points versus the prior cohort. Likely "
-            "contributing factors are diagnosed below from active-lease-count, "
-            "sample-size, and lease-value signals already in the data - verify "
-            "before relying on these cohorts."
-        ),
-        "detail": detail,
-    })
+    detail = pd.DataFrame(
+        {
+            "Cohort": pd.to_datetime(flagged["cohort"]).dt.strftime("%b %Y"),
+            "Churn Rate (%)": (flagged["churn_rate"] * 100).round(1).values,
+            "Swing vs Prior Cohort (pp)": (flagged_deltas * 100).round(1).values,
+            "Likely Contributing Factor(s)": [_diagnose(i) for i in flagged.index],
+        }
+    )
+    checks.append(
+        {
+            "level": "warning",
+            "check_id": "unexplained_variance",
+            "message": (
+                f"**Unexplained variance** - {len(detail)} cohort(s) show a churn-rate "
+                "swing of more than 5 percentage points versus the prior cohort. Likely "
+                "contributing factors are diagnosed below from active-lease-count, "
+                "sample-size, and lease-value signals already in the data - verify "
+                "before relying on these cohorts."
+            ),
+            "detail": detail,
+        }
+    )
     return checks
 
 
@@ -545,20 +554,24 @@ def _status_mapping_check(gi, raw: pd.DataFrame) -> list[dict]:
     unmapped_frac = mapped.isna().mean()
     if unmapped_frac > 0.1:
         sample = sorted(set(raw.loc[mapped.isna(), "status"].dropna().astype(str)))[:8]
-        checks.append({
-            "level": "warning",
-            "check_id": "status_map_coverage",
-            "message": (
-                f"**{unmapped_frac:.0%} of rows have a Status value not recognised by the "
-                f"open/closed/paid-off mapping** (recognised: {', '.join(sorted(status_map.keys()))}) "
-                f"- unrecognised values seen: {', '.join(sample)}{'…' if len(sample) == 8 else ''}. "
-                "An unrecognised status is silently treated as neither open nor closed, which "
-                "zeroes out Churn Analysis (PCTILE_95/AVG_CHURN/STRESS_CHURN) and can distort "
-                "recovered/redeployed figures - the same failure mode documented in the legacy "
-                "Excel templates (the Status field never matching the literal string the churn "
-                "formula filtered on)."
-            ),
-        })
+        checks.append(
+            {
+                "level": "warning",
+                "check_id": "status_map_coverage",
+                "message": (
+                    f"**{unmapped_frac:.0%} of rows have a Status value not recognised by the "
+                    "open/closed/paid-off mapping** (recognised: "
+                    f"{', '.join(sorted(status_map.keys()))}) "
+                    f"- unrecognised values seen: {', '.join(sample)}"
+                    f"{'…' if len(sample) == 8 else ''}. "
+                    "An unrecognised status is silently treated as neither open nor closed, which "
+                    "zeroes out Churn Analysis (PCTILE_95/AVG_CHURN/STRESS_CHURN) and can distort "
+                    "recovered/redeployed figures - the same failure mode documented in the legacy "
+                    "Excel templates (the Status field never matching the literal string the churn "
+                    "formula filtered on)."
+                ),
+            }
+        )
     return checks
 
 

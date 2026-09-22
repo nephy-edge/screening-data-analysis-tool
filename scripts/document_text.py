@@ -86,7 +86,10 @@ def extract_document_text(name: str, data: bytes) -> dict:
             return {
                 "name": name,
                 "text": "",
-                "error": f"Unsupported file type '.{suffix}' - use PDF, Excel, Word (.docx), or text files.",
+                "error": (
+                    f"Unsupported file type '.{suffix}' - use PDF, Excel, "
+                    "Word (.docx), or text files."
+                ),
             }
     except Exception as e:
         return {"name": name, "text": "", "error": str(e)}
@@ -111,8 +114,13 @@ def combine_context_text(
         parts.append("## Additional context notes\n" + notes)
     for doc in documents or []:
         if doc.get("error"):
-            parts.append(f"## Uploaded document: {doc['name']}\n[Could not be used: {doc['error']}]")
+            parts.append(
+                f"## Uploaded document: {doc['name']}\n[Could not be used: {doc['error']}]"
+            )
         else:
-            parts.append(f"## Uploaded document: {doc['name']}\n" + truncate_text(doc.get("text", ""), per_doc))
+            parts.append(
+                f"## Uploaded document: {doc['name']}\n"
+                + truncate_text(doc.get("text", ""), per_doc)
+            )
     text = "\n\n".join(parts)
     return truncate_text(text, max_chars) if len(text) > max_chars else text

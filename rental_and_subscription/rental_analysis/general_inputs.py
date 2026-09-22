@@ -1,6 +1,9 @@
 DEFAULT_STATUS_MAP = {
-    "Closed": "Closed", "Open": "Open", "Repaid": "Paid-off",
-    "Active": "Open", "Write-off": "Closed",
+    "Closed": "Closed",
+    "Open": "Open",
+    "Repaid": "Paid-off",
+    "Active": "Open",
+    "Write-off": "Closed",
 }
 
 

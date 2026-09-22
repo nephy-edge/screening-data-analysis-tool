@@ -78,6 +78,7 @@ def test_weighted_avg_term_is_principal_weighted():
     # (90*1000 + 180*2000) / 3000, matured loans only.
     assert m["weightedAvgTermMatured"] == (90 * 1000 + 180 * 2000) / 3000
 
+
 def test_snapshot_totals_cover_the_whole_tape_not_just_matured():
     m = lending_summary_metrics(_tape(), _Gi(), _UE, _LTV)
     assert m["loans"] == 3

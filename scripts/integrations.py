@@ -193,7 +193,13 @@ def _redshift_table_sql(database: str, schema: str, table: str, where: str | Non
 
 
 def _redshift_start_table_job(
-    api_url: str, api_key: str, database: str, schema: str, table: str, limit: int, where: str | None = None
+    api_url: str,
+    api_key: str,
+    database: str,
+    schema: str,
+    table: str,
+    limit: int,
+    where: str | None = None,
 ) -> str:
     """Start _redshift_table_sql's query as a background job on the
     warehouse API and return its job id, for polling real partition-by-
@@ -242,13 +248,18 @@ def _redshift_list_schemas(api_url: str, api_key: str, database: str = "MAESTRO_
     SCHEMA itself is excluded since it's metadata, not a data schema a user
     would ever want to pick."""
     payload = _redshift_query(
-        api_url, api_key, f"SELECT schema_name FROM {database}.INFORMATION_SCHEMA.SCHEMATA ORDER BY schema_name", 500
+        api_url,
+        api_key,
+        f"SELECT schema_name FROM {database}.INFORMATION_SCHEMA.SCHEMATA ORDER BY schema_name",
+        500,
     )
     return [row[0] for row in payload["rows"] if row[0] != "INFORMATION_SCHEMA"]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _redshift_list_tables(api_url: str, api_key: str, schema: str, database: str = "MAESTRO_SRC") -> list[str]:
+def _redshift_list_tables(
+    api_url: str, api_key: str, schema: str, database: str = "MAESTRO_SRC"
+) -> list[str]:
     """List every table in `database.schema` via INFORMATION_SCHEMA.TABLES -
     the dropdown source for "Other table"'s table picker, once a schema is
     chosen. `schema` is validated as a plain identifier by the caller before
@@ -256,7 +267,8 @@ def _redshift_list_tables(api_url: str, api_key: str, schema: str, database: str
     payload = _redshift_query(
         api_url,
         api_key,
-        f"SELECT table_name FROM {database}.INFORMATION_SCHEMA.TABLES WHERE table_schema = '{schema}' ORDER BY table_name",
+        f"SELECT table_name FROM {database}.INFORMATION_SCHEMA.TABLES "
+        f"WHERE table_schema = '{schema}' ORDER BY table_name",
         500,
     )
     return [row[0] for row in payload["rows"]]

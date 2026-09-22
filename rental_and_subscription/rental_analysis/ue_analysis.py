@@ -58,7 +58,9 @@ class UeAnalysis:
     def pct_collected_historical(self):
         df = self.df
         matured = df[df["reached_t"]]
-        denom = df[df["first_asset_lease"] & df["original_asset_reached_term"]]["cost_of_asset"].sum()
+        denom = df[df["first_asset_lease"] & df["original_asset_reached_term"]][
+            "cost_of_asset"
+        ].sum()
         if not denom:
             return np.nan
         return (matured["total_paid"].sum() + matured["recovery_amount"].fillna(0).sum()) / denom
@@ -91,10 +93,16 @@ class UeAnalysis:
         return monthly * survival_sum
 
     def historical_pct_collected_on_principal(self):
-        candidates = [v for v in (
-            self.pct_collected_historical(), self.pct_collected_estimate_ii(),
-            self.pct_collected_estimate(), self.pct_collected_estimate_iii(),
-        ) if pd.notna(v)]
+        candidates = [
+            v
+            for v in (
+                self.pct_collected_historical(),
+                self.pct_collected_estimate_ii(),
+                self.pct_collected_estimate(),
+                self.pct_collected_estimate_iii(),
+            )
+            if pd.notna(v)
+        ]
         return min(candidates) if candidates else np.nan
 
     def expected_monthly_collection(self):

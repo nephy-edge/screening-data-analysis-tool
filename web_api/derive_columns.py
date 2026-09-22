@@ -23,7 +23,7 @@ show a clear message instead of silently returning garbage.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -141,11 +141,11 @@ def _tokenize(formula: str) -> list:
                 j += 1
             name = s[i:j].strip()
             if not name:
-                raise FormulaError(f"Unexpected token near: {s[i:i+12]!r}.")
+                raise FormulaError(f"Unexpected token near: {s[i : i + 12]!r}.")
             tokens.append(("col", name))
             i = j
             continue
-        raise FormulaError(f"Invalid character near: {s[i:i+12]!r}.")
+        raise FormulaError(f"Invalid character near: {s[i : i + 12]!r}.")
     return tokens
 
 

@@ -5,22 +5,24 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rental_analysis.general_inputs import GeneralInputs
-from rental_analysis.data_questionnaire import QUESTIONS
-from rental_analysis.data_input import process_data_input, apply_fallbacks
 from rental_analysis.asset_view import build_asset_view
-from rental_analysis.repayment_curve import build_repayment_curve
-from rental_analysis.lease_cohorts import build_cohorts
-from rental_analysis.cohorts_for_x_or_more_loans import filter_cohorts
 from rental_analysis.churn_analysis import ChurnAnalysis
+from rental_analysis.cohorts_for_x_or_more_loans import filter_cohorts
+from rental_analysis.data_input import apply_fallbacks, process_data_input
+from rental_analysis.general_inputs import GeneralInputs
+from rental_analysis.lease_cohorts import build_cohorts
 from rental_analysis.ltv_analysis import LtvAnalysis
-from rental_analysis.ue_analysis import UeAnalysis
+from rental_analysis.repayment_curve import build_repayment_curve
 from rental_analysis.ts_covenants import build_ts_covenants
-from rental_analysis.general_analysis import describe as general_analysis
+from rental_analysis.ue_analysis import UeAnalysis
 
 DATE_COLS = [
-    "start_date", "expected_end_date", "closed_date", "asset_recovery_date",
-    "recovery_date", "last_payment_date",
+    "start_date",
+    "expected_end_date",
+    "closed_date",
+    "asset_recovery_date",
+    "recovery_date",
+    "last_payment_date",
 ]
 
 

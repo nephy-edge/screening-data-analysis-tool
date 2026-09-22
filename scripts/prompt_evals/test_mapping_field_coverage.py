@@ -16,12 +16,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from _app_source import get_field_descriptions, get_lending_input_columns  # noqa: E402
+
 from rental_and_subscription.rental_analysis.data_input import (  # noqa: E402
     OPTIONAL_COLUMNS,
     REQUIRED_COLUMNS,
 )
-
-from _app_source import get_field_descriptions, get_lending_input_columns  # noqa: E402
 
 
 def test_every_lending_field_has_a_mapping_description():

@@ -20,9 +20,15 @@ def build_repayment_curve(av, gi):
         pct_paid = total_paid / cost if cost > 0 else np.nan
         pct_avg_collection = pct_paid / mob if mob > 0 else np.nan
         include = count > gi["min_loans_per_cohort"]
-        rows.append({
-            "mob": mob, "number_of_contracts": count, "total_paid": total_paid,
-            "cost_of_assets": cost, "pct_paid_over_cost": pct_paid,
-            "pct_avg_collection": pct_avg_collection, "include_in_calc": include,
-        })
+        rows.append(
+            {
+                "mob": mob,
+                "number_of_contracts": count,
+                "total_paid": total_paid,
+                "cost_of_assets": cost,
+                "pct_paid_over_cost": pct_paid,
+                "pct_avg_collection": pct_avg_collection,
+                "include_in_calc": include,
+            }
+        )
     return pd.DataFrame(rows)

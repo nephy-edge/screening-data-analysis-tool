@@ -33,7 +33,9 @@ from functools import lru_cache
 
 import boto3
 import streamlit as st
-from snapshot_common import safe_id as _safe_id, safe_session_id as _safe_session_id, snapshot_fields
+from snapshot_common import safe_id as _safe_id
+from snapshot_common import safe_session_id as _safe_session_id
+from snapshot_common import snapshot_fields
 
 DEFAULT_BUCKET = "lendable-production-data"
 DEFAULT_PREFIX = "ai-tools/"
@@ -96,7 +98,9 @@ def _get_json(key: str) -> dict | None:
 
 def _put_json(key: str, payload: dict) -> None:
     _client().put_object(
-        Bucket=_bucket(), Key=key, Body=json.dumps(payload).encode("utf-8"),
+        Bucket=_bucket(),
+        Key=key,
+        Body=json.dumps(payload).encode("utf-8"),
         ContentType="application/json",
     )
 
@@ -127,7 +131,9 @@ def _save_snapshot(
     previous_hash = (previous or {}).get("upload_hash")
     if previous_hash != upload_hash:
         _client().put_object(
-            Bucket=_bucket(), Key=data_key, Body=upload_bytes,
+            Bucket=_bucket(),
+            Key=data_key,
+            Body=upload_bytes,
             ContentType="application/octet-stream",
         )
 
@@ -229,8 +235,10 @@ def create_share(shared_by: str, **snapshot_kwargs) -> str:
     token = _secrets_mod.token_urlsafe(16)
     prefix = _share_prefix(token)
     _save_snapshot(
-        f"{prefix}state.json", f"{prefix}upload.bin",
-        extra={"shared_by": shared_by}, **snapshot_kwargs,
+        f"{prefix}state.json",
+        f"{prefix}upload.bin",
+        extra={"shared_by": shared_by},
+        **snapshot_kwargs,
     )
     return token
 

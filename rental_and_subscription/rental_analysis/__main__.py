@@ -1,4 +1,5 @@
 import sys
+
 from .run_all import run
 
 if __name__ == "__main__":

@@ -23,9 +23,7 @@ def build_ts_covenants(ue, ltv, curve, debt_service_180d=None):
         # the facility's debt service due over the next 180 days. debt_service_180d
         # is a facility-level input (not in the borrower tape); n/a when absent.
         "receivables_coverage_observed": (
-            ltv["receivables_value_180d"] / debt_service_180d
-            if debt_service_180d
-            else np.nan
+            ltv["receivables_value_180d"] / debt_service_180d if debt_service_180d else np.nan
         ),
     }
     for m in (6, 12, 24):

@@ -26,7 +26,9 @@ import re
 import secrets
 from pathlib import Path
 
-from snapshot_common import safe_id as _safe_id, safe_session_id as _safe_session_id, snapshot_fields
+from snapshot_common import safe_id as _safe_id
+from snapshot_common import safe_session_id as _safe_session_id
+from snapshot_common import snapshot_fields
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 PROFILES_DIR = _DATA_DIR / "profiles"
@@ -60,9 +62,7 @@ def _save_snapshot(
     previous_hash = None
     if state_path.exists():
         try:
-            previous_hash = json.loads(state_path.read_text(encoding="utf-8")).get(
-                "upload_hash"
-            )
+            previous_hash = json.loads(state_path.read_text(encoding="utf-8")).get("upload_hash")
         except Exception:
             previous_hash = None
     if previous_hash != upload_hash or not (snapshot_dir / upload_file).exists():
@@ -125,20 +125,24 @@ def list_profiles(user_id: str) -> list[dict]:
                 state = json.loads(state_path.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            out.append({
-                "session_id": session_dir.name,
-                "label": state.get("label") or state.get("upload_name") or session_dir.name,
-                "saved_at": state.get("saved_at", 0),
-            })
+            out.append(
+                {
+                    "session_id": session_dir.name,
+                    "label": state.get("label") or state.get("upload_name") or session_dir.name,
+                    "saved_at": state.get("saved_at", 0),
+                }
+            )
     legacy_state_path = PROFILES_DIR / _safe_id(user_id) / "state.json"
     if legacy_state_path.exists():
         try:
             state = json.loads(legacy_state_path.read_text(encoding="utf-8"))
-            out.append({
-                "session_id": "legacy",
-                "label": state.get("label") or state.get("upload_name") or "Saved session",
-                "saved_at": state.get("saved_at", 0),
-            })
+            out.append(
+                {
+                    "session_id": "legacy",
+                    "label": state.get("label") or state.get("upload_name") or "Saved session",
+                    "saved_at": state.get("saved_at", 0),
+                }
+            )
         except Exception:
             pass
     out.sort(key=lambda s: s["saved_at"], reverse=True)

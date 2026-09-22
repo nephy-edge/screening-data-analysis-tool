@@ -26,21 +26,24 @@ def build_cohorts(df, gi):
         default_mask = (df["contract_cohort"] <= c) & (df["last_active_date"] == c)
         active = active_mask.sum()
         defaulted_in_month = default_mask.sum()
-        rows.append({
-            "cohort": c,
-            "value_of_leases": sub["total_contract_value"].sum(),
-            "value_of_new_vehicles": sub[sub["first_asset_lease"]]["cost_of_asset"].sum(),
-            "new_leases": len(sub),
-            "defaulted": defaulted,
-            "recovered": recovered,
-            "pct_recovered": recovered / defaulted if defaulted else np.nan,
-            "pvd": (
-                sub["total_paid"].sum() / sub["amount_expected_to_date"].sum()
-                if sub["amount_expected_to_date"].sum() else np.nan
-            ),
-            "avg_days_to_recovery": sub["days_to_recovery"].mean(),
-            "active_leases_in_month": active,
-            "defaulted_leases_in_month": defaulted_in_month,
-            "churn_rate": defaulted_in_month / active if active else np.nan,
-        })
+        rows.append(
+            {
+                "cohort": c,
+                "value_of_leases": sub["total_contract_value"].sum(),
+                "value_of_new_vehicles": sub[sub["first_asset_lease"]]["cost_of_asset"].sum(),
+                "new_leases": len(sub),
+                "defaulted": defaulted,
+                "recovered": recovered,
+                "pct_recovered": recovered / defaulted if defaulted else np.nan,
+                "pvd": (
+                    sub["total_paid"].sum() / sub["amount_expected_to_date"].sum()
+                    if sub["amount_expected_to_date"].sum()
+                    else np.nan
+                ),
+                "avg_days_to_recovery": sub["days_to_recovery"].mean(),
+                "active_leases_in_month": active,
+                "defaulted_leases_in_month": defaulted_in_month,
+                "churn_rate": defaulted_in_month / active if active else np.nan,
+            }
+        )
     return pd.DataFrame(rows)

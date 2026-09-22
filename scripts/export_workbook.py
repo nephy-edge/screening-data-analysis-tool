@@ -195,7 +195,9 @@ def _build_lending_export_workbook(
             for r in range(2, max(written_rows, 1) + 2):
                 dws.cell(
                     row=r, column=matured_col
-                ).value = f"=IF(ISBLANK(C{r}),\"\",(C{r}+'General Inputs'!$C$4)<='General Inputs'!$C$3)"
+                ).value = (
+                    f"=IF(ISBLANK(C{r}),\"\",(C{r}+'General Inputs'!$C$4)<='General Inputs'!$C$3)"
+                )
                 dws.cell(
                     row=r, column=cohort_col
                 ).value = f'=IF(ISBLANK(B{r}),"",DATE(YEAR(B{r}),MONTH(B{r}),1))'
@@ -329,8 +331,21 @@ def _add_chat_history_sheet(workbook_bytes: bytes, history: list) -> bytes:
 
 
 def _build_rental_export_workbook(
-    gi, df, av, curve, cohorts, filtered, ue_data, ltv_data, ca_data, ts,
-    export_charts, mapping=None, currency=None, exclude_rule=None, status_map=None,
+    gi,
+    df,
+    av,
+    curve,
+    cohorts,
+    filtered,
+    ue_data,
+    ltv_data,
+    ca_data,
+    ts,
+    export_charts,
+    mapping=None,
+    currency=None,
+    exclude_rule=None,
+    status_map=None,
 ):
     """Build the Rental & Subscription SC-analysis Excel export, mirroring the
     workbook's sheet layout (General Inputs, Data Questionnaire, Data Input,
@@ -338,34 +353,68 @@ def _build_rental_export_workbook(
     residual curve, LTV Analysis, TS Covenants, General Analysis + chart,
     Lease Cohorts, Cohorts for X or more loans, Custom Charts)."""
     export_col_order = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
-    data_input_export = df[
-        export_col_order + [c for c in df.columns if c not in export_col_order]
-    ]
+    data_input_export = df[export_col_order + [c for c in df.columns if c not in export_col_order]]
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         gs = writer.book.create_sheet("General Inputs", 0)
         for r, label, val, note in [
             (2, "Inputs", None, None),
-            (3, "Date of extraction", "=MAX('Data Input'!C:C)",
-             "Defaults to most recent contract start date"),
-            (4, "Days after term", gi.days_after_term,
-             "Ignore any contracts for loss rates that are less than this number of days after term"),
-            (5, "Months since default", gi.months_since_default,
-             "Includes only contracts that defaulted over this many months ago"),
-            (6, "Minimum loans per cohort", gi.min_loans_per_cohort,
-             "Ignore any cohorts for loss rates that are less than this number of contracts"),
-            (7, "Useful life of asset (years)", gi.useful_life_years,
-             "Assumed Useful Life of Asset"),
-            (8, "Funding cost (% p.a.)", gi.funding_cost_pct,
-             "Lendable cost of funding, applied to asset cost over the useful life"),
-            (9, "Direct cost (% p.a.)", gi.direct_cost_pct,
-             "Operating/direct costs as % of asset cost per year"),
-            (10, "FX devaluation (95th %ile, %)", gi.fx_deval_pct,
-             "FX risk used in the asset-value LTV (max 50% discount applied when enabled)"),
+            (
+                3,
+                "Date of extraction",
+                "=MAX('Data Input'!C:C)",
+                "Defaults to most recent contract start date",
+            ),
+            (
+                4,
+                "Days after term",
+                gi.days_after_term,
+                "Ignore any contracts for loss rates that are less than this number of days after term",
+            ),
+            (
+                5,
+                "Months since default",
+                gi.months_since_default,
+                "Includes only contracts that defaulted over this many months ago",
+            ),
+            (
+                6,
+                "Minimum loans per cohort",
+                gi.min_loans_per_cohort,
+                "Ignore any cohorts for loss rates that are less than this number of contracts",
+            ),
+            (
+                7,
+                "Useful life of asset (years)",
+                gi.useful_life_years,
+                "Assumed Useful Life of Asset",
+            ),
+            (
+                8,
+                "Funding cost (% p.a.)",
+                gi.funding_cost_pct,
+                "Lendable cost of funding, applied to asset cost over the useful life",
+            ),
+            (
+                9,
+                "Direct cost (% p.a.)",
+                gi.direct_cost_pct,
+                "Operating/direct costs as % of asset cost per year",
+            ),
+            (
+                10,
+                "FX devaluation (95th %ile, %)",
+                gi.fx_deval_pct,
+                "FX risk used in the asset-value LTV (max 50% discount applied when enabled)",
+            ),
             (11, "FX max 50% discount", gi.fx_discount_50pct, "Guide: max 50% FX discount"),
-            (12, "Debt service due over 180d", gi.debt_service_180d,
-             "Facility debt service input for the Receivables Coverage Ratio"),
+            (
+                12,
+                "Debt service due over 180d",
+                gi.debt_service_180d,
+                "Facility debt service input for the Receivables Coverage Ratio",
+            ),
         ]:
             if label:
                 gs.cell(row=r, column=2, value=label)
@@ -374,9 +423,7 @@ def _build_rental_export_workbook(
             if note:
                 gs.cell(row=r, column=4, value=note)
 
-        q_df = pd.DataFrame(
-            [(i, q) for i, q in enumerate(QUESTIONS, 1)], columns=["#", "Question"]
-        )
+        q_df = pd.DataFrame([(i, q) for i, q in enumerate(QUESTIONS, 1)], columns=["#", "Question"])
         q_df.to_excel(writer, sheet_name="Data Questionnaire", index=False)
 
         _write_data_input_sheet(writer, data_input_export)
@@ -389,8 +436,10 @@ def _build_rental_export_workbook(
         curve_export = curve.dropna(subset=["pct_avg_collection"])
         if not curve_export.empty:
             curve_export[["mob", "pct_avg_collection"]].to_excel(
-                writer, sheet_name="Unit Economics Analysis",
-                startrow=len(ue_df) + 2, index=False,
+                writer,
+                sheet_name="Unit Economics Analysis",
+                startrow=len(ue_df) + 2,
+                index=False,
             )
             sr = len(ue_df) + 3
             lr = sr + len(curve_export) - 1
@@ -410,7 +459,9 @@ def _build_rental_export_workbook(
         ca_ws = writer.sheets["Churn Analysis"]
         residual = ca_data.get("residual_curve")
         if residual is not None and not residual.empty:
-            residual.to_excel(writer, sheet_name="Churn Analysis", startrow=len(ca_df) + 2, index=False)
+            residual.to_excel(
+                writer, sheet_name="Churn Analysis", startrow=len(ca_df) + 2, index=False
+            )
             sr = len(ca_df) + 3
             lr = sr + len(residual) - 1
             c = LineChart()
@@ -429,10 +480,13 @@ def _build_rental_export_workbook(
         ts_df.to_excel(writer, sheet_name="TS Covenants", index=False)
 
         ga_summary = general_analysis(df)
-        ga_df = pd.DataFrame([
-            ("Shape", f"{ga_summary['shape'][0]:,} rows x {ga_summary['shape'][1]} cols"),
-            ("Columns", ", ".join(ga_summary["columns"])),
-        ], columns=["Property", "Value"])
+        ga_df = pd.DataFrame(
+            [
+                ("Shape", f"{ga_summary['shape'][0]:,} rows x {ga_summary['shape'][1]} cols"),
+                ("Columns", ", ".join(ga_summary["columns"])),
+            ],
+            columns=["Property", "Value"],
+        )
         ga_df.to_excel(writer, sheet_name="General Analysis", index=False)
         ga_ws = writer.sheets["General Analysis"]
         orig_source = cohorts[["cohort", "value_of_leases"]].dropna()

@@ -71,9 +71,7 @@ def _signed_color(value_str) -> str:
 
 def _matrix_row_html(row_label: str, row_values: list, is_big: bool) -> str:
     tr_class = ' class="bigrow"' if is_big else ""
-    cells = "".join(
-        f'<td style="color:{_signed_color(v)};">{_esc(v)}</td>' for v in row_values
-    )
+    cells = "".join(f'<td style="color:{_signed_color(v)};">{_esc(v)}</td>' for v in row_values)
     return f'<tr{tr_class}><td class="rowhead">{_esc(row_label)}</td>{cells}</tr>'
 
 

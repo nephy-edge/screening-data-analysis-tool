@@ -131,7 +131,11 @@ def _upload_json(
     access_token: str, file_id: str | None, name: str, parent_id: str, payload: dict
 ) -> str:
     return _upload_raw(
-        access_token, file_id, name, parent_id, json.dumps(payload).encode("utf-8"),
+        access_token,
+        file_id,
+        name,
+        parent_id,
+        json.dumps(payload).encode("utf-8"),
         "application/json",
     )
 
@@ -247,21 +251,25 @@ def list_profiles(access_token: str) -> list:
                 meta = _download_json(access_token, f["id"])
             except Exception:
                 continue
-            out.append({
-                "session_id": session_id,
-                "label": meta.get("label") or meta.get("upload_name") or session_id,
-                "saved_at": meta.get("saved_at", 0),
-            })
+            out.append(
+                {
+                    "session_id": session_id,
+                    "label": meta.get("label") or meta.get("upload_name") or session_id,
+                    "saved_at": meta.get("saved_at", 0),
+                }
+            )
 
         legacy_file_id = _find_file(access_token, PROFILE_FILE_NAME, folder_id)
         if legacy_file_id:
             try:
                 meta = _download_json(access_token, legacy_file_id)
-                out.append({
-                    "session_id": "legacy",
-                    "label": meta.get("label") or meta.get("upload_name") or "Saved session",
-                    "saved_at": meta.get("saved_at", 0),
-                })
+                out.append(
+                    {
+                        "session_id": "legacy",
+                        "label": meta.get("label") or meta.get("upload_name") or "Saved session",
+                        "saved_at": meta.get("saved_at", 0),
+                    }
+                )
             except Exception:
                 pass
 
@@ -291,9 +299,7 @@ def save_profile(access_token: str, session_id: str, **snapshot_kwargs) -> None:
     upload_hash = hashlib.sha256(upload_bytes).hexdigest()
 
     meta_name = PROFILE_FILE_NAME if session_id == "legacy" else _session_meta_name(session_id)
-    data_name = (
-        PROFILE_DATA_FILE_NAME if session_id == "legacy" else _session_data_name(session_id)
-    )
+    data_name = PROFILE_DATA_FILE_NAME if session_id == "legacy" else _session_data_name(session_id)
 
     data_file_id = _find_file(access_token, data_name, folder_id)
     meta_file_id = _find_file(access_token, meta_name, folder_id)
@@ -321,9 +327,7 @@ def save_profile(access_token: str, session_id: str, **snapshot_kwargs) -> None:
 def load_profile(access_token: str, session_id: str) -> dict | None:
     try:
         folder_id = _get_or_create_app_folder(access_token)
-        meta_name = (
-            PROFILE_FILE_NAME if session_id == "legacy" else _session_meta_name(session_id)
-        )
+        meta_name = PROFILE_FILE_NAME if session_id == "legacy" else _session_meta_name(session_id)
         meta_file_id = _find_file(access_token, meta_name, folder_id)
         if not meta_file_id:
             return None

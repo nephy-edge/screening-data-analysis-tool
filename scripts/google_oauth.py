@@ -62,7 +62,9 @@ def _google_redirect_uri() -> str:
     return uri or "http://localhost:8501"
 
 
-def _google_auth_url(state: str, scope: str = GOOGLE_DRIVE_SCOPE, redirect_uri: str | None = None) -> str:
+def _google_auth_url(
+    state: str, scope: str = GOOGLE_DRIVE_SCOPE, redirect_uri: str | None = None
+) -> str:
     return (
         f"{GOOGLE_AUTH_URL}?client_id={quote(_get_google_client_id())}"
         f"&redirect_uri={quote(redirect_uri or _google_redirect_uri())}"

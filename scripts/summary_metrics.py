@@ -46,9 +46,7 @@ def lending_summary_metrics(
 
     matured = df[df["Reached T+3?"]]
     matured_paid = matured["Total Paid"].sum()
-    matured_due = (
-        matured["Total Due"].sum() if "Total Due" in matured.columns else float("nan")
-    )
+    matured_due = matured["Total Due"].sum() if "Total Due" in matured.columns else float("nan")
     pvd_ratio = matured_paid / matured_due if matured_due else float("nan")
 
     # Exclude any loan missing either Term (days) or Principal Value from BOTH

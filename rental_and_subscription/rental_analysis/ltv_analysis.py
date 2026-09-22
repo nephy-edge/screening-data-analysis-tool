@@ -196,7 +196,9 @@ class LtvAnalysis:
             return np.nan
         if not active["dslp_days"].notna().any():
             return np.nan
-        num = active[(active["dslp_days"] > 30) | active["dslp_days"].isna()]["initial_asset_value"].sum()
+        num = active[(active["dslp_days"] > 30) | active["dslp_days"].isna()][
+            "initial_asset_value"
+        ].sum()
         return num / denom
 
     def receivables_value_180d(self):

@@ -317,7 +317,6 @@ def _suggest_redshift_filter(table: str, columns: list, request: str) -> dict:
     return {"where": where}
 
 
-
 def _suggest_escalation_writeup(filename: str, facts: list, model_name: str) -> dict:
     """Ask DeepSeek V4 Flash (via DeepInfra) to guess the borrower from the
     uploaded file name and turn already-aggregated flagged-cohort facts into a

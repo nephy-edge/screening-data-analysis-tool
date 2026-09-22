@@ -87,13 +87,22 @@ def _build_lending_chat_context(
 
 
 def _build_rental_chat_context(
-    gi, df: pd.DataFrame, av: pd.DataFrame, cohorts: pd.DataFrame, ue_data: dict,
-    ltv_data: dict, ca_data: dict, ts: dict, dq_checks: list, user_context: str = "",
+    gi,
+    df: pd.DataFrame,
+    av: pd.DataFrame,
+    cohorts: pd.DataFrame,
+    ue_data: dict,
+    ltv_data: dict,
+    ca_data: dict,
+    ts: dict,
+    dq_checks: list,
+    user_context: str = "",
 ) -> str:
     lines = [
         "## Rental & Subscription portfolio - summary statistics",
         f"Contracts: {len(df):,}. Unique assets: {len(av):,}. Mapped/computed columns: "
-        + ", ".join(map(str, df.columns)) + ".",
+        + ", ".join(map(str, df.columns))
+        + ".",
         f"Data extraction date: {gi.extraction_date.date()}. Useful life of asset (years): "
         + str(gi.useful_life_years),
         f"Minimum loans (contracts) per cohort: {gi.min_loans_per_cohort}.",

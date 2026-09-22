@@ -28,14 +28,14 @@ if str(REPO_ROOT) not in sys.path:
 
 load_dotenv(REPO_ROOT / ".env")
 
+from _app_source import get_field_descriptions, get_lending_input_columns  # noqa: E402
+from mapping_golden_set import LENDING_CASES, RENTAL_CASES  # noqa: E402
+
 import config as app_config  # noqa: E402
 from rental_and_subscription.rental_analysis.data_input import (  # noqa: E402
     OPTIONAL_COLUMNS,
     REQUIRED_COLUMNS,
 )
-
-from _app_source import get_field_descriptions, get_lending_input_columns  # noqa: E402
-from mapping_golden_set import LENDING_CASES, RENTAL_CASES  # noqa: E402
 
 RUN_EVAL = os.environ.get("RUN_LLM_EVALS") == "1"
 API_KEY = os.environ.get("DEEPINFRA_API_KEY")
