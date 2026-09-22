@@ -401,6 +401,7 @@ def _download_drive_file(access_token: str, drive_file: dict[str, Any]) -> tuple
         data = data[3:]
     return data, name
 
+
 # Lending engine
 from template_analysis.cohorts import build_cohorts
 from template_analysis.cohorts_for_x_or_more_loans import filter_cohorts
@@ -465,12 +466,17 @@ class GeneralInputsBody(BaseModel):
 
 class DerivedColumn(BaseModel):
     name: str = Field(..., description="New column label (used as a mapping source).")
-    formula: str = Field(..., description="Safe arithmetic formula over source columns, e.g. 'Gross Loan Value - Principal Value'.")
+    formula: str = Field(
+        ...,
+        description="Safe arithmetic formula over source columns, e.g. 'Gross Loan Value - Principal Value'.",
+    )
 
 
 class LendingAnalyseIngest(BaseModel):
     ingestId: str = Field(..., description="Id returned by POST /api/ingest.")
-    mapping: dict[str, str] = Field(..., description="Template field key -> raw source column name.")
+    mapping: dict[str, str] = Field(
+        ..., description="Template field key -> raw source column name."
+    )
     derivedColumns: list[DerivedColumn] = Field(
         default_factory=list,
         description="Columns to derive server-side (name + formula) and add to the source columns the mapping can reference.",
@@ -495,7 +501,9 @@ class ChartSpecBody(BaseModel):
 
 
 class LendingAnalyseBody(BaseModel):
-    rows: list[dict[str, Any]] = Field(default_factory=list, description="Mapped rows keyed by canonical template field names.")
+    rows: list[dict[str, Any]] = Field(
+        default_factory=list, description="Mapped rows keyed by canonical template field names."
+    )
     generalInputs: GeneralInputsBody = Field(default_factory=GeneralInputsBody)
     ingest: Optional[LendingAnalyseIngest] = None
     exportCharts: list[ChartSpecBody] = Field(default_factory=list)
@@ -523,12 +531,17 @@ class RentalGeneralInputsBody(BaseModel):
 
 class RentalAnalyseIngest(BaseModel):
     ingestId: str = Field(..., description="Id returned by POST /api/ingest.")
-    mapping: dict[str, str] = Field(..., description="Template field key -> raw source column name.")
+    mapping: dict[str, str] = Field(
+        ..., description="Template field key -> raw source column name."
+    )
     derivedColumns: list[DerivedColumn] = Field(default_factory=list)
 
 
 class RentalAnalyseBody(BaseModel):
-    rows: list[dict[str, Any]] = Field(default_factory=list, description="Mapped rows keyed by canonical rental template field names.")
+    rows: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Mapped rows keyed by canonical rental template field names.",
+    )
     generalInputs: RentalGeneralInputsBody = Field(default_factory=RentalGeneralInputsBody)
     ingest: Optional[RentalAnalyseIngest] = None
     exportCharts: list[ChartSpecBody] = Field(default_factory=list)
@@ -598,7 +611,9 @@ def _default_sheet(sheets: list[str]) -> Optional[str]:
     return "Data Input" if "Data Input" in sheets else sheets[0]
 
 
-def _parse_upload(file_bytes: bytes, name: str, sheet: Optional[str] = None) -> tuple[pd.DataFrame, list[str]]:
+def _parse_upload(
+    file_bytes: bytes, name: str, sheet: Optional[str] = None
+) -> tuple[pd.DataFrame, list[str]]:
     """Parse an uploaded CSV or XLSX the same way the Streamlit app does
     (see app.py `_parse_uploaded` / `_read_tabular_file`): CSV straight via
     read_csv; XLSX reads `sheet` (defaulting to "Data Input" when present,
@@ -627,7 +642,9 @@ def _parse_upload(file_bytes: bytes, name: str, sheet: Optional[str] = None) -> 
     xls = pd.ExcelFile(io.BytesIO(file_bytes), engine="calamine")
     pickable = [s for s in xls.sheet_names if s != "_App Session"]
     if sheet is not None and sheet not in pickable:
-        raise ValueError(f"'{sheet}' isn't a sheet in this file. Available: {', '.join(pickable) or 'none'}")
+        raise ValueError(
+            f"'{sheet}' isn't a sheet in this file. Available: {', '.join(pickable) or 'none'}"
+        )
     if sheet is None:
         sheet = _default_sheet(pickable)
     df = xls.parse(sheet)
@@ -636,7 +653,10 @@ def _parse_upload(file_bytes: bytes, name: str, sheet: Optional[str] = None) -> 
         preview = xls.parse(sheet, header=None, nrows=10)
         for i in range(1, len(preview)):
             row = preview.iloc[i]
-            if row.notna().mean() > 0.7 and row.dropna().map(lambda v: isinstance(v, str)).mean() > 0.7:
+            if (
+                row.notna().mean() > 0.7
+                and row.dropna().map(lambda v: isinstance(v, str)).mean() > 0.7
+            ):
                 df = xls.parse(sheet, header=i)
                 break
     return df, pickable
@@ -788,7 +808,9 @@ async def ingest_file(file: UploadFile = File(...)) -> dict[str, Any]:
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file.")
     if not name.lower().endswith((".csv", ".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="Only CSV or Excel (.xlsx/.xls) files are supported.")
+        raise HTTPException(
+            status_code=400, detail="Only CSV or Excel (.xlsx/.xls) files are supported."
+        )
     return _json_safe(_register_ingest(file_bytes, name))
 
 
@@ -826,8 +848,12 @@ class MergeIngestBody(BaseModel):
             "doesn't have that column."
         ),
     )
-    primaryKey: Optional[str] = Field(None, description="Join-key column in the primary file (mode='join').")
-    secondaryKey: Optional[str] = Field(None, description="Join-key column in the secondary file (mode='join').")
+    primaryKey: Optional[str] = Field(
+        None, description="Join-key column in the primary file (mode='join')."
+    )
+    secondaryKey: Optional[str] = Field(
+        None, description="Join-key column in the secondary file (mode='join')."
+    )
     aggregation: Literal["sum", "last"] = Field(
         "sum",
         description=(
@@ -861,15 +887,23 @@ def merge_ingest(body: MergeIngestBody) -> dict[str, Any]:
         merged = pd.concat([df1, df2], ignore_index=True)
     else:
         if not body.primaryKey or not body.secondaryKey:
-            raise HTTPException(status_code=422, detail="primaryKey and secondaryKey are required to join.")
+            raise HTTPException(
+                status_code=422, detail="primaryKey and secondaryKey are required to join."
+            )
         if body.primaryKey not in df1.columns:
-            raise HTTPException(status_code=422, detail=f"'{body.primaryKey}' isn't a column in the primary file.")
+            raise HTTPException(
+                status_code=422, detail=f"'{body.primaryKey}' isn't a column in the primary file."
+            )
         if body.secondaryKey not in df2.columns:
-            raise HTTPException(status_code=422, detail=f"'{body.secondaryKey}' isn't a column in the second file.")
+            raise HTTPException(
+                status_code=422, detail=f"'{body.secondaryKey}' isn't a column in the second file."
+            )
 
         other_cols = [c for c in df2.columns if c != body.secondaryKey]
         if body.aggregation == "sum":
-            agg_map = {c: ("sum" if pd.api.types.is_numeric_dtype(df2[c]) else "first") for c in other_cols}
+            agg_map = {
+                c: ("sum" if pd.api.types.is_numeric_dtype(df2[c]) else "first") for c in other_cols
+            }
         else:
             agg_map = {c: "last" for c in other_cols}
         agg_df2 = (
@@ -879,13 +913,21 @@ def merge_ingest(body: MergeIngestBody) -> dict[str, Any]:
         )
 
         merged = df1.merge(
-            agg_df2, how="left", left_on=body.primaryKey, right_on=body.secondaryKey, suffixes=("", "_2")
+            agg_df2,
+            how="left",
+            left_on=body.primaryKey,
+            right_on=body.secondaryKey,
+            suffixes=("", "_2"),
         )
         if body.secondaryKey != body.primaryKey and body.secondaryKey in merged.columns:
             merged = merged.drop(columns=[body.secondaryKey])
 
     primary_name = INGEST_RAW[body.primaryIngestId][1]
-    merged_name = primary_name if primary_name.lower().endswith(".csv") else f"{primary_name.rsplit('.', 1)[0]}_merged.csv"
+    merged_name = (
+        primary_name
+        if primary_name.lower().endswith(".csv")
+        else f"{primary_name.rsplit('.', 1)[0]}_merged.csv"
+    )
     return _json_safe(_register_ingest(None, merged_name, df=merged))
 
 
@@ -902,7 +944,9 @@ def redshift_config() -> dict[str, bool]:
 def _redshift_creds() -> tuple[str, str]:
     url, key = _get_redshift_api_url(), _get_redshift_api_key()
     if not url or not key:
-        raise HTTPException(status_code=503, detail="The warehouse API isn't configured on this server.")
+        raise HTTPException(
+            status_code=503, detail="The warehouse API isn't configured on this server."
+        )
     return url, key
 
 
@@ -920,7 +964,9 @@ def redshift_schemas(database: str = "MAESTRO_SRC") -> list[str]:
     try:
         return _redshift_list_schemas(url, key, database)
     except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"Couldn't list schemas from the warehouse: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Couldn't list schemas from the warehouse: {exc}"
+        ) from exc
 
 
 @app.get("/api/redshift/tables")
@@ -933,14 +979,19 @@ def redshift_tables(schema: str, database: str = "MAESTRO_SRC") -> list[str]:
     try:
         return _redshift_list_tables(url, key, schema, database)
     except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"Couldn't list tables from the warehouse: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Couldn't list tables from the warehouse: {exc}"
+        ) from exc
 
 
 class RedshiftFilterBody(BaseModel):
     schemaName: str = Field(..., description="Schema (e.g. 'SALMON').")
     table: str
     database: str = "MAESTRO_SRC"
-    request: str = Field(..., description="Natural-language filter description, e.g. 'active loans from 2024 onwards'.")
+    request: str = Field(
+        ...,
+        description="Natural-language filter description, e.g. 'active loans from 2024 onwards'.",
+    )
 
 
 @app.post("/api/redshift/filter")
@@ -958,13 +1009,19 @@ def redshift_filter(body: RedshiftFilterBody) -> dict[str, Any]:
         and _IDENTIFIER_RE.fullmatch(body.schemaName)
         and _IDENTIFIER_RE.fullmatch(body.table)
     ):
-        raise HTTPException(status_code=422, detail="Database/schema/table must be plain identifiers.")
+        raise HTTPException(
+            status_code=422, detail="Database/schema/table must be plain identifiers."
+        )
     try:
         columns = _redshift_list_columns(url, key, body.schemaName, body.table, body.database)
     except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"Couldn't list columns from the warehouse: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Couldn't list columns from the warehouse: {exc}"
+        ) from exc
     try:
-        result = _suggest_redshift_filter(f"{body.database}.{body.schemaName}.{body.table}", columns, body.request)
+        result = _suggest_redshift_filter(
+            f"{body.database}.{body.schemaName}.{body.table}", columns, body.request
+        )
     except requests.RequestException as exc:
         raise _ai_error(exc) from exc
     return {"where": result.get("where") if result else None}
@@ -979,7 +1036,11 @@ class RedshiftTableStartBody(BaseModel):
 
 
 def _validate_redshift_identifiers(database: str, schema: str, table: str) -> None:
-    if not (_IDENTIFIER_RE.fullmatch(database) and _IDENTIFIER_RE.fullmatch(schema) and _IDENTIFIER_RE.fullmatch(table)):
+    if not (
+        _IDENTIFIER_RE.fullmatch(database)
+        and _IDENTIFIER_RE.fullmatch(schema)
+        and _IDENTIFIER_RE.fullmatch(table)
+    ):
         raise HTTPException(
             status_code=422,
             detail="Database/schema/table must be plain identifiers (letters, digits, underscores only).",
@@ -996,7 +1057,9 @@ def redshift_table_start(body: RedshiftTableStartBody) -> dict[str, str]:
     url, key = _redshift_creds()
     _validate_redshift_identifiers(body.database, body.schemaName, body.table)
     try:
-        job_id = _redshift_start_table_job(url, key, body.database, body.schemaName, body.table, body.limit, body.where)
+        job_id = _redshift_start_table_job(
+            url, key, body.database, body.schemaName, body.table, body.limit, body.where
+        )
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"Couldn't start the fetch: {exc}") from exc
     return {"jobId": job_id}
@@ -1012,7 +1075,9 @@ def redshift_table_status(jobId: str, schema: str, table: str) -> dict[str, Any]
     try:
         status_payload = _redshift_job_status(url, key, jobId)
     except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"Couldn't check fetch progress: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Couldn't check fetch progress: {exc}"
+        ) from exc
 
     result: dict[str, Any] = {
         "status": status_payload["status"],
@@ -1144,7 +1209,9 @@ _DATA_GRID_LIMIT = 5000
 
 class DataGridBody(BaseModel):
     ingestId: str = Field(..., description="Id returned by POST /api/ingest.")
-    mapping: dict[str, str] = Field(..., description="Template field key -> raw source column name.")
+    mapping: dict[str, str] = Field(
+        ..., description="Template field key -> raw source column name."
+    )
     derivedColumns: list[DerivedColumn] = Field(default_factory=list)
 
 
@@ -1159,12 +1226,14 @@ def ingest_data(body: DataGridBody) -> dict[str, Any]:
     rows = _canonical_rows_from_mapping(raw, body.mapping, _derived_dicts(body.derivedColumns))
     row_count = len(rows)
     truncated = row_count > _DATA_GRID_LIMIT
-    return _json_safe({
-        "columns": list(rows[0].keys()) if rows else [],
-        "rows": rows[:_DATA_GRID_LIMIT],
-        "rowCount": row_count,
-        "truncated": truncated,
-    })
+    return _json_safe(
+        {
+            "columns": list(rows[0].keys()) if rows else [],
+            "rows": rows[:_DATA_GRID_LIMIT],
+            "rowCount": row_count,
+            "truncated": truncated,
+        }
+    )
 
 
 LENDING_DATE_FIELDS = {"Disbursement Date", "Expected Completion Date"}
@@ -1202,8 +1271,12 @@ def _resolve_lending_df(body: LendingAnalyseBody) -> pd.DataFrame:
     if body.ingest:
         raw = INGESTS.get(body.ingest.ingestId)
         if raw is None:
-            raise HTTPException(status_code=404, detail="ingestId not found (upload may have expired).")
-        mapped_rows = _canonical_rows_from_mapping(raw, body.ingest.mapping, _derived_dicts(body.ingest.derivedColumns))
+            raise HTTPException(
+                status_code=404, detail="ingestId not found (upload may have expired)."
+            )
+        mapped_rows = _canonical_rows_from_mapping(
+            raw, body.ingest.mapping, _derived_dicts(body.ingest.derivedColumns)
+        )
         missing = [f for f in REQUIRED_FIELDS if not any(f in (r or {}) for r in mapped_rows)]
         if missing:
             raise HTTPException(
@@ -1387,43 +1460,49 @@ def _run_lending_engine(
     ue_data, ltv_data = c["ue"].as_dict(), c["ltv"].as_dict()
     checks = _lending_data_quality_checks(df, cohorts, LENDING_DQ_CONFIG, c["gi"], filtered)
 
-    return _json_safe({
-        "summary": {
-            "rows": int(len(c["processed"])),
-            "cohorts": int(len(filtered)),
-            "lossRate": round(float(cohorts["Loss Rate"].mean()), 4) if "Loss Rate" in cohorts and len(cohorts) else None,
-        },
-        "ue": ue_data,
-        "ltv": ltv_data,
-        # The Cohorts tab's own table - every matured-only monthly cohort,
-        # NOT pre-filtered by min_loans_per_cohort (that's `filtered`, used
-        # only for the LTV/UE calc above and the quality checks below); the
-        # tab applies its own adjustable "Minimum loans per cohort" filter
-        # client-side, same as app.py's `cohort_view` does.
-        # build_cohorts() already returns a plain RangeIndex frame with
-        # "Cohort" as a real column (`.reset_index(drop=True)` internally) -
-        # calling .reset_index() again here would turn that clean RangeIndex
-        # into a spurious extra "index" column, since _frame_to_records's
-        # to_dict("records") never serializes the index itself.
-        "cohorts": _frame_to_records(cohorts),
-        # The same table with matured_only=False - app.py's Cohorts tab shows
-        # this instead when "Matured loans only" is unchecked.
-        "cohortsAllLoans": _frame_to_records(c["summary_cohorts"]),
-        "chart": _frame_to_records(chart_data),
-        "checks": checks,
-        # The UE Model sub-tab's raw inputs (matured-loan aggregates + cost
-        # defaults) - the browser recomputes the derived figures/IRR from
-        # these when the user edits the manual assumptions, mirroring app.py's
-        # interactive _render_ue_model_ai_tab.
-        "ueModel": _ue_model_payload(c["processed"], ue_data),
-        # The processed frame, not the raw resolved one - app.py's Summary tab
-        # reads the same post-process_data_input columns (Reached T+3?, Term).
-        "summaryMetrics": lending_summary_metrics(c["processed"], c["gi"], ue_data, ltv_data),
-        "summaryChart": _frame_to_records(
-            c["summary_cohorts"][["Cohort", "Total Principal", "Loan Count", "Matured Count", "Loss Rate"]]
-        ),
-        "generalInputs": c["gi"].as_dict(),
-    })
+    return _json_safe(
+        {
+            "summary": {
+                "rows": int(len(c["processed"])),
+                "cohorts": int(len(filtered)),
+                "lossRate": round(float(cohorts["Loss Rate"].mean()), 4)
+                if "Loss Rate" in cohorts and len(cohorts)
+                else None,
+            },
+            "ue": ue_data,
+            "ltv": ltv_data,
+            # The Cohorts tab's own table - every matured-only monthly cohort,
+            # NOT pre-filtered by min_loans_per_cohort (that's `filtered`, used
+            # only for the LTV/UE calc above and the quality checks below); the
+            # tab applies its own adjustable "Minimum loans per cohort" filter
+            # client-side, same as app.py's `cohort_view` does.
+            # build_cohorts() already returns a plain RangeIndex frame with
+            # "Cohort" as a real column (`.reset_index(drop=True)` internally) -
+            # calling .reset_index() again here would turn that clean RangeIndex
+            # into a spurious extra "index" column, since _frame_to_records's
+            # to_dict("records") never serializes the index itself.
+            "cohorts": _frame_to_records(cohorts),
+            # The same table with matured_only=False - app.py's Cohorts tab shows
+            # this instead when "Matured loans only" is unchecked.
+            "cohortsAllLoans": _frame_to_records(c["summary_cohorts"]),
+            "chart": _frame_to_records(chart_data),
+            "checks": checks,
+            # The UE Model sub-tab's raw inputs (matured-loan aggregates + cost
+            # defaults) - the browser recomputes the derived figures/IRR from
+            # these when the user edits the manual assumptions, mirroring app.py's
+            # interactive _render_ue_model_ai_tab.
+            "ueModel": _ue_model_payload(c["processed"], ue_data),
+            # The processed frame, not the raw resolved one - app.py's Summary tab
+            # reads the same post-process_data_input columns (Reached T+3?, Term).
+            "summaryMetrics": lending_summary_metrics(c["processed"], c["gi"], ue_data, ltv_data),
+            "summaryChart": _frame_to_records(
+                c["summary_cohorts"][
+                    ["Cohort", "Total Principal", "Loan Count", "Matured Count", "Loss Rate"]
+                ]
+            ),
+            "generalInputs": c["gi"].as_dict(),
+        }
+    )
 
 
 @app.post("/api/analyse/lending")
@@ -1494,9 +1573,15 @@ def _resolve_rental_df(body: RentalAnalyseBody) -> pd.DataFrame:
     if body.ingest:
         raw = INGESTS.get(body.ingest.ingestId)
         if raw is None:
-            raise HTTPException(status_code=404, detail="ingestId not found (upload may have expired).")
-        mapped_rows = _canonical_rows_from_mapping(raw, body.ingest.mapping, _derived_dicts(body.ingest.derivedColumns))
-        missing = [c for c in RENTAL_REQUIRED_COLUMNS if not any(c in (r or {}) for r in mapped_rows)]
+            raise HTTPException(
+                status_code=404, detail="ingestId not found (upload may have expired)."
+            )
+        mapped_rows = _canonical_rows_from_mapping(
+            raw, body.ingest.mapping, _derived_dicts(body.ingest.derivedColumns)
+        )
+        missing = [
+            c for c in RENTAL_REQUIRED_COLUMNS if not any(c in (r or {}) for r in mapped_rows)
+        ]
         if missing:
             raise HTTPException(
                 status_code=422,
@@ -1530,13 +1615,20 @@ def _resolve_rental_df(body: RentalAnalyseBody) -> pd.DataFrame:
     # date arithmetic and .fillna paths work under pandas 3.0.
     for c in df.columns:
         if c in {
-            "start_date", "expected_end_date", "closed_date",
-            "asset_recovery_date", "recovery_date", "last_payment_date",
+            "start_date",
+            "expected_end_date",
+            "closed_date",
+            "asset_recovery_date",
+            "recovery_date",
+            "last_payment_date",
         }:
             df[c] = pd.to_datetime(df[c], errors="coerce")
     for c in {
-        "expected_end_date", "closed_date", "asset_recovery_date",
-        "recovery_date", "last_payment_date",
+        "expected_end_date",
+        "closed_date",
+        "asset_recovery_date",
+        "recovery_date",
+        "last_payment_date",
     }:
         if c not in df.columns:
             df[c] = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
@@ -1551,9 +1643,7 @@ def _compute_rental(df: pd.DataFrame, gi_body: RentalGeneralInputsBody) -> dict[
     _compute_lending)."""
     gi = RentalGeneralInputs(
         df,
-        extraction_date=(
-            pd.Timestamp(gi_body.extractionDate) if gi_body.extractionDate else None
-        ),
+        extraction_date=(pd.Timestamp(gi_body.extractionDate) if gi_body.extractionDate else None),
         days_after_term=gi_body.daysAfterTerm,
         months_since_default=gi_body.monthsSinceDefault,
         min_loans_per_cohort=gi_body.minLoansPerCohort,
@@ -1611,34 +1701,43 @@ def analyse_rental(body: RentalAnalyseBody) -> dict[str, Any]:
         df, c["cohorts"], RENTAL_DQ_CONFIG, c["gi"], c["filtered"], ue_data
     )
 
-    return _json_safe({
-        "summary": {
-            "rows": int(len(c["processed"])),
-            "cohorts": int(len(c["filtered"])),
-        },
-        "ue": ue_data,
-        "ltv": ltv_data,
-        "churn": churn_data,
-        "ts": c["ts"],
-        "general": c["general_data"],
-        "assetView": _frame_to_records(c["av"].reset_index()),
-        "cohortRows": _frame_to_records(c["filtered"].reset_index()),
-        # High-level repayment curve (mob vs % avg collection) - the rental UE
-        # tab's "High level repayment curve" chart + table, mirroring app.py's
-        # tabs[3] (Unit Economics Analysis).
-        "curveRows": _frame_to_records(c["curve"]),
-        "checks": checks,
-        "summaryMetrics": rental_summary_metrics(
-            c["processed"], c["av"], c["gi"], ue_data, ltv_data, c["ts"]
-        ),
-        "generalInputs": c["gi_calc"],
-    })
+    return _json_safe(
+        {
+            "summary": {
+                "rows": int(len(c["processed"])),
+                "cohorts": int(len(c["filtered"])),
+            },
+            "ue": ue_data,
+            "ltv": ltv_data,
+            "churn": churn_data,
+            "ts": c["ts"],
+            "general": c["general_data"],
+            "assetView": _frame_to_records(c["av"].reset_index()),
+            "cohortRows": _frame_to_records(c["filtered"].reset_index()),
+            # High-level repayment curve (mob vs % avg collection) - the rental UE
+            # tab's "High level repayment curve" chart + table, mirroring app.py's
+            # tabs[3] (Unit Economics Analysis).
+            "curveRows": _frame_to_records(c["curve"]),
+            "checks": checks,
+            "summaryMetrics": rental_summary_metrics(
+                c["processed"], c["av"], c["gi"], ue_data, ltv_data, c["ts"]
+            ),
+            "generalInputs": c["gi_calc"],
+        }
+    )
 
 
 class EscalateVarianceBody(BaseModel):
-    modelKey: str = Field("lending", description="'lending' or 'rental' (labels the Slack message).")
-    modelName: str = Field("Lending", description="Human label, e.g. 'Lending' or 'Rental & Subscription'.")
-    metricLabel: str = Field("Loss Rate (%)", description="Column in `detail` holding the swung metric, e.g. 'Loss Rate (%)'.")
+    modelKey: str = Field(
+        "lending", description="'lending' or 'rental' (labels the Slack message)."
+    )
+    modelName: str = Field(
+        "Lending", description="Human label, e.g. 'Lending' or 'Rental & Subscription'."
+    )
+    metricLabel: str = Field(
+        "Loss Rate (%)",
+        description="Column in `detail` holding the swung metric, e.g. 'Loss Rate (%)'.",
+    )
     filename: str = Field("", description="Uploaded file name, for the AI borrower guess.")
     detail: list[dict[str, Any]] = Field(
         default_factory=list,
@@ -1687,7 +1786,10 @@ def escalate_variance(body: EscalateVarianceBody) -> dict[str, Any]:
     except Exception as exc:
         ai_warning = str(exc)
     if not message:
-        message = f"Unexplained variance flagged in {body.modelName} screening analysis:\n" + "\n".join(lines)
+        message = (
+            f"Unexplained variance flagged in {body.modelName} screening analysis:\n"
+            + "\n".join(lines)
+        )
 
     ok, err = _send_slack_feedback(message, borrower_name or body.modelName)
     return {
@@ -1712,14 +1814,25 @@ def _ltv_calc_options() -> dict[str, Any]:
 
 class LtvCalcBody(BaseModel):
     dataSource: str = Field("Observed", description="'Observed' or 'Self-reported'.")
-    country: str = Field("Ghana", description="Alt Lender Country (default = first option, as Streamlit's selectbox).")
+    country: str = Field(
+        "Ghana",
+        description="Alt Lender Country (default = first option, as Streamlit's selectbox).",
+    )
     macroFxRisk: str = Field("Green", description="Macro FX Risk Rating: Green/Orange/Red.")
     segmentation: str = Field("Asset Lending", description="Segmentation.")
-    hedgeRate: float = Field(0.0, ge=0.0, le=1.0, description="Hedge rate (0 if unhedged, else % OTM as a decimal).")
+    hedgeRate: float = Field(
+        0.0, ge=0.0, le=1.0, description="Hedge rate (0 if unhedged, else % OTM as a decimal)."
+    )
     rolledHedge: str = Field("Roll", description="'Roll' or 'Term'.")
-    averageInterest: Optional[float] = Field(None, description="Weighted avg gross interest (decimal), from the analysis.")
-    termDays: Optional[float] = Field(None, description="Weighted avg receivable term (days), from the analysis.")
-    lossRate: Optional[float] = Field(None, description="95th %ile loss rate (decimal) at T+3, from the analysis.")
+    averageInterest: Optional[float] = Field(
+        None, description="Weighted avg gross interest (decimal), from the analysis."
+    )
+    termDays: Optional[float] = Field(
+        None, description="Weighted avg receivable term (days), from the analysis."
+    )
+    lossRate: Optional[float] = Field(
+        None, description="95th %ile loss rate (decimal) at T+3, from the analysis."
+    )
 
 
 @app.post("/api/ltv-calculator")
@@ -1861,8 +1974,14 @@ def suggest_mapping(body: SuggestMappingBody) -> dict[str, Any]:
 
 class DeriveColumnBody(BaseModel):
     modelKey: str = Field(..., description="'lending' or 'rental'.")
-    columns: list[str] = Field(..., description="Raw uploaded file's column headers (the formula may only reference these).")
-    request: str = Field(..., description="User's natural-language request, e.g. 'Expected Interest = Gross Loan Value - Principal Value'.")
+    columns: list[str] = Field(
+        ...,
+        description="Raw uploaded file's column headers (the formula may only reference these).",
+    )
+    request: str = Field(
+        ...,
+        description="User's natural-language request, e.g. 'Expected Interest = Gross Loan Value - Principal Value'.",
+    )
 
 
 @app.post("/api/ai/derive-column")
@@ -1911,8 +2030,13 @@ def _ai_error(exc: Exception) -> HTTPException:
 
 
 def _build_lending_chat_context_lite(
-    gi, df: pd.DataFrame, cohorts: pd.DataFrame, ue_data: dict, ltv_data: dict,
-    checks: list, user_context: str = "",
+    gi,
+    df: pd.DataFrame,
+    cohorts: pd.DataFrame,
+    ue_data: dict,
+    ltv_data: dict,
+    checks: list,
+    user_context: str = "",
 ) -> str:
     """A reduced version of scripts/chat_context.py's
     _build_lending_chat_context: same portfolio/cohort/UE/LTV/checks
@@ -1958,7 +2082,9 @@ def ai_chat_lending(body: LendingChatBody) -> dict[str, Any]:
     df = _resolve_lending_df(body)
     c = _compute_lending(df, body.generalInputs, body.selectedCohorts)
     ue_data, ltv_data = c["ue"].as_dict(), c["ltv"].as_dict()
-    checks = _lending_data_quality_checks(df, c["cohorts"], LENDING_DQ_CONFIG, c["gi"], c["filtered"])
+    checks = _lending_data_quality_checks(
+        df, c["cohorts"], LENDING_DQ_CONFIG, c["gi"], c["filtered"]
+    )
     # Same 60000/15000 truncation app.py's chat tab uses
     # (_ai_context_text(max_chars=60000, per_doc=15000)).
     user_context = document_text.combine_context_text(
@@ -1990,8 +2116,16 @@ def ai_chat_rental(body: RentalChatBody) -> dict[str, Any]:
         body.userContext, [d.model_dump() for d in body.documents], max_chars=60000, per_doc=15000
     )
     context = _build_rental_chat_context(
-        c["gi"], c["processed"], c["av"], c["cohorts"], ue_data, ltv_data,
-        churn_data, c["ts"], checks, user_context,
+        c["gi"],
+        c["processed"],
+        c["av"],
+        c["cohorts"],
+        ue_data,
+        ltv_data,
+        churn_data,
+        c["ts"],
+        checks,
+        user_context,
     )
     try:
         answer = _ask_data_chatbot(body.question, context, [m.model_dump() for m in body.history])
@@ -2016,23 +2150,29 @@ def _restore_payload(profile: dict[str, Any]) -> dict[str, Any]:
     same file, mapping, general inputs and chat history."""
     ingest = _register_ingest(profile["upload_bytes"], profile.get("upload_name") or "upload")
     mapping = profile.get("mapping") or {}
-    return _json_safe({
-        **ingest,
-        "modelKey": _infer_model_key(mapping),
-        "mapping": mapping,
-        "generalInputs": profile.get("gi_overrides") or {},
-        "chatHistory": profile.get("chat_history") or [],
-        "label": profile.get("label"),
-        "analysisContext": profile.get("analysis_context") or "",
-        # When present, the frontend renders this straight away instead of
-        # re-running the engine - see save_profile's analysisResult.
-        "analysisResult": profile.get("analysis_result"),
-    })
+    return _json_safe(
+        {
+            **ingest,
+            "modelKey": _infer_model_key(mapping),
+            "mapping": mapping,
+            "generalInputs": profile.get("gi_overrides") or {},
+            "chatHistory": profile.get("chat_history") or [],
+            "label": profile.get("label"),
+            "analysisContext": profile.get("analysis_context") or "",
+            # When present, the frontend renders this straight away instead of
+            # re-running the engine - see save_profile's analysisResult.
+            "analysisResult": profile.get("analysis_result"),
+        }
+    )
 
 
 class SaveProfileBody(BaseModel):
-    identity: str = Field(..., description="Self-declared, unverified identity string (see LoginScreen.tsx).")
-    sessionId: str = Field(..., description="Client-generated id identifying this deal across saves.")
+    identity: str = Field(
+        ..., description="Self-declared, unverified identity string (see LoginScreen.tsx)."
+    )
+    sessionId: str = Field(
+        ..., description="Client-generated id identifying this deal across saves."
+    )
     label: str
     ingestId: str
     mapping: dict[str, str] = Field(default_factory=dict)
@@ -2197,7 +2337,9 @@ def google_login_url() -> dict[str, str]:
         raise HTTPException(status_code=503, detail="Google sign-in is not configured.")
     state = secrets.token_urlsafe(16)
     _PENDING_GOOGLE_OAUTH_STATES.add(state)
-    url = _google_auth_url(state, scope=GOOGLE_REACT_APP_SCOPE, redirect_uri=GOOGLE_REACT_APP_REDIRECT_URI)
+    url = _google_auth_url(
+        state, scope=GOOGLE_REACT_APP_SCOPE, redirect_uri=GOOGLE_REACT_APP_REDIRECT_URI
+    )
     return {"url": url}
 
 
@@ -2218,7 +2360,9 @@ def google_callback(body: GoogleCallbackBody, response: Response) -> dict[str, A
     Also issues the signed remember-me cookie, so later loads skip the
     login screen."""
     if body.state not in _PENDING_GOOGLE_OAUTH_STATES:
-        raise HTTPException(status_code=400, detail="Invalid or expired sign-in attempt - please try again.")
+        raise HTTPException(
+            status_code=400, detail="Invalid or expired sign-in attempt - please try again."
+        )
     _PENDING_GOOGLE_OAUTH_STATES.discard(body.state)
     try:
         token = _exchange_google_code(body.code, redirect_uri=GOOGLE_REACT_APP_REDIRECT_URI)
