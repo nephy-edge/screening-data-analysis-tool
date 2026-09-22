@@ -1,0 +1,75 @@
+# Container image for the ECS Express deployment of the React + FastAPI app
+# (web/ + web_api/main.py). This is a sibling of the Streamlit-image Dockerfile:
+# same base image, same "no apt / python-stdlib healthcheck / run as app user"
+# conventions, but it builds the Vite frontend and runs uvicorn instead of
+# streamlit.
+#
+# The React SPA and every /api route are served by ONE uvicorn process on the
+# same origin (web_api/main.py mounts web/dist when present and falls back to
+# index.html for non-API GETs), so Google OAuth and the session cookie work
+# over same-origin requests - no separate static host, no CORS.
+#
+# Runbook (same external repo as the Streamlit image): build with
+#   docker build --platform linux/amd64 -f Dockerfile.web -t <image> .
+# then deploy on ECS Express (X86_64) with the env/secrets in the runbook.
+FROM node:20-alpine AS frontend
+
+WORKDIR /app/web
+
+COPY web/package.json web/package-lock.json ./
+# npm ci needs the lockfile to satisfy its exact-install contract.
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+COPY web/ ./
+# vite build -> ./dist (gitignored, produced here so the runtime image is
+# self-contained). tsc --noEmit runs first (the build script does both).
+RUN npm run build
+
+# --- Python runtime --------------------------------------------------------
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Dependencies first so the layer caches across code changes.
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Same Python "core" the Streamlit image ships (web_api imports these too):
+# app-level modules + scripts + rental_and_subscription (load-bearing layout).
+COPY app.py theme.py config.py config.toml ./
+COPY scripts/ ./scripts/
+COPY rental_and_subscription/ ./rental_and_subscription/
+COPY web_api/ ./web_api/
+COPY .streamlit/config.toml ./.streamlit/config.toml
+
+# Built SPA, served same-origin by FastAPI (web_api/main.py mounts it when
+# present - this COPY is what makes the deployed app serve the UI).
+COPY --from=frontend /app/web/dist ./web/dist
+
+# A small startup hook so the container can require + surface the secrets the
+# web app needs at boot (same pattern as the Streamlit entrypoint).
+COPY docker-entrypoint-web.sh /usr/local/bin/docker-entrypoint-web.sh
+
+# certs/ and docs/ deliberately not copied (see the Streamlit Dockerfile).
+
+RUN chmod +x /usr/local/bin/docker-entrypoint-web.sh \
+ && useradd --create-home --uid 10001 app \
+ && chown -R app:app /app
+USER app
+
+EXPOSE 8000
+
+# ECS Express uses the target-group health check over the network; kept for a
+# local `docker run`. Uses stdlib so the image needs no apt packages. The web
+# app's liveness endpoint is /api/health (uvicorn default /healthz is unused).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["python", "-c", "import urllib.request as u; exit(0 if u.urlopen('http://localhost:8000/api/health', timeout=3).status == 200 else 1)"]
+
+ENTRYPOINT ["docker-entrypoint-web.sh"]
+CMD ["uvicorn", "web_api.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "1"]

@@ -1,0 +1,34 @@
+.git
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+.streamlit/secrets.toml
+.env
+certs/
+docs/
+data/
+.devcontainer/
+.kilo/
+.claude/
+.github/
+.pre-commit-config.yaml
+pyproject.toml
+pytest.ini
+requirements-dev.txt
+PROGRESS.md
+GOALS_CHECKLIST.md
+OUTSTANDING_CHECKLIST.md
+README.md
+AGENTS.md
+streamlit_err.log
+streamlit_out.log
+scripts/prompt_evals/
+# Frontend build outputs / node_modules - kept out of the build context so a
+# Dockerfile.web build starts from a clean `npm ci` (+ fresh vite build) instead
+# of shipping huge/stale local artifacts.
+node_modules/
+web/node_modules/
+web/dist/
+web/vite_dev.log
