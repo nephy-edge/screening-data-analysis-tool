@@ -2,16 +2,19 @@ import { createContext, useContext, useMemo, useReducer, type ReactNode } from '
 import {
   askAi,
   createShare,
+  exportBaasWorkbook,
   exportLendingWorkbook,
   exportRentalWorkbook,
   exportRevolvingWorkbook,
   loadProfile,
   loadShare,
+  runBaasAnalysis,
   runLendingAnalysis,
   runRentalAnalysis,
   runRevolvingAnalysis,
   saveProfile,
   type AnalysisResponse,
+  type BaasResponse,
   type ChatMessage,
   type ContextDocument,
   type DerivedColumn,
@@ -87,6 +90,7 @@ export interface AppState {
   analysisResponse: AnalysisResponse | null;
   rentalResponse: RentalResponse | null;
   revolvingResponse: RevolvingResponse | null;
+  baasResponse: BaasResponse | null;
   analysisError: string | null;
   analysisRunning: boolean;
   chatHistory: ChatMessage[];
@@ -128,6 +132,7 @@ type Action =
   | { type: 'analysisDone'; payload: AnalysisResponse }
   | { type: 'rentalDone'; payload: RentalResponse }
   | { type: 'revolvingDone'; payload: RevolvingResponse }
+  | { type: 'baasDone'; payload: BaasResponse }
   | { type: 'analysisFail'; error: string }
   | { type: 'toggleModel'; modelKey: ModelKey }
   | { type: 'chatStart'; question: string }
@@ -170,6 +175,7 @@ const initialState: AppState = {
   analysisResponse: null,
   rentalResponse: null,
   revolvingResponse: null,
+  baasResponse: null,
   analysisError: null,
   analysisRunning: false,
   chatHistory: [],
@@ -231,6 +237,7 @@ function reducer(state: AppState, action: Action): AppState {
         analysisResponse: null,
         rentalResponse: null,
         revolvingResponse: null,
+        baasResponse: null,
         analysisError: null,
         chatHistory: [],
         chatError: null,
@@ -262,6 +269,7 @@ function reducer(state: AppState, action: Action): AppState {
         cached && payload.modelKey === 'lending' ? (cached as AnalysisResponse) : null;
       const rentalResponse = cached && isRental ? (cached as RentalResponse) : null;
       const revolvingResponse = cached && isRevolving ? (cached as RevolvingResponse) : null;
+      const baasResponse = cached && payload.modelKey === 'baas' ? (cached as BaasResponse) : null;
       const summary = cached?.summary as
         | { rows?: number; cohorts?: number; lossRate?: number }
         | undefined;
@@ -286,6 +294,7 @@ function reducer(state: AppState, action: Action): AppState {
         analysisResponse,
         rentalResponse,
         revolvingResponse,
+        baasResponse,
         analysis: cached
           ? {
               rows: summary?.rows ?? 0,
@@ -383,6 +392,14 @@ function reducer(state: AppState, action: Action): AppState {
         revolvingResponse: action.payload,
         analysis: { rows: action.payload.summary.rows, cohorts: 0, lossRate: 0, ltv: 0, status: 'done' },
       };
+    case 'baasDone':
+      return {
+        ...state,
+        analysisRunning: false,
+        analysisError: null,
+        baasResponse: action.payload,
+        analysis: { rows: action.payload.summary.rows, cohorts: 0, lossRate: 0, ltv: 0, status: 'done' },
+      };
     case 'analysisFail':
       return { ...state, analysisRunning: false, analysisError: action.error };
     case 'toggleModel':
@@ -393,6 +410,7 @@ function reducer(state: AppState, action: Action): AppState {
         analysisResponse: null,
         rentalResponse: null,
         revolvingResponse: null,
+        baasResponse: null,
         analysis: { rows: 0, cohorts: 0, lossRate: 0, ltv: 0, status: 'idle' },
         generalInputs: {
           ...state.generalInputs,
@@ -544,7 +562,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // Revolving saves its inputs under `revolving`, the key restoreProfile
     // merges back into generalInputs; runs send them flat (see analyse()).
     const buildGeneralInputs = () =>
-      state.modelKey === 'revolving'
+      state.modelKey === 'baas'
+        ? { baas: state.generalInputs.baas ?? null }
+        : state.modelKey === 'revolving'
         ? { revolving: state.generalInputs.revolving ?? null }
         : state.modelKey === 'rental'
           ? buildRentalGeneralInputs()
@@ -552,7 +572,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     // The result object for whichever model is active (save/share attach it).
     const activeResult = () =>
-      state.modelKey === 'revolving'
+      state.modelKey === 'baas'
+        ? state.baasResponse
+        : state.modelKey === 'revolving'
         ? state.revolvingResponse
         : state.modelKey === 'rental'
           ? state.rentalResponse
@@ -579,7 +601,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'analysisStart' });
       dispatch({ type: 'setDedupe', value: dedupeById });
       try {
-        if (state.modelKey === 'revolving') {
+        if (state.modelKey === 'baas') {
+          const payload = await runBaasAnalysis({ ingest, generalInputs: state.generalInputs.baas ?? null });
+          dispatch({ type: 'baasDone', payload });
+        } else if (state.modelKey === 'revolving') {
           const payload = await runRevolvingAnalysis({
             ingest,
             generalInputs: state.generalInputs.revolving ?? null,
@@ -638,7 +663,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const exportCharts = buildExportCharts();
         const dedupeById = state.dedupeActive;
-        if (state.modelKey === 'revolving') {
+        if (state.modelKey === 'baas') {
+          const blob = await exportBaasWorkbook({ ingest, generalInputs: state.generalInputs.baas ?? null });
+          downloadBlob(blob, 'SC_Analysis_BaaS.xlsx');
+        } else if (state.modelKey === 'revolving') {
           const blob = await exportRevolvingWorkbook({
             ingest,
             generalInputs: state.generalInputs.revolving ?? null,
@@ -676,8 +704,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dispatch({ type: 'chatFail', error: 'No file loaded — go back and upload one.' });
         return;
       }
-      // The revolving model has no Ask AI tab or chat endpoint.
-      if (state.modelKey === 'revolving') return;
+      // The revolving and BaaS models have no Ask AI tab or chat endpoint.
+      if (state.modelKey === 'revolving' || state.modelKey === 'baas') return;
       const history = state.chatHistory;
       dispatch({ type: 'chatStart', question });
       try {

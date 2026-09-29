@@ -7,6 +7,7 @@ import {
   startRedshiftTableFetch,
   suggestRedshiftFilter,
   getAuthConfig,
+  getBaasTemplate,
   getGoogleLoginUrl,
   getRedshiftConfig,
   ingestFile,
@@ -79,6 +80,19 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const downloadBaasTemplate = async () => {
+    try {
+      const url = URL.createObjectURL(await getBaasTemplate());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'baas_markets_template.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Template download failed');
+    }
+  };
   const [profiles, setProfiles] = useState<SavedProfileMeta[]>([]);
   const [resuming, setResuming] = useState(false);
   const [gsUrl, setGsUrl] = useState('');
@@ -554,6 +568,16 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
                 {busy ? 'Reading file…' : 'Browse files'}
               </Button>
             </div>
+          )}
+
+          {source === 'file' && state.modelKey === 'baas' && (
+            <p className="sd-muted">
+              BaaS takes one row per market, one column per assumption.{' '}
+              <Button variant="ghost" onClick={downloadBaasTemplate}>
+                Download the template
+              </Button>{' '}
+              (pre-filled with the 8 Ampersand / Arc example markets).
+            </p>
           )}
 
           {source === 'link' && (

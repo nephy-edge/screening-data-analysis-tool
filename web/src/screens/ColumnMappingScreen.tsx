@@ -2,7 +2,12 @@ import { useState } from 'react';
 import { useAppStore } from '../state/AppStore';
 import { Button, Alert, Select, Table, type TableColumn } from '../components/ui';
 import { suggestMapping, deriveColumn, type DerivedColumn } from '../api/engine';
-import { TEMPLATE_FIELDS, RENTAL_TEMPLATE_FIELDS, REVOLVING_TEMPLATE_FIELDS } from '../data/template';
+import {
+  BAAS_TEMPLATE_FIELDS,
+  TEMPLATE_FIELDS,
+  RENTAL_TEMPLATE_FIELDS,
+  REVOLVING_TEMPLATE_FIELDS,
+} from '../data/template';
 import type { ModelKey } from '../state/types';
 
 interface MappingProps {
@@ -74,7 +79,14 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
 
   const isRental = modelKey === 'rental';
   const isRevolving = modelKey === 'revolving';
-  const fields = isRevolving ? REVOLVING_TEMPLATE_FIELDS : isRental ? RENTAL_TEMPLATE_FIELDS : TEMPLATE_FIELDS;
+  const fields =
+    modelKey === 'baas'
+      ? BAAS_TEMPLATE_FIELDS
+      : isRevolving
+        ? REVOLVING_TEMPLATE_FIELDS
+        : isRental
+          ? RENTAL_TEMPLATE_FIELDS
+          : TEMPLATE_FIELDS;
 
   // Instant, offline baseline: normalised-name matching against the real
   // file's columns (see suggestSource above). Always applied first so the
