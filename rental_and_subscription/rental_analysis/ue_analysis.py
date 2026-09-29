@@ -56,11 +56,16 @@ class UeAnalysis:
         return (self.av["open_count"] == 1).sum() / len(self.av)
 
     def pct_collected_historical(self):
+        """Workbook Unit Economics C11:
+        (SUMIFS(L, W=TRUE) + SUMIFS(P, W=TRUE)) / SUMIFS(M, U=TRUE, V=TRUE)
+        i.e. paid + recovered on every contract whose *asset* has reached term
+        (W = original_asset_reached_term), over the acquisition cost of the first
+        leases that themselves reached term (U & V). The asymmetric W vs U&V
+        filter is the template's, not a typo on our side - reproducing it keeps
+        this tied to the source of truth."""
         df = self.df
-        matured = df[df["reached_t"]]
-        denom = df[df["first_asset_lease"] & df["original_asset_reached_term"]][
-            "cost_of_asset"
-        ].sum()
+        matured = df[df["original_asset_reached_term"]]
+        denom = df[df["first_asset_lease"] & df["reached_t"]]["cost_of_asset"].sum()
         if not denom:
             return np.nan
         return (matured["total_paid"].sum() + matured["recovery_amount"].fillna(0).sum()) / denom

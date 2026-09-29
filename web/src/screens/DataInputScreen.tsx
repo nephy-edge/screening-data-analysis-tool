@@ -42,10 +42,39 @@ type SourceKind = 'file' | 'link' | 'drive' | 'resume' | 'redshift' | 'json';
 // The warehouse API itself has no row cap; this is just the number sent when
 // "Fetch all rows" is checked, since the request still needs a limit value.
 const REDSHIFT_ALL_ROWS_LIMIT = 1_000_000_000;
+// A "fetch all rows" job can legitimately run for minutes; past this, stop polling.
+const REDSHIFT_POLL_TIMEOUT_MS = 30 * 60_000;
+
+// The warehouse's approved databases. MAESTRO_SRC used to be hardcoded in
+// this screen, which made everything outside it unreachable from the UI -
+// including the flattened loan-tape views, which live in MAESTRO_DEV_ANA.
+// A fixed list rather than a lookup: the allowlist is server-side
+// (scripts/warehouse.py ALLOWED_SCHEMAS) and nothing enumerates databases.
+// One the role cannot reach simply lists no schemas.
+const REDSHIFT_DATABASES = [
+  'MAESTRO_SRC',
+  'MAESTRO_DEV_ANA',
+  'MAESTRO_UAT_ANA',
+  'MAESTRO_PRD_ANA',
+  'MAESTRO_DEV_MRT',
+  'MAESTRO_UAT_MRT',
+  'MAESTRO_PRD_MRT',
+];
 
 export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<IngestProps, 'modelKey'>) {
   const { state, dispatch, resumeProfile } = useAppStore();
   const inputRef = useRef<HTMLInputElement>(null);
+  // Lets the warehouse poll stop when the user navigates away, instead of
+  // polling forever and later overwriting whatever file they loaded since.
+  // Set inside the effect (not just initialised) so StrictMode's dev
+  // mount/unmount/mount cycle leaves it true.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const [dragOver, setDragOver] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -74,6 +103,7 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
   const [redshiftBusy, setRedshiftBusy] = useState(false);
   const [redshiftProgress, setRedshiftProgress] = useState<{ done: number; total: number } | null>(null);
   const [redshiftError, setRedshiftError] = useState<string | null>(null);
+  const [redshiftDatabase, setRedshiftDatabase] = useState('MAESTRO_SRC');
   const [redshiftSchemas, setRedshiftSchemas] = useState<string[]>([]);
   const [redshiftSchema, setRedshiftSchema] = useState('');
   const [redshiftSchemasBusy, setRedshiftSchemasBusy] = useState(false);
@@ -131,13 +161,19 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
   }, [state.modelKey]);
 
   useEffect(() => {
-    if (source !== 'redshift' || !redshiftAvailable || redshiftSchemas.length > 0) return;
+    if (source !== 'redshift' || !redshiftAvailable) return;
+    // Re-runs whenever the database changes, and clears the schema/table
+    // below it - leaving a stale schema selected would build a query against
+    // a database that has no such schema.
+    setRedshiftSchemas([]);
+    setRedshiftSchema('');
+    setRedshiftTable('');
     setRedshiftSchemasBusy(true);
-    listRedshiftSchemas()
+    listRedshiftSchemas(redshiftDatabase)
       .then(setRedshiftSchemas)
       .catch((err) => setRedshiftError(err instanceof Error ? err.message : 'Could not list schemas.'))
       .finally(() => setRedshiftSchemasBusy(false));
-  }, [source, redshiftAvailable, redshiftSchemas.length]);
+  }, [source, redshiftAvailable, redshiftDatabase]);
 
   useEffect(() => {
     if (!redshiftSchema) {
@@ -147,11 +183,11 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
     }
     setRedshiftTablesBusy(true);
     setRedshiftTable('');
-    listRedshiftTables(redshiftSchema)
+    listRedshiftTables(redshiftSchema, redshiftDatabase)
       .then(setRedshiftTables)
       .catch((err) => setRedshiftError(err instanceof Error ? err.message : 'Could not list tables.'))
       .finally(() => setRedshiftTablesBusy(false));
-  }, [redshiftSchema]);
+  }, [redshiftSchema, redshiftDatabase]);
 
   const resume = async (sessionId: string) => {
     setBusy(true);
@@ -357,6 +393,7 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
       const { where } = await suggestRedshiftFilter({
         schema: redshiftSchema,
         table: redshiftTable,
+        database: redshiftDatabase,
         request: redshiftFilterRequest.trim(),
       });
       if (where) {
@@ -385,6 +422,7 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
       const { jobId } = await startRedshiftTableFetch({
         schema: redshiftSchema,
         table: redshiftTable,
+        database: redshiftDatabase,
         limit,
         where: redshiftWhere,
       });
@@ -392,8 +430,13 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
       // blocking request - a big "fetch all rows" table can take minutes to
       // transfer, and a single request that long used to silently time out
       // (see startRedshiftTableFetch's docstring).
-      for (;;) {
+      const deadline = Date.now() + REDSHIFT_POLL_TIMEOUT_MS;
+      while (mountedRef.current) {
+        if (Date.now() > deadline) {
+          throw new Error('The warehouse fetch is taking too long - try a filter or a row limit.');
+        }
         const poll = await getRedshiftTableStatus(jobId, redshiftSchema, redshiftTable);
+        if (!mountedRef.current) break;
         setRedshiftProgress({ done: poll.partitionsDone, total: poll.partitionsTotal });
         if (poll.status === 'error') throw new Error(poll.error || "Couldn't fetch that table.");
         if (poll.status === 'done') {
@@ -609,6 +652,18 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
           {source === 'redshift' && (
             <div className="sd-field" style={{ maxWidth: 480 }}>
               {redshiftError ? <Alert tone="error">{redshiftError}</Alert> : null}
+              <span>Database</span>
+              <Select
+                aria-label="Database"
+                value={redshiftDatabase}
+                onChange={(e) => setRedshiftDatabase(e.target.value)}
+              >
+                {REDSHIFT_DATABASES.map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
+              </Select>
               <span>Schema</span>
               <Select
                 aria-label="Schema"
@@ -648,8 +703,9 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
                 ))}
               </Select>
               <span className="sd-muted">
-                Reads MAESTRO_SRC.{redshiftSchema || '<schema>'}.{redshiftTable || '<table>'} - any table under
-                the warehouse's approved schemas (MAESTRO_SRC*, MAESTRO_*_ANA, MAESTRO_*_MRT).
+                Reads {redshiftDatabase}.{redshiftSchema || '<schema>'}.{redshiftTable || '<table>'} - any
+                table under the warehouse's approved databases. A database your role cannot reach
+                lists no schemas.
               </span>
 
               <span>Filter (optional)</span>

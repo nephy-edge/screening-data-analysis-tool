@@ -15,6 +15,12 @@ def count_missing_asset_id_rows(df):
 def build_asset_view(df, gi):
     extraction_date = gi["extraction_date"]
     g = df.groupby("asset_id")
+
+    # Vectorised per-asset status counts - a groupby.apply lambda here ran
+    # Python once per asset (~5 min on a 1M-row tape). Same NaN-key dropping.
+    def status_count(label):
+        return (df["status_mapping"] == label).groupby(df["asset_id"]).sum()
+
     av = pd.DataFrame(
         {
             "start_first_contract": g["start_date"].min(),
@@ -22,9 +28,9 @@ def build_asset_view(df, gi):
             "total_expected": g["amount_expected_to_date"].sum(),
             "total_paid": g["total_paid"].sum(),
             "asset_cost": g["cost_of_asset"].min(),
-            "open_count": g.apply(lambda x: (x["status_mapping"] == gi["open_label"]).sum()),
-            "closed_count": g.apply(lambda x: (x["status_mapping"] == gi["closed_label"]).sum()),
-            "paidoff_count": g.apply(lambda x: (x["status_mapping"] == gi["paidoff_label"]).sum()),
+            "open_count": status_count(gi["open_label"]),
+            "closed_count": status_count(gi["closed_label"]),
+            "paidoff_count": status_count(gi["paidoff_label"]),
             "max_closed_date": g["closed_date"].max(),
         }
     )

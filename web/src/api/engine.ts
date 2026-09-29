@@ -56,6 +56,14 @@ export interface AnalysisResponse {
   summaryMetrics: Record<string, number | string | null>;
   summaryChart: SummaryChartRow[];
   generalInputs: Record<string, unknown>;
+  /** The LTV Calculator's interest input: Average Interest % limited to the
+   * General Inputs LTV cohort range (equals it when no range is set). */
+  ltvInterest?: number | null;
+  /** The "YYYY-MM" range ltvInterest was computed over (nulls = open end). */
+  ltvInterestRange?: { from: string | null; to: string | null };
+  /** Set when a non-USD portfolio currency had no live FX rate, so the figures
+   * stayed in the original currency - the Summary tab surfaces it. */
+  fxWarning: string | null;
   /** UE Model sub-tab inputs (matured-loan aggregates + cost defaults) -
    * the browser derives every dependent figure/IRR from these when the user
    * edits the manual cost / loss-rate assumptions, mirroring app.py's
@@ -314,6 +322,12 @@ export interface LendingAnalyseInput {
     extractionDate: string | null;
     daysAfterTerm: number;
     minLoansPerCohort: number;
+    /** Optional "YYYY-MM" cohort range for the LTV Calculator's interest only. */
+    ltvCohortFrom?: string | null;
+    ltvCohortTo?: string | null;
+    /** ISO 4217 code the mapped monetary columns are denominated in; the
+     * backend rescales them to USD when this isn't "USD". */
+    currency: string;
   };
   exportCharts?: ExportChartSpec[];
   /** Data-Checks "Deduplicate" action: drop to the first row per duplicated
@@ -360,6 +374,9 @@ export interface RentalResponse {
   checks: QualityCheck[];
   summaryMetrics: Record<string, number | string | null>;
   generalInputs: Record<string, unknown>;
+  /** Set when a non-USD portfolio currency had no live FX rate, so the figures
+   * stayed in the original currency - the Summary tab surfaces it. */
+  fxWarning: string | null;
 }
 
 export interface RentalIngest {
@@ -383,6 +400,9 @@ export interface RentalAnalyseInput {
     fxDevalPct: number | null;
     fxDiscount50pct: boolean;
     debtService180d: number | null;
+    /** ISO 4217 code the mapped monetary columns are denominated in; the
+     * backend rescales them to USD when this isn't "USD". */
+    currency: string;
   };
   exportCharts?: ExportChartSpec[];
   /** Data-Checks "Deduplicate" action: drop to the first row per duplicated
@@ -452,14 +472,18 @@ export function suggestMapping(input: {
 /** Ask AI to turn a natural-language "derive a column" request into a safe
  * formula over the file's real columns, e.g. "Expected Interest = Gross Loan
  * Value - Principal Value" -> {name, formula}. Returns nulls (not an error)
- * when no DEEPINFRA_API_KEY is configured server-side; the caller then tells
- * the user to type a formula manually. */
+ * when the model could not draft one. `configured` says whether an API key
+ * is present at all, so the caller can tell "AI is switched off" apart from
+ * "AI is on but could not answer that" - they used to look identical. */
 export function deriveColumn(input: {
   modelKey: 'lending' | 'rental';
   columns: string[];
   request: string;
-}): Promise<{ name: string | null; formula: string | null }> {
-  return post<{ name: string | null; formula: string | null }>('/ai/derive-column', input);
+}): Promise<{ name: string | null; formula: string | null; configured?: boolean }> {
+  return post<{ name: string | null; formula: string | null; configured?: boolean }>(
+    '/ai/derive-column',
+    input,
+  );
 }
 
 export interface ChatMessage {

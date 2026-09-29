@@ -103,8 +103,7 @@ from ai_client import (  # noqa: E402
 from chat_context import _build_lending_chat_context, _build_rental_chat_context  # noqa: E402
 from integrations import (  # noqa: E402
     _fetch_usd_fx_rates,
-    _get_redshift_api_key,
-    _get_redshift_api_url,
+    _redshift_available,
     _get_slack_webhook_url,
     _redshift_fetch_loan_tape,
     _redshift_list_borrowers,
@@ -2105,12 +2104,10 @@ if _share_token:
 else:
     _saved_profiles = _store_list_profiles()
     _data_source_options = ["Local file", "Google Sheets / Drive link", "My Google Drive"]
-    _redshift_api_url = _get_redshift_api_url()
-    _redshift_api_key = _get_redshift_api_key()
-    # Loan tapes only - the warehouse-backed API this talks to
-    # (Verifications/redshift-api) exposes lending loan tapes, not Rental &
-    # Subscription contract tapes.
-    if is_lending and _redshift_api_url and _redshift_api_key:
+    # Loan tapes only - the warehouse layout this reads (a LOANS table per
+    # borrower schema, see scripts/warehouse.py) holds lending loan tapes,
+    # not Rental & Subscription contract tapes.
+    if is_lending and _redshift_available():
         _data_source_options.append("Redshift (Warehouse)")
     if _saved_profiles:
         _data_source_options.insert(0, "Resume my saved session")
@@ -2203,7 +2200,7 @@ else:
     else:
         try:
             with st.spinner("Listing borrowers..."):
-                redshift_borrowers = _redshift_list_borrowers(_redshift_api_url, _redshift_api_key)
+                redshift_borrowers = _redshift_list_borrowers()
         except Exception as e:
             st.error(f"Couldn't list borrowers from the warehouse: {e}")
             st.stop()
@@ -2283,9 +2280,7 @@ try:
         raw = _read_tabular_file(_NamedBytes(gdrive_pick["data"], gdrive_pick["name"]))
     else:
         with st.spinner(f"Fetching {redshift_borrower}'s loan tape from the warehouse..."):
-            raw = _redshift_fetch_loan_tape(
-                _redshift_api_url, _redshift_api_key, redshift_borrower, int(redshift_row_limit)
-            )
+            raw = _redshift_fetch_loan_tape(redshift_borrower, int(redshift_row_limit))
 except Exception as e:
     if data_source == "Redshift (Warehouse)":
         st.error(f"Couldn't fetch that loan tape from the warehouse: {e}")

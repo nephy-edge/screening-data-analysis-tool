@@ -575,6 +575,54 @@ def _status_mapping_check(gi, raw: pd.DataFrame) -> list[dict]:
     return checks
 
 
+def _rental_data_gaps_check(raw: pd.DataFrame, rental_config: dict) -> list[dict]:
+    """Flags the recurring source-data issues seen across real rental/subscription
+    workbooks that silently corrupt or crash downstream metrics if missed:
+    blank asset_id rows (dropped from every per-asset rollup - Asset View,
+    repayment curve, utilisation, recovery - and the historical cause of a crash
+    in the %-collected metric, since a row with no asset can't be grouped into
+    one), and a large share of contracts missing an expected end date (the
+    fallback assumes start_date + useful life, which inflates lease tenor and
+    the repayment curve when the real terms are shorter)."""
+    checks: list[dict] = []
+    if raw is None or raw.empty:
+        return checks
+    if "asset_id" in raw.columns:
+        n_blank = int(raw["asset_id"].isna().sum())
+        if n_blank:
+            checks.append(
+                {
+                    "level": "warning",
+                    "check_id": "blank_asset_id",
+                    "message": (
+                        f"**{n_blank:,} row(s) ({n_blank / len(raw):.0%} of the file) have a "
+                        "blank asset ID** - these rows are dropped from every per-asset rollup "
+                        "(Asset View, repayment curve, utilisation, recovery) and everything "
+                        "built on top of it. A row with no asset can't be grouped into an "
+                        "asset, so it also previously crashed the historical %-collected "
+                        "metric. Confirm with the borrower whether these are genuinely "
+                        "missing asset links or a mapping gap."
+                    ),
+                }
+            )
+    if "expected_end_date" in raw.columns:
+        n_missing = int(raw["expected_end_date"].isna().sum())
+        if n_missing:
+            checks.append(
+                {
+                    "level": "warning",
+                    "check_id": "missing_end_date",
+                    "message": (
+                        f"**{n_missing:,} contract(s) ({n_missing / len(raw):.0%} of the file) "
+                        "have no expected end date** - these are inferred as start_date + useful "
+                        "life, which inflates lease tenor and the repayment curve if the real "
+                        "terms are shorter. Provide the true expected end dates if available."
+                    ),
+                }
+            )
+    return checks
+
+
 def _rental_data_quality_checks(
     raw: pd.DataFrame,
     cohorts: pd.DataFrame,
@@ -585,8 +633,13 @@ def _rental_data_quality_checks(
 ) -> list[dict]:
     """Rental & Subscription: Step 2 checks (shared) + Step 4 churn-rate
     variance diagnosis + General Inputs sanity checks (min loans/cohort and
-    useful life vs this file's own data)."""
-    checks = _step2_data_quality_checks(raw, rental_config) + _rental_variance_check(cohorts)
+    useful life vs this file's own data) + source-data gap flags (blank asset
+    IDs, missing end dates)."""
+    checks = (
+        _step2_data_quality_checks(raw, rental_config)
+        + _rental_data_gaps_check(raw, rental_config)
+        + _rental_variance_check(cohorts)
+    )
     if gi is not None and filtered is not None:
         checks += _cohort_threshold_check(gi, cohorts, filtered)
     if gi is not None and ue_data is not None:

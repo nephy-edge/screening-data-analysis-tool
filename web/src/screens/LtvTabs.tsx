@@ -145,19 +145,32 @@ function LossPerCohortChart({
  * chart. Green inputs (avg interest, term, 95th %ile loss) come from the
  * already-computed analysis. */
 export function LendingLtvTab() {
-  const { state } = useAppStore();
+  const { state, dispatch } = useAppStore();
   const ue = state.analysisResponse?.ue as Record<string, unknown> | undefined;
   const ltv = state.analysisResponse?.ltv as Record<string, unknown> | undefined;
-  const greenInterest = ue ? num(ue['Average Interest %']) : null;
+  // ltvInterest = Average Interest % limited to the General Inputs LTV
+  // cohort range; older saved sessions predate it, so fall back.
+  const ltvInterest = state.analysisResponse?.ltvInterest;
+  const range = state.analysisResponse?.ltvInterestRange;
+  // Only claim the range when the backend actually returned a ranged figure.
+  const interestRangeNote =
+    ltvInterest != null && range && (range.from || range.to)
+      ? ` - cohorts ${range.from || 'first'} to ${range.to || 'latest'} only (General Inputs)`
+      : '';
+  const greenInterest = ltvInterest != null ? num(ltvInterest) : ue ? num(ue['Average Interest %']) : null;
   const greenTermDays = ltv ? num(ltv['Average Term']) : null;
   const greenLoss = ltv ? num(ltv['95th Percentile Losses']) : null;
 
-  const [dataSource, setDataSource] = useState('Observed');
-  const [country, setCountry] = useState('Ghana');
-  const [macroFx, setMacroFx] = useState('Green');
-  const [segmentation, setSegmentation] = useState('Asset Lending');
-  const [hedgeRate, setHedgeRate] = useState('0');
-  const [rolledHedge, setRolledHedge] = useState('Roll');
+  // In the store, not useState: leaving the tab unmounts it, which used to
+  // reset every dropdown to its default.
+  const { dataSource, country, macroFx, segmentation, hedgeRate, rolledHedge } = state.ltvInputs;
+  const set = (inputs: Partial<typeof state.ltvInputs>) => dispatch({ type: 'setLtvInputs', inputs });
+  const setDataSource = (dataSource: string) => set({ dataSource });
+  const setCountry = (country: string) => set({ country });
+  const setMacroFx = (macroFx: string) => set({ macroFx });
+  const setSegmentation = (segmentation: string) => set({ segmentation });
+  const setHedgeRate = (hedgeRate: string) => set({ hedgeRate });
+  const setRolledHedge = (rolledHedge: string) => set({ rolledHedge });
   const [response, setResponse] = useState<LtvCalculatorResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -313,7 +326,7 @@ export function LendingLtvTab() {
           <h3 className="sd-h2" style={{ fontSize: '1rem', marginTop: 12 }}>Credit Stress Backup</h3>
           <SnapshotTable
             rows={[
-              { label: 'Product Interest Rate', value: fmtPct(response.greenInterest), help: 'Weighted average gross interest rate, pulled from this analysis.' },
+              { label: 'Product Interest Rate', value: fmtPct(response.greenInterest), help: `Weighted average gross interest rate, pulled from this analysis${interestRangeNote}.` },
               {
                 label: '95th %ile Loss',
                 value: fmtPct(response.greenLoss),
@@ -354,21 +367,21 @@ export function RentalLtvTab() {
   const ltv = (state.rentalResponse?.ltv ?? {}) as Record<string, unknown>;
 
   const assetCol = [
-    { label: 'Average Useful Life (m)', value: fmt(ltv['avg_useful_life_m'], 1) },
-    { label: 'Defaulted contracts > 3mo', value: fmt(ltv['n_defaulted_gt_3m'], 0) },
-    { label: 'Defaulted last 12m', value: fmt(ltv['n_defaulted_last_12m'], 0) },
-    { label: '% recovered', value: fmtPct(ltv['pct_recovered']) },
-    { label: 'Recovery Rate (12m)', value: fmtPct(ltv['pct_recovered_last_12m']) },
-    { label: 'Recoverability (95th %ile)', value: fmtPct(ltv['recoverability_pctile_95']) },
-    { label: 'Loss (non-recoverability)', value: fmtPct(ltv['loss_non_recoverability']) },
+    { label: 'Average Useful Life (m)', value: fmt(ltv['avg_useful_life_m'], 1), hint: 'Principal-weighted average useful asset life, in months.' },
+    { label: 'Defaulted contracts > 3mo', value: fmt(ltv['n_defaulted_gt_3m'], 0), hint: 'Number of contracts in default for more than 3 months.' },
+    { label: 'Defaulted last 12m', value: fmt(ltv['n_defaulted_last_12m'], 0), hint: 'Number of contracts that defaulted in the last 12 months.' },
+    { label: '% recovered', value: fmtPct(ltv['pct_recovered']), hint: 'Share of defaulted value that has been recovered.' },
+    { label: 'Recovery Rate (12m)', value: fmtPct(ltv['pct_recovered_last_12m']), hint: 'Share of defaulted value recovered over the last 12 months.' },
+    { label: 'Recoverability (95th %ile)', value: fmtPct(ltv['recoverability_pctile_95']), hint: '95th-percentile recovery value on defaulted assets.' },
+    { label: 'Loss (non-recoverability)', value: fmtPct(ltv['loss_non_recoverability']), hint: 'Expected loss from defaulted value that is not recoverable.' },
   ];
   const mrrCol = [
-    { label: 'MRR', value: num(ltv['mrr'])?.toLocaleString(undefined, { maximumFractionDigits: 0 }) ?? 'n/a' },
-    { label: 'MRR (active <= DSLP30)', value: num(ltv['mrr_dslp30'])?.toLocaleString(undefined, { maximumFractionDigits: 0 }) ?? 'n/a' },
-    { label: 'Subscription margin', value: ltv['subscription_margin'] != null ? `${(num(ltv['subscription_margin'])! * 100).toFixed(2)}%` : 'n/a' },
-    { label: 'Subscription support', value: ltv['subscription_support'] != null ? `${(num(ltv['subscription_support'])! * 100).toFixed(2)}%` : 'n/a' },
-    { label: 'MRR Multiplier (3y)', value: fmt(ltv['mrr_multiplier'], 2) },
-    { label: 'MRR / average cost', value: ltv['mrr_over_avg_cost'] != null ? `${(num(ltv['mrr_over_avg_cost'])! * 100).toFixed(2)}%` : 'n/a' },
+    { label: 'MRR', value: num(ltv['mrr'])?.toLocaleString(undefined, { maximumFractionDigits: 0 }) ?? 'n/a', hint: 'Monthly recurring revenue from active contracts.' },
+    { label: 'MRR (active <= DSLP30)', value: num(ltv['mrr_dslp30'])?.toLocaleString(undefined, { maximumFractionDigits: 0 }) ?? 'n/a', hint: 'MRR from active contracts that are at most 30 days past due.' },
+    { label: 'Subscription margin', value: ltv['subscription_margin'] != null ? `${(num(ltv['subscription_margin'])! * 100).toFixed(2)}%` : 'n/a', hint: 'Margin on subscription revenue.' },
+    { label: 'Subscription support', value: ltv['subscription_support'] != null ? `${(num(ltv['subscription_support'])! * 100).toFixed(2)}%` : 'n/a', hint: 'Subscription revenue supporting the asset value.' },
+    { label: 'MRR Multiplier (3y)', value: fmt(ltv['mrr_multiplier'], 2), hint: 'MRR valued at a 3-year multiple.' },
+    { label: 'MRR / average cost', value: ltv['mrr_over_avg_cost'] != null ? `${(num(ltv['mrr_over_avg_cost'])! * 100).toFixed(2)}%` : 'n/a', hint: 'Monthly recurring revenue relative to average asset cost.' },
   ];
 
   return (
@@ -385,7 +398,7 @@ export function RentalLtvTab() {
           <strong>Asset Analysis</strong>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
             {assetCol.map((m) => (
-              <Metric key={m.label} label={m.label} value={m.value} />
+              <Metric key={m.label} label={m.label} value={m.value} hint={m.hint} />
             ))}
           </div>
         </div>
@@ -393,7 +406,7 @@ export function RentalLtvTab() {
           <strong>Cash Flow Analysis (MRR)</strong>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
             {mrrCol.map((m) => (
-              <Metric key={m.label} label={m.label} value={m.value} />
+              <Metric key={m.label} label={m.label} value={m.value} hint={m.hint} />
             ))}
           </div>
         </div>
@@ -402,10 +415,10 @@ export function RentalLtvTab() {
       <hr style={{ border: 'none', borderTop: '1px solid var(--sd-border, #e7ecee)' }} />
       <h3 className="sd-h2" style={{ fontSize: '1rem' }}>Asset-value LTV waterfall (Guide)</h3>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
-        <Metric label="Recoverability (95th %ile)" value={fmtPct(ltv['recoverability_pctile_95'])} />
-        <Metric label="Subscription support" value={fmtPct(ltv['subscription_support'])} />
-        <Metric label="FX devaluation used" value={ltv['fx_deval_used'] != null ? `${(num(ltv['fx_deval_used'])! * 100).toFixed(2)}%` : 'n/a'} />
-        <Metric label="Asset LTV (max 95%)" value={ltv['ltv_asset_value'] != null ? `${(num(ltv['ltv_asset_value'])! * 100).toFixed(1)}%` : 'n/a'} />
+        <Metric label="Recoverability (95th %ile)" value={fmtPct(ltv['recoverability_pctile_95'])} hint="95th-percentile recovery value on defaulted assets." />
+        <Metric label="Subscription support" value={fmtPct(ltv['subscription_support'])} hint="Subscription revenue supporting the asset value." />
+        <Metric label="FX devaluation used" value={ltv['fx_deval_used'] != null ? `${(num(ltv['fx_deval_used'])! * 100).toFixed(2)}%` : 'n/a'} hint="Devaluation applied to the asset value in the LTV calculation." />
+        <Metric label="Asset LTV (max 95%)" value={ltv['ltv_asset_value'] != null ? `${(num(ltv['ltv_asset_value'])! * 100).toFixed(1)}%` : 'n/a'} hint="Loan-to-value against asset value, capped at 95%." />
       </div>
       <p className="sd-muted">
         LTV = min(95%, (recoverability + subscription support) / (1 + FX)). Recoverability = 95th %ile of

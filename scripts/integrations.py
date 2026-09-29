@@ -1,15 +1,19 @@
 """Thin clients for the external services app.py talks to that aren't the
-AI model itself: live FX rates, Slack feedback, and the Redshift Query API
-data source. Each secret lookup falls back from Streamlit secrets to an
-environment variable so the same code works locally (.env) and on Streamlit
-Cloud (secrets.toml)."""
+AI model itself: live FX rates, Slack feedback, and the Snowflake warehouse
+data source (see scripts/warehouse.py - still named "redshift" throughout for
+backward compatibility with the React client's route names). Each secret
+lookup falls back from Streamlit secrets to an environment variable so the
+same code works locally (.env) and on Streamlit Cloud (secrets.toml)."""
 
 import os
+import re
 from datetime import datetime as _dt
 
 import pandas as pd
 import requests
 import streamlit as st
+import warehouse
+import warehouse_jobs
 from ca_bundle import _ca_bundle_path
 
 import config as app_config
@@ -64,89 +68,71 @@ def _send_slack_feedback(message: str, model: str, user: str = "") -> tuple[bool
         return False, str(e)
 
 
-def _get_redshift_api_url():
-    try:
-        return st.secrets["REDSHIFT_API_URL"]
-    except Exception:
-        return os.environ.get("REDSHIFT_API_URL")
-
-
-def _get_redshift_api_key():
-    try:
-        return st.secrets["REDSHIFT_API_KEY"]
-    except Exception:
-        return os.environ.get("REDSHIFT_API_KEY")
+def _redshift_available() -> bool:
+    """Whether the warehouse data source can be offered at all. Previously a
+    check for a configured proxy URL + API key; now a check that Snowflake
+    credentials are present, since this app talks to Snowflake directly."""
+    return warehouse.is_configured()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _redshift_list_borrowers(api_url: str, api_key: str) -> list:
-    """List available borrower slugs from the Redshift Query API's /borrowers
-    endpoint (see Verifications/redshift-api). Cached client-side for 5min on
-    top of that API's own 10min server-side cache - this data-source branch
-    re-runs on every script rerun while selected, so without caching here
-    every keystroke/click would re-hit the API even though the borrower list
-    only changes when a new deal onboards."""
-    resp = requests.get(
-        f"{api_url.rstrip('/')}/borrowers",
-        headers={"X-API-Key": api_key},
-        timeout=30,
-        verify=_ca_bundle_path(),
+def _redshift_list_borrowers() -> list:
+    """List available borrower slugs. Each borrower is its own schema in
+    LOAN_TAPE_DATABASE holding a LOANS table (e.g. MAESTRO_SRC.LEASY.LOANS),
+    so the list is derived from INFORMATION_SCHEMA rather than stored
+    anywhere - it reflects current warehouse metadata and changes only when
+    a new deal onboards.
+
+    Cached for 5min because this data-source branch re-runs on every
+    Streamlit rerun while selected, so without it every keystroke or click
+    would re-query the warehouse for a list that is effectively static. The
+    old proxy held a second, server-side cache for the same reason; going
+    direct means this one is the only one left."""
+    payload = _redshift_query(
+        "SELECT schema_name "
+        f"FROM {warehouse.LOAN_TAPE_DATABASE}.INFORMATION_SCHEMA.SCHEMATA s "
+        "WHERE EXISTS (SELECT 1 FROM "
+        f"{warehouse.LOAN_TAPE_DATABASE}.INFORMATION_SCHEMA.TABLES t "
+        "WHERE t.table_schema = s.schema_name "
+        f"AND t.table_name = '{warehouse.LOAN_TAPE_TABLE}') "
+        "ORDER BY schema_name",
+        500,
     )
-    resp.raise_for_status()
-    return resp.json().get("borrowers", [])
+    return sorted({row[0].lower() for row in payload["rows"]})
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _redshift_fetch_loan_tape(
-    api_url: str, api_key: str, borrower: str, limit: int
-) -> pd.DataFrame:
-    """Fetch one borrower's loan tape from the Redshift Query API's
-    /loan-tape endpoint. Cached client-side so re-running the script for an
-    unrelated widget change elsewhere doesn't re-run a potentially slow
-    warehouse query against the same borrower/limit."""
-    resp = requests.get(
-        f"{api_url.rstrip('/')}/loan-tape",
-        params={"borrower": borrower, "limit": limit},
-        headers={"X-API-Key": api_key},
-        # A bit above that API's own QUERY_TIMEOUT_SECONDS (120s default) so
-        # the server's own timeout error comes back to us, rather than this
-        # client cutting the connection first and masking it as a generic
-        # read timeout.
-        timeout=150,
-        verify=_ca_bundle_path(),
+def _redshift_fetch_loan_tape(borrower: str, limit: int) -> pd.DataFrame:
+    """Fetch one borrower's loan tape. Cached client-side so re-running the
+    script for an unrelated widget change elsewhere doesn't re-run a
+    potentially slow warehouse query for the same borrower/limit.
+
+    `borrower` is checked against the real borrower list rather than only
+    pattern-matched, so a typo fails with a useful message instead of a bare
+    SQL error - and so this can never be pointed at an arbitrary schema.
+    Snowflake identifiers are case-insensitive unquoted, so a lowercase slug
+    like `leasy` resolves to MAESTRO_SRC.LEASY.LOANS."""
+    if not re.fullmatch(r"[a-z0-9_]+", borrower):
+        raise ValueError("Invalid borrower slug")
+    known = set(_redshift_list_borrowers())
+    if borrower not in known:
+        raise ValueError(f"Unknown borrower '{borrower}'. Available: {', '.join(sorted(known))}")
+    payload = _redshift_query(
+        f"SELECT * FROM {warehouse.LOAN_TAPE_DATABASE}.{borrower}.{warehouse.LOAN_TAPE_TABLE}",
+        limit,
     )
-    resp.raise_for_status()
-    payload = resp.json()
     return pd.DataFrame(payload["rows"], columns=payload["columns"])
 
 
-def _redshift_query(api_url: str, api_key: str, sql: str, limit: int) -> dict:
-    """POST one query to the Query API's /query endpoint and return its raw
-    JSON payload ({"columns", "rows", ...}) - shared by every function below
-    that runs its own SQL against the warehouse, so the request plumbing
-    (timeout, TLS bundle, error surfacing) lives in one place. Callers are
-    responsible for their own SQL string safety (see _redshift_table_sql's
-    docstring); the API's read-only + schema-allowlist checks are the real
-    enforcement boundary regardless."""
-    resp = requests.post(
-        f"{api_url.rstrip('/')}/query",
-        json={"sql": sql, "limit": limit},
-        headers={"X-API-Key": api_key},
-        timeout=150,
-        verify=_ca_bundle_path(),
-    )
-    if not resp.ok:
-        # The API returns a clear {"detail": "..."} on a 4xx (e.g. "'limit'
-        # must be >= 1") - resp.raise_for_status() alone discards that body
-        # and raises a bare "400 Client Error", which reached the user as an
-        # unhelpful "Couldn't fetch ... from the warehouse: 400 Client Error:
-        # Bad Request" with no indication of why.
-        try:
-            detail = resp.json().get("detail")
-        except ValueError:
-            detail = None
-        raise requests.HTTPError(detail or f"{resp.status_code} {resp.reason}", response=resp)
-    return resp.json()
+def _redshift_query(sql: str, limit: int) -> dict:
+    """Run one query against Snowflake and return {"columns", "rows", ...} -
+    shared by every function below that needs its own SQL, so validation and
+    the statement-API plumbing live in one place (scripts/warehouse.py).
+
+    Callers are responsible for their own SQL string safety (see
+    _redshift_table_sql's docstring); warehouse.validate_query's read-only
+    and schema-allowlist checks are the real enforcement boundary."""
+    return warehouse.query(sql, limit)
 
 
 def _redshift_table_sql(database: str, schema: str, table: str, where: str | None = None) -> str:
@@ -193,63 +179,35 @@ def _redshift_table_sql(database: str, schema: str, table: str, where: str | Non
 
 
 def _redshift_start_table_job(
-    api_url: str,
-    api_key: str,
     database: str,
     schema: str,
     table: str,
     limit: int,
     where: str | None = None,
 ) -> str:
-    """Start _redshift_table_sql's query as a background job on the
-    warehouse API and return its job id, for polling real partition-by-
-    partition progress via _redshift_job_status instead of blocking on one
-    request for however long a big, many-partition fetch takes."""
-    resp = requests.post(
-        f"{api_url.rstrip('/')}/query/jobs",
-        json={"sql": _redshift_table_sql(database, schema, table, where), "limit": limit},
-        headers={"X-API-Key": api_key},
-        timeout=30,
-        verify=_ca_bundle_path(),
-    )
-    if not resp.ok:
-        try:
-            detail = resp.json().get("detail")
-        except ValueError:
-            detail = None
-        raise requests.HTTPError(detail or f"{resp.status_code} {resp.reason}", response=resp)
-    return resp.json()["jobId"]
+    """Start _redshift_table_sql's query as a background job and return its
+    job id, for polling real partition-by-partition progress via
+    _redshift_job_status instead of blocking on one call for however long a
+    big, many-partition fetch takes. See scripts/warehouse_jobs.py for why
+    the job runs in its own process rather than a thread."""
+    return warehouse_jobs.start(_redshift_table_sql(database, schema, table, where), limit)
 
 
-def _redshift_job_status(api_url: str, api_key: str, job_id: str) -> dict:
-    """Poll one job started by _redshift_start_table_job - see redshift-api's
-    /query/jobs/{id} for the {status, partitionsDone, partitionsTotal, ...}
-    shape."""
-    resp = requests.get(
-        f"{api_url.rstrip('/')}/query/jobs/{job_id}",
-        headers={"X-API-Key": api_key},
-        timeout=30,
-        verify=_ca_bundle_path(),
-    )
-    if not resp.ok:
-        try:
-            detail = resp.json().get("detail")
-        except ValueError:
-            detail = None
-        raise requests.HTTPError(detail or f"{resp.status_code} {resp.reason}", response=resp)
-    return resp.json()
+def _redshift_job_status(job_id: str) -> dict:
+    """Poll one job started by _redshift_start_table_job - returns
+    {status, partitionsDone, partitionsTotal, ...}, plus columns/rows once
+    it's done."""
+    return warehouse_jobs.status(job_id)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _redshift_list_schemas(api_url: str, api_key: str, database: str = "MAESTRO_SRC") -> list[str]:
+def _redshift_list_schemas(database: str = "MAESTRO_SRC") -> list[str]:
     """List every schema in `database` via INFORMATION_SCHEMA.SCHEMATA - the
-    dropdown source for "Other table"'s schema picker (unlike /borrowers,
-    which only lists schemas that happen to own a LOANS table). INFORMATION_
-    SCHEMA itself is excluded since it's metadata, not a data schema a user
-    would ever want to pick."""
+    dropdown source for "Other table"'s schema picker (unlike
+    _redshift_list_borrowers, which only lists schemas that own a LOANS
+    table). INFORMATION_SCHEMA itself is excluded since it's metadata, not
+    a data schema a user would ever want to pick."""
     payload = _redshift_query(
-        api_url,
-        api_key,
         f"SELECT schema_name FROM {database}.INFORMATION_SCHEMA.SCHEMATA ORDER BY schema_name",
         500,
     )
@@ -257,16 +215,12 @@ def _redshift_list_schemas(api_url: str, api_key: str, database: str = "MAESTRO_
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _redshift_list_tables(
-    api_url: str, api_key: str, schema: str, database: str = "MAESTRO_SRC"
-) -> list[str]:
+def _redshift_list_tables(schema: str, database: str = "MAESTRO_SRC") -> list[str]:
     """List every table in `database.schema` via INFORMATION_SCHEMA.TABLES -
     the dropdown source for "Other table"'s table picker, once a schema is
     chosen. `schema` is validated as a plain identifier by the caller before
     reaching here (see redshift_tables in web_api/main.py)."""
     payload = _redshift_query(
-        api_url,
-        api_key,
         f"SELECT table_name FROM {database}.INFORMATION_SCHEMA.TABLES "
         f"WHERE table_schema = '{schema}' ORDER BY table_name",
         500,
@@ -275,9 +229,7 @@ def _redshift_list_tables(
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _redshift_list_columns(
-    api_url: str, api_key: str, schema: str, table: str, database: str = "MAESTRO_SRC"
-) -> list[str]:
+def _redshift_list_columns(schema: str, table: str, database: str = "MAESTRO_SRC") -> list[str]:
     """List every column in `database.schema.table` via INFORMATION_SCHEMA.
     COLUMNS - grounds the natural-language filter suggestion (_suggest_
     redshift_filter) in real column names instead of letting the model
@@ -286,8 +238,6 @@ def _redshift_list_columns(
     (confirmed live), so type info would just be noise, not a useful
     signal for what kind of comparison makes sense."""
     payload = _redshift_query(
-        api_url,
-        api_key,
         f"SELECT column_name FROM {database}.INFORMATION_SCHEMA.COLUMNS "
         f"WHERE table_schema = '{schema}' AND table_name = '{table}' ORDER BY ordinal_position",
         500,

@@ -242,14 +242,28 @@ function LendingSummaryTab() {
   const m = state.analysisResponse?.summaryMetrics;
   if (!m) return <Alert tone="info">Run analysis to see the portfolio summary.</Alert>;
   const chart = state.analysisResponse?.summaryChart ?? [];
+  const fxWarning = state.analysisResponse?.fxWarning;
+  // The LTV Calculator can use a cohort-limited interest rate (General
+  // Inputs); say so here, since this card always shows the whole book.
+  // With a General Inputs LTV cohort range, this card shows the same
+  // cohort-limited rate the LTV Calculator uses; otherwise the whole book.
+  const ltvInterest = state.analysisResponse?.ltvInterest;
+  const range = state.analysisResponse?.ltvInterestRange;
+  const ranged = ltvInterest != null && !!range && !!(range.from || range.to);
+  const rangeText = ranged ? `${range!.from || 'first'} to ${range!.to || 'latest'}` : '';
+  const productInterest = ranged ? ltvInterest : m.productInterestRate;
+  const productInterestHint = ranged
+    ? `Expected Interest as a share of Principal, for cohorts ${rangeText} only (set in General Inputs) - the same rate the LTV Calculator uses. Across the whole book it is ${fpct(m.productInterestRate)}. Not annualized.`
+    : 'Expected Interest as a share of Principal, across all loans (not annualized).';
   return (
     <>
+      {fxWarning ? <Alert tone="warning">{fxWarning}</Alert> : null}
       <div className="sd-grid sd-grid--metrics">
-        <Metric label="Data up to" value={String(m.dataUpTo ?? '—')} />
-        <Metric label="Outstanding GBV" value={fmoney(m.outstandingGbv, '')} />
-        <Metric label="Loss Rate" value={fpct(m.lossRate)} />
-        <Metric label="95th %ile Loss Rate" value={fpct(m.pctile95LossRate)} />
-        <Metric label="Product Interest Rate" value={fpct(m.productInterestRate)} />
+        <Metric label="Data up to" value={String(m.dataUpTo ?? '—')} hint="The most recent loan disbursement date in the tape (as-of point for the snapshot)." />
+        <Metric label="Outstanding GBV" value={fmoney(m.outstandingGbv, '')} hint="Gross book value of loans still within term (not yet matured): Principal + Interest + Fee minus Total Paid for loans where Reached T+3? is False." />
+        <Metric label="Loss Rate" value={fpct(m.lossRate)} hint="Portfolio average loss rate across matured cohorts (Reached T+3? = True)." />
+        <Metric label="95th %ile Loss Rate" value={fpct(m.pctile95LossRate)} hint="The loss-rate level that only 5% of matured cohorts exceed." />
+        <Metric label={ranged ? `Product Interest Rate (${rangeText})` : 'Product Interest Rate'} value={fpct(productInterest)} hint={productInterestHint} />
       </div>
       <div className="sd-grid sd-grid--2">
         <div>
@@ -286,32 +300,34 @@ function RentalSummaryTab() {
   const { state } = useAppStore();
   const m = state.rentalResponse?.summaryMetrics;
   if (!m) return <Alert tone="info">Run analysis to see the portfolio summary.</Alert>;
+  const fxWarning = state.rentalResponse?.fxWarning;
   return (
     <>
+      {fxWarning ? <Alert tone="warning">{fxWarning}</Alert> : null}
       <div className="sd-grid sd-grid--metrics">
-        <Metric label="Contracts" value={fint(m.contracts)} />
-        <Metric label="MRR" value={fmoney(m.mrr, '')} />
-        <Metric label="Avg MRR per Active Contract" value={fmoney(m.avgMrrPerActiveContract, '')} />
-        <Metric label="Average Useful Life (m)" value={fdec(m.avgUsefulLifeM)} />
+        <Metric label="Contracts" value={fint(m.contracts)} hint="Number of unique assets in the portfolio." />
+        <Metric label="MRR" value={fmoney(m.mrr, '')} hint="Monthly recurring revenue from active contracts." />
+        <Metric label="Avg MRR per Active Contract" value={fmoney(m.avgMrrPerActiveContract, '')} hint="Total MRR divided by the number of open (active) contracts." />
+        <Metric label="Average Useful Life (m)" value={fdec(m.avgUsefulLifeM)} hint="Principal-weighted average useful asset life, in months." />
       </div>
       <div className="sd-grid sd-grid--metrics">
-        <Metric label="95th %ile Churn" value={fpct(m.pctile95Churn)} />
-        <Metric label="Stressed Churn" value={fpct(m.stressedChurn)} />
-        <Metric label="Contracts Churned" value={fpct(m.contractsChurned)} />
-        <Metric label="Defaulted contracts > 3mo" value={na(m.defaultedGt3m) ?? fdec(m.defaultedGt3m, 0)} />
-        <Metric label="% recovered" value={fpct(m.pctRecovered)} />
+        <Metric label="95th %ile Churn" value={fpct(m.pctile95Churn)} hint="The churn level that only 5% of cohorts exceed." />
+        <Metric label="Stressed Churn" value={fpct(m.stressedChurn)} hint="Churn under the stress assumptions (e.g. adverse FX/credit scenario)." />
+        <Metric label="Contracts Churned" value={fpct(m.contractsChurned)} hint="Share of contracts that have churned (closed) relative to all contracts." />
+        <Metric label="Defaulted contracts > 3mo" value={na(m.defaultedGt3m) ?? fdec(m.defaultedGt3m, 0)} hint="Number of contracts in default for more than 3 months." />
+        <Metric label="% recovered" value={fpct(m.pctRecovered)} hint="Share of defaulted value that has been recovered." />
       </div>
       <div className="sd-grid sd-grid--metrics">
-        <Metric label="Loss (non-recoverability)" value={fpct(m.lossNonRecoverability)} />
-        <Metric label="MRR / average cost" value={fpct(m.mrrOverAvgCost)} />
-        <Metric label="Average Collection Rate" value={fpct(m.avgCollectionRate)} />
+        <Metric label="Loss (non-recoverability)" value={fpct(m.lossNonRecoverability)} hint="Expected loss from defaulted value that is not recoverable." />
+        <Metric label="MRR / average cost" value={fpct(m.mrrOverAvgCost)} hint="Monthly recurring revenue relative to average asset cost." />
+        <Metric label="Average Collection Rate" value={fpct(m.avgCollectionRate)} hint="Share of expected payments actually collected." />
       </div>
       <h2 className="sd-h2">LTV &amp; UE highlights</h2>
       <div className="sd-grid sd-grid--metrics">
-        <Metric label="Asset LTV (max 95%)" value={na(m.assetLtv) ?? fpct(m.assetLtv, 1)} />
-        <Metric label="Net UE margin" value={fpct(m.netUeMargin)} />
-        <Metric label="Asset DSLP30" value={fpct(m.assetDslp30)} />
-        <Metric label="Receivables Coverage (180d)" value={fpct(m.receivablesCoverage180d)} />
+        <Metric label="Asset LTV (max 95%)" value={na(m.assetLtv) ?? fpct(m.assetLtv, 1)} hint="Loan-to-value against asset value, capped at 95%." />
+        <Metric label="Net UE margin" value={fpct(m.netUeMargin)} hint="Net unit-economics margin after costs." />
+        <Metric label="Asset DSLP30" value={fpct(m.assetDslp30)} hint="Asset-level days-sales-late over the last 30 days exposure." />
+        <Metric label="Receivables Coverage (180d)" value={fpct(m.receivablesCoverage180d)} hint="Coverage of expected receivables over a 180-day horizon." />
       </div>
       <h2 className="sd-h2">Portfolio Snapshot</h2>
       <SnapshotTable
@@ -864,9 +880,9 @@ function LendingCohortsTab() {
         />
       </div>
       <div className="sd-grid sd-grid--metrics">
-        <Metric label="Total Cohorts available" value={String(master.length)} />
-        <Metric label="Cohorts shown" value={String(cohortView.length)} />
-        <Metric label="Cohorts selected for analysis" value={String(selected.size)} />
+        <Metric label="Total Cohorts available" value={String(master.length)} hint="Number of monthly cohorts after the maturity filter (Reached T+3? = True when 'Matured loans only' is on)." />
+        <Metric label="Cohorts shown" value={String(cohortView.length)} hint="Cohorts that also meet the 'Minimum loans per cohort' threshold." />
+        <Metric label="Cohorts selected for analysis" value={String(selected.size)} hint="How many of the shown cohorts are checked for the next analysis run." />
       </div>
       <div className="sd-actions" style={{ gap: 8, marginBottom: 12 }}>
         <Button variant="secondary" onClick={selectAll} disabled={applying}>
@@ -1016,21 +1032,21 @@ function RentalUnitEconomicsTab() {
   return (
     <>
       {metricRow([
-        ['Downpayment %', fpct(ue['downpayment_pct'], 1)],
-        ['Lease Tenor (m)', fdec(ue['lease_tenor_m'])],
-        ['Margin', fpct(ue['margin'], 1)],
-        ['Utilisation Rate', fpct(ue['utilisation_rate'], 1)],
+        ['Downpayment %', fpct(ue['downpayment_pct'], 1), 'Share of asset cost paid upfront by the customer.'],
+        ['Lease Tenor (m)', fdec(ue['lease_tenor_m']), 'Average lease term, in months.'],
+        ['Margin', fpct(ue['margin'], 1), 'Unit-economics margin on the lease.'],
+        ['Utilisation Rate', fpct(ue['utilisation_rate'], 1), 'Share of asset value that is being put to use.'],
       ])}
       {metricRow([
-        ['PvD', fpct(ue['pvd'], 1)],
-        ['Historical % Collected on Principal', fpct(ue['historical_pct_collected_on_principal'], 1)],
-        ['Monthly Observed Repayment', fpct(ue['monthly_observed_repayment'], 2)],
+        ['PvD', fpct(ue['pvd'], 1), 'Paid-vs-Due ratio (payments received relative to amounts due).'],
+        ['Historical % Collected on Principal', fpct(ue['historical_pct_collected_on_principal'], 1), 'Share of principal that has historically been collected.'],
+        ['Monthly Observed Repayment', fpct(ue['monthly_observed_repayment'], 2), 'Observed monthly repayment rate on the portfolio.'],
       ])}
       {metricRow([
-        ['Funding Cost (% p.a.)', fpct(ue['funding_cost_pct'], 2)],
-        ['Direct Cost (% p.a.)', fpct(ue['direct_cost_pct'], 2)],
-        ['Cost of Funding over Life', fpct(ue['cost_of_funding_over_life_pct'], 2)],
-        ['Net UE Margin', fpct(ue['net_margin'], 1)],
+        ['Funding Cost (% p.a.)', fpct(ue['funding_cost_pct'], 2), 'Annualized cost of funding the portfolio.'],
+        ['Direct Cost (% p.a.)', fpct(ue['direct_cost_pct'], 2), 'Annualized direct operating cost as a share of value.'],
+        ['Cost of Funding over Life', fpct(ue['cost_of_funding_over_life_pct'], 2), 'Total funding cost accumulated over the asset life.'],
+        ['Net UE Margin', fpct(ue['net_margin'], 1), 'Net unit-economics margin after funding and direct costs.'],
       ])}
 
       {curveRows.length > 0 && (
@@ -1103,16 +1119,16 @@ function LendingUeOverviewTab() {
 
   const rows: Array<Array<[string, string, string?]>> = [
     [
-      ['Average Expected Term (days)', fterm(ue['Average Expected Term'])],
-      ['Average Loss', fpct(ue['Average Loss'], 1)],
-      ['Loss Rate Proxy (1-PvD)', fpct(ue['Loss Rate Proxy (1-PvD)'], 1)],
+      ['Average Expected Term (days)', fterm(ue['Average Expected Term']), 'Principal-weighted average loan term, in days.'],
+      ['Average Loss', fpct(ue['Average Loss'], 1), 'Average loss rate across matured cohorts (Reached T+3? = True).'],
+      ['Loss Rate Proxy (1-PvD)', fpct(ue['Loss Rate Proxy (1-PvD)'], 1), '1 minus the Paid-vs-Due ratio - a paid-based proxy for the loss rate.'],
     ],
     [
-      ['Average Principal Amount', fprincipal(ue['Average Principal Amount'])],
-      ['Average Fee %', fpct(ue['Average Fee %'], 1)],
-      ['Average Interest %', fpct(ue['Average Interest %'], 1)],
+      ['Average Principal Amount', fprincipal(ue['Average Principal Amount']), 'Average principal loaned per loan record.'],
+      ['Average Fee %', fpct(ue['Average Fee %'], 1), 'Expected fees as a share of total principal.'],
+      ['Average Interest %', fpct(ue['Average Interest %'], 1), 'Expected interest as a share of total principal (the uniform product rate).'],
     ],
-    [['Sense-check Margin', fpct(ue['Sense-check Margin'], 1)]],
+    [['Sense-check Margin', fpct(ue['Sense-check Margin'], 1), 'Fee + interest margin used as a sanity check on the product economics.']],
   ];
 
   return (
@@ -1672,7 +1688,13 @@ function AiTab() {
   );
 }
 
-export function AnalysisSession({ onNewSession }: { onNewSession: () => void }) {
+export function AnalysisSession({
+  onNewSession,
+  onEditMapping,
+}: {
+  onNewSession: () => void;
+  onEditMapping: () => void;
+}) {
   const { state, exportWorkbook, saveSession, createShareLink } = useAppStore();
   const isRental = state.modelKey === 'rental';
   const [exporting, setExporting] = useState(false);
@@ -1736,6 +1758,9 @@ export function AnalysisSession({ onNewSession }: { onNewSession: () => void }) 
       {tab === 'ai' && <AiTab />}
 
       <div className="sd-actions" style={{ marginTop: 24, flexWrap: 'wrap' }}>
+        <Button variant="ghost" onClick={onEditMapping}>
+          ← Edit column mapping
+        </Button>
         <Button variant="ghost" onClick={onNewSession}>
           + New analysis
         </Button>

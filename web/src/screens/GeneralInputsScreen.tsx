@@ -1,5 +1,6 @@
 import { useAppStore } from '../state/AppStore';
 import { Button, Input, Select, Card, Alert } from '../components/ui';
+import { CURRENCY_CODES, CURRENCY_NAMES } from '../data/currencies';
 import type { ModelKey } from '../state/types';
 
 interface Props {
@@ -13,8 +14,8 @@ export function GeneralInputsScreen({ onNext, modelKey }: Props) {
   const isRental = modelKey === 'rental';
 
   const run = async () => {
-    await analyse();
-    onNext();
+    // Stay here on failure - the error Alert below shows why.
+    if (await analyse()) onNext();
   };
 
   return (
@@ -32,10 +33,11 @@ export function GeneralInputsScreen({ onNext, modelKey }: Props) {
           value={gi.currency}
           onChange={(e) => dispatch({ type: 'setGeneralInputs', inputs: { currency: e.target.value } })}
         >
-          <option value="USD">USD</option>
-          <option value="EUR">EUR</option>
-          <option value="GBP">GBP</option>
-          <option value="KES">KES</option>
+          {CURRENCY_CODES.map((code) => (
+            <option key={code} value={code}>
+              {code} — {CURRENCY_NAMES[code]}
+            </option>
+          ))}
         </Select>
       </div>
 
@@ -96,6 +98,22 @@ export function GeneralInputsScreen({ onNext, modelKey }: Props) {
                 onChange={(e) =>
                   dispatch({ type: 'setGeneralInputs', inputs: { minLoansPerCohort: Number(e.target.value) } })
                 }
+              />
+            </div>
+            <div className="sd-field">
+              <span>LTV interest: cohort from (optional)</span>
+              <Input
+                type="month"
+                value={gi.ltvCohortFrom ?? ''}
+                onChange={(e) => dispatch({ type: 'setGeneralInputs', inputs: { ltvCohortFrom: e.target.value } })}
+              />
+            </div>
+            <div className="sd-field">
+              <span>LTV interest: cohort to (optional)</span>
+              <Input
+                type="month"
+                value={gi.ltvCohortTo ?? ''}
+                onChange={(e) => dispatch({ type: 'setGeneralInputs', inputs: { ltvCohortTo: e.target.value } })}
               />
             </div>
           </>

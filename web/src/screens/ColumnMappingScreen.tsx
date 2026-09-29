@@ -14,6 +14,31 @@ function norm(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// Worked examples for the derive-column box. Deliberately phrased as plain
+// English rather than formulas: the point of the feature is that you describe
+// what you want. Each was checked end to end - AI draft through to computed
+// values - not just eyeballed.
+//
+// Chosen to span what derive_columns.py actually supports: plain arithmetic,
+// a row-wise condition (IF), an aggregate (SUM over the whole column), a
+// conditional aggregate (SUMIFS), and a function the grammar has to provide
+// because it cannot be faked (MAX - the model used to approximate it with an
+// algebraic identity that was silently wrong whenever the second argument
+// was larger).
+//
+// The last two cover dates (EDATE, which adds MONTHS rather than pretending a
+// month is 30 days) and IFERROR, the companion to division by zero yielding a
+// blank rather than failing the column.
+const DERIVE_EXAMPLES = [
+  'expected fee is fees accrued plus penalties accrued',
+  'flag loans over 90 days past due as 1, otherwise 0',
+  'each loan’s share of total principal issued',
+  'total principal of loans more than 90 dpd',
+  'the larger of fees accrued and penalties accrued',
+  'expected completion date is origination date plus the original term in months',
+  'recovery rate, but show zero when nothing was written off',
+];
+
 /** Suggest a source column for a template field from the real file's columns
  * by normalised name matching (e.g. map "Expected Interest" to "expected
  * interest" or "EXP Interest"). Returns the best match or undefined. */
@@ -109,8 +134,15 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
       if (r.name && r.formula) {
         setAiDerive({ name: r.name, formula: r.formula });
         setDeriveNote('AI drafted a formula — review it (or edit below), then “Add column”.');
-      } else {
+      } else if (r.configured === false) {
         setDeriveNote('AI isn’t configured on the server — type the formula manually below.');
+      } else {
+        // A key is present, so this is the model declining, not a missing
+        // key. Saying "not configured" here sent people to check server
+        // config when the real fix was to name the columns explicitly.
+        setDeriveNote(
+          'AI couldn’t turn that into a formula — try naming the exact columns, e.g. “Expected Fee = FEES_ACCRUED + PENALTIES_ACCRUED”, or type it manually below.',
+        );
       }
     } catch (err) {
       setDeriveNote(err instanceof Error ? `Couldn’t ask AI: ${err.message}` : 'Couldn’t ask AI.');
@@ -235,6 +267,43 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
           </Button>
         </div>
 
+        <div className="sd-derive__examples" style={{ marginTop: 12 }}>
+          <span className="sd-muted">
+            Plain English is fine — you don’t need to write a formula. Click an example to try it:
+          </span>
+          <ul style={{ margin: '6px 0 0', paddingLeft: 20 }}>
+            {DERIVE_EXAMPLES.map((ex) => (
+              <li key={ex} style={{ marginBottom: 2 }}>
+                <button
+                  type="button"
+                  onClick={() => setDeriveRequest(ex)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    padding: 0,
+                    font: 'inherit',
+                    color: 'inherit',
+                    textAlign: 'left',
+                    textDecoration: 'underline',
+                    textDecorationStyle: 'dotted',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {ex}
+                </button>
+              </li>
+            ))}
+          </ul>
+          <span className="sd-muted" style={{ display: 'block', marginTop: 8 }}>
+            Name the columns as they appear in your file and it will do better. Understands
+            arithmetic, comparisons, and spreadsheet functions — IF, IFERROR, MIN, MAX, ABS,
+            ROUND per loan; SUM, COUNT, AVERAGE, SUMIF(S), COUNTIF(S), AVERAGEIF(S) across the
+            whole column; and EDATE, EOMONTH, YEAR, MONTH, DAY, DATEDIF, TODAY for dates. An
+            aggregate gives one number repeated on every row, as filling a formula down a
+            spreadsheet would. Subtracting two dates gives a span in days.
+          </span>
+        </div>
+
         {aiDerive ? (
           <div className="sd-derive__result" style={{ marginTop: 12 }}>
             <div className="sd-field">
@@ -252,9 +321,6 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
                 value={aiDerive.formula}
                 onChange={(e) => setAiDerive({ ...aiDerive, formula: e.target.value })}
               />
-            </div>
-            <div className="sd-field">
-              <span className="sd-muted">Available columns: {columns.join(', ') || '—'}</span>
             </div>
             <div className="sd-actions" style={{ marginTop: 8 }}>
               <Button onClick={addDerived}>Add column</Button>

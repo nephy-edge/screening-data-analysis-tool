@@ -124,7 +124,15 @@ def process_data_input(df, gi):
     df["reached_t"] = (
         df["expected_end_date"] + pd.to_timedelta(gi["days_after_term"], unit="D")
     ) <= extraction_date
-    df["original_asset_reached_term"] = df.groupby("asset_id")["reached_t"].transform("any")
+    # .transform("any") drops rows whose asset_id is blank (pandas omits NaN
+    # group keys), leaving original_asset_reached_term NaN on exactly those rows;
+    # a row with no identifiable asset can't claim its asset reached term, so
+    # coerce those to False. Without this, downstream boolean masks on the column
+    # (ue_analysis.pct_collected_historical) raise "Cannot mask with non-boolean
+    # array containing NA" on any tape with blank asset_ids (seen on real files).
+    df["original_asset_reached_term"] = (
+        df.groupby("asset_id")["reached_t"].transform("any").fillna(False)
+    )
 
     df["defaulted_gt_nmo"] = np.where(
         df["closed_date"].notna(),
@@ -148,8 +156,10 @@ def process_data_input(df, gi):
     # tied rows share the same start_date by construction, so "first" is a
     # correct representative, not an arbitrary pick.
     next_rank_start = df.groupby(["asset_id", "rank_by_asset"])["start_date"].first()
-    lookup_key = list(zip(df["asset_id"], df["rank_by_asset"] + 1))
-    next_start = pd.Series([next_rank_start.get(k, pd.NaT) for k in lookup_key], index=df.index)
+    # One vectorised lookup of each contract's next-ranked start on the same
+    # asset (a per-row .get loop was ~93% of this function on large tapes).
+    next_key = pd.MultiIndex.from_arrays([df["asset_id"], df["rank_by_asset"] + 1])
+    next_start = pd.Series(next_rank_start.reindex(next_key).to_numpy(), index=df.index)
     is_closed = df["status_mapping"] == gi["closed_label"]
     df["days_to_recovery"] = np.nan
     not_redeployed_end = is_closed & ~df["redeployed"]

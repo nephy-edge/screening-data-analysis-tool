@@ -120,7 +120,9 @@ function Shell() {
         )}
         {step === 'mapping' && <ColumnMappingScreen onNext={advance} modelKey={state.modelKey} />}
         {step === 'inputs' && <GeneralInputsScreen onNext={advance} modelKey={state.modelKey} />}
-        {step === 'analysis' && <AnalysisSession onNewSession={newSession} />}
+        {step === 'analysis' && (
+          <AnalysisSession onNewSession={newSession} onEditMapping={() => setStep('mapping')} />
+        )}
         {step === 'jsonUpload' && <JsonUploadScreen onBack={() => setStep('input')} />}
       </div>
     </div>

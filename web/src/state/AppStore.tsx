@@ -46,6 +46,17 @@ export interface ChartCardSpec {
   colorCol: string | null;
 }
 
+/** Lending LTV Calculator dropdowns - kept in the store (not the tab's own
+ * useState) so switching tabs, which unmounts the tab, doesn't reset them. */
+export interface LtvCalcInputs {
+  dataSource: string;
+  country: string;
+  macroFx: string;
+  segmentation: string;
+  hedgeRate: string;
+  rolledHedge: string;
+}
+
 export interface AppState {
   modelKey: ModelKey;
   auth: { user: string | null; gdrive: boolean };
@@ -90,6 +101,7 @@ export interface AppState {
    * restrict the analysis to. null means every cohort (the default,
    * matching today's behaviour before this existed). */
   selectedCohorts: string[] | null;
+  ltvInputs: LtvCalcInputs;
 }
 
 type Action =
@@ -120,7 +132,8 @@ type Action =
   | { type: 'shareDone'; url: string }
   | { type: 'shareFail'; error: string }
   | { type: 'setDedupe'; value: boolean }
-  | { type: 'setSelectedCohorts'; cohorts: string[] | null };
+  | { type: 'setSelectedCohorts'; cohorts: string[] | null }
+  | { type: 'setLtvInputs'; inputs: Partial<LtvCalcInputs> };
 
 const today = new Date().toISOString().slice(0, 10);
 
@@ -137,6 +150,8 @@ const initialState: AppState = {
     daysAfterTerm: 90,
     minLoansPerCohort: 10,
     currency: 'USD',
+    ltvCohortFrom: '',
+    ltvCohortTo: '',
   },
   analysis: { rows: 0, cohorts: 0, lossRate: 0, ltv: 0, status: 'idle' },
   analysisResponse: null,
@@ -157,6 +172,14 @@ const initialState: AppState = {
   shareUrl: null,
   dedupeActive: false,
   selectedCohorts: null,
+  ltvInputs: {
+    dataSource: 'Observed',
+    country: 'Ghana',
+    macroFx: 'Green',
+    segmentation: 'Asset Lending',
+    hedgeRate: '0',
+    rolledHedge: 'Roll',
+  },
 };
 
 function reducer(state: AppState, action: Action): AppState {
@@ -164,7 +187,9 @@ function reducer(state: AppState, action: Action): AppState {
     case 'signIn':
       return { ...state, auth: { user: action.name, gdrive: action.gdrive ?? false } };
     case 'signOut':
-      return { ...state, auth: { user: null, gdrive: false } };
+      // Everything, not just auth: the next person to sign in on this tab
+      // must not inherit the previous user's file, results or chat.
+      return initialState;
     case 'setFile':
       // A genuinely new upload gets its own session id (for save/resume) and
       // clears any previous deal's label/mappings/save state; restoreProfile
@@ -183,6 +208,17 @@ function reducer(state: AppState, action: Action): AppState {
         shareError: null,
         dedupeActive: false,
         selectedCohorts: null,
+        // A new file (or sheet) is a different dataset: the previous run's
+        // results, chat and charts describe something else. The AI context
+        // notes/docs stay - they're typed on the same screen as the upload.
+        analysis: initialState.analysis,
+        analysisResponse: null,
+        rentalResponse: null,
+        analysisError: null,
+        chatHistory: [],
+        chatError: null,
+        customCharts: [],
+        ltvInputs: initialState.ltvInputs,
       };
     case 'setAnalysisContext':
       return { ...state, analysisContext: action.value };
@@ -248,6 +284,7 @@ function reducer(state: AppState, action: Action): AppState {
         shareError: null,
         dedupeActive: false,
         selectedCohorts: null,
+        ltvInputs: initialState.ltvInputs,
       };
     }
     case 'saveStart':
@@ -266,6 +303,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, dedupeActive: action.value };
     case 'setSelectedCohorts':
       return { ...state, selectedCohorts: action.cohorts };
+    case 'setLtvInputs':
+      return { ...state, ltvInputs: { ...state.ltvInputs, ...action.inputs } };
     case 'setMapping':
       return {
         ...state,
@@ -364,7 +403,8 @@ function reducer(state: AppState, action: Action): AppState {
 interface AppStoreValue {
   state: AppState;
   dispatch: React.Dispatch<Action>;
-  analyse: (dedupeById?: boolean, selectedCohortsOverride?: string[] | null) => Promise<void>;
+  /** Resolves true when the run succeeded (failures land in analysisError). */
+  analyse: (dedupeById?: boolean, selectedCohortsOverride?: string[] | null) => Promise<boolean>;
   exportWorkbook: () => Promise<void>;
   askAiQuestion: (question: string) => Promise<void>;
   saveSession: (label: string) => Promise<void>;
@@ -447,6 +487,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         fxDevalPct: null,
         fxDiscount50pct: true,
         debtService180d: null,
+        currency: gi.currency,
       };
     };
 
@@ -457,6 +498,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       extractionDate: state.generalInputs.extractionDate,
       daysAfterTerm: state.generalInputs.daysAfterTerm,
       minLoansPerCohort: state.generalInputs.minLoansPerCohort,
+      currency: state.generalInputs.currency,
+      ltvCohortFrom: state.generalInputs.ltvCohortFrom || null,
+      ltvCohortTo: state.generalInputs.ltvCohortTo || null,
     });
 
     // Model-aware version of the two builders above, so callers that don't
@@ -478,7 +522,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const ingest = buildIngest();
       if (!ingest) {
         dispatch({ type: 'analysisFail', error: 'No file loaded — go back and upload one.' });
-        return;
+        return false;
       }
       const selectedCohorts =
         selectedCohortsOverride !== undefined ? selectedCohortsOverride : state.selectedCohorts;
@@ -502,11 +546,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
           });
           dispatch({ type: 'analysisDone', payload });
         }
+        return true;
       } catch (err) {
         dispatch({
           type: 'analysisFail',
           error: friendlyError(err instanceof Error ? err.message : 'Engine request failed'),
         });
+        return false;
       }
     };
 
@@ -574,8 +620,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const { answer } = await askAi(state.modelKey, {
           ingest,
-          generalInputs:
-            buildGeneralInputs(),
+          generalInputs: buildGeneralInputs(),
+          dedupeById: state.dedupeActive,
+          selectedCohorts:
+            state.modelKey === 'lending' ? (state.selectedCohorts ?? undefined) : undefined,
           question,
           history,
           userContext: state.analysisContext,

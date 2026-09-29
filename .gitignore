@@ -55,8 +55,15 @@ data/shares/
 *.xlsx
 *.xls
 *.csv
+*.parquet
 scripts/*.txt
 scripts/*.xml
+
+# Warehouse exports (snowflake_lending/export_panel.py) — multi-GB Parquet
+# dumps of real borrower loan tapes straight from Snowflake. Caught these
+# only because data/ as a whole was never ignored, unlike data/profiles/
+# and data/shares/ above.
+data/*.parquet
 
 # Scratch scripts/dumps used during development — mixes throwaway tooling
 # with raw client workbook dumps (sheet contents, real file paths); never

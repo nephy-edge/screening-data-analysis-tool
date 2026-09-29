@@ -17,6 +17,9 @@ export interface GeneralInputs {
   daysAfterTerm: number;
   minLoansPerCohort: number;
   currency: string;
+  /** "YYYY-MM" or '' - limits the LTV Calculator's interest input to these cohorts (lending only). */
+  ltvCohortFrom?: string;
+  ltvCohortTo?: string;
 }
 
 export interface AnalysisResult {

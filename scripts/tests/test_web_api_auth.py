@@ -216,3 +216,111 @@ def test_oversized_uploads_are_refused(client, monkeypatch):
     )
     assert r.status_code == 413
     assert "too large" in r.json()["detail"].lower()
+
+
+def test_spa_fallback_cannot_escape_dist(client, monkeypatch, tmp_path):
+    """ "\\" is a path separator on Windows, so ..%5C must not reach files
+    outside the built dist folder (the route needs no session)."""
+    if not hasattr(m, "spa_fallback"):
+        pytest.skip("web/dist not built, SPA route not registered")
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html>index</html>")
+    (dist / "favicon.svg").write_text("<svg/>")
+    (tmp_path / "secret.txt").write_text("TOP-SECRET")
+    monkeypatch.setattr(m, "_WEB_DIST_DIR", str(dist))
+    for path in ("/..%5Csecret.txt", "/..%2Fsecret.txt", "/assets%5C..%5C..%5Csecret.txt"):
+        assert "TOP-SECRET" not in client.get(path).text
+    assert client.get("/favicon.svg").text == "<svg/>"
+
+
+@pytest.mark.parametrize("cashflows", [[-100] + [1] * 10, [-100] + [-5] * 10])
+def test_irr_heavy_loss_returns_none_not_crash(cashflows):
+    """A badly performing book overflowed the Newton step and 500'd the export."""
+    assert m._irr(cashflows) is None
+
+
+def test_irr_still_solves_a_normal_book():
+    assert m._irr([-100, 110]) == pytest.approx(0.1)
+
+
+def test_rental_blank_extraction_date_falls_back_to_latest_start():
+    """The web API passes extraction_date=None when the field is blank."""
+    from rental_analysis.general_inputs import GeneralInputs
+
+    df = pd.DataFrame({"start_date": pd.to_datetime(["2025-01-01", "2025-06-30"])})
+    assert GeneralInputs(df, extraction_date=None).extraction_date == pd.Timestamp("2025-06-30")
+
+
+def test_loading_a_share_requires_a_session(client, monkeypatch):
+    """Each share load registers an ingest; anonymous loads could otherwise
+    evict every signed-in user's working upload."""
+    monkeypatch.setattr(m.s3_store, "load_share", lambda token: pytest.fail("reached storage"))
+    assert client.get("/api/share/sometoken").status_code == 401
+
+
+def test_size_cap_covers_every_byte_source(monkeypatch):
+    """Drive/link imports go through _register_ingest, not /api/ingest, so
+    the cap has to live there."""
+    monkeypatch.setattr(m, "_MAX_UPLOAD_BYTES", 100)
+    with pytest.raises(m.HTTPException) as exc:
+        m._register_ingest(b"x" * 500, "google_file.csv")
+    assert exc.value.status_code == 413
+
+
+def test_restoring_a_saved_run_skips_the_size_cap(monkeypatch):
+    """A saved warehouse/merge frame is serialized to CSV at save time and
+    can be far past the cap it never had to pass; restoring it must work."""
+    monkeypatch.setattr(m, "_MAX_UPLOAD_BYTES", 10)
+    payload = m._restore_payload(
+        {"upload_bytes": b"a,b\n1,2\n3,4\n", "upload_name": "saved.csv", "mapping": {}}
+    )
+    assert payload["rowCount"] == 2
+
+
+def test_oauth_states_are_capped_and_expire(client, monkeypatch):
+    monkeypatch.setattr(m, "_get_google_client_id", lambda: "id")
+    monkeypatch.setattr(m, "_get_google_client_secret", lambda: "secret")
+    monkeypatch.setattr(m, "_OAUTH_STATE_MAX", 3)
+    m._PENDING_GOOGLE_OAUTH_STATES.clear()
+    for _ in range(10):
+        assert client.get("/api/auth/google/login-url").status_code == 200
+    assert len(m._PENDING_GOOGLE_OAUTH_STATES) == 3
+
+    m._PENDING_GOOGLE_OAUTH_STATES["stale"] = 0.0  # issued at the epoch
+    r = client.post("/api/auth/google/callback", json={"code": "c", "state": "stale"})
+    assert r.status_code == 400
+    assert "stale" not in m._PENDING_GOOGLE_OAUTH_STATES
+
+
+def test_engine_result_is_reused_until_settings_or_upload_change():
+    """analyse -> chat -> export on one upload should run the engine once."""
+    ingest_id = m._register_ingest(None, "tape.csv", df=pd.DataFrame({"a": [1, 2]}))["ingestId"]
+    runs = []
+
+    def run():
+        runs.append(1)
+        return (None, None, {"n": len(runs)})
+
+    def body(**gi):
+        return m.LendingChatBody(
+            ingest={"ingestId": ingest_id, "mapping": {"Loan ID": "a"}},
+            generalInputs=gi,
+            question="ignored by the key",
+        )
+
+    first = m._cached_pipeline("lending", body(), run)
+    # Different question/history (chat-only fields) -> same result, no rerun.
+    again = m._cached_pipeline("lending", body().model_copy(update={"question": "other"}), run)
+    assert again is first and len(runs) == 1
+
+    m._cached_pipeline("lending", body(daysAfterTerm=30), run)  # settings changed
+    assert len(runs) == 2
+
+    # Same id re-registered (the sheet picker does this) -> never serve the old sheet.
+    m._register_ingest(None, "tape.csv", df=pd.DataFrame({"a": [3]}), ingest_id=ingest_id)
+    m._cached_pipeline("lending", body(daysAfterTerm=30), run)
+    assert len(runs) == 3
+
+    m._drop_ingest(ingest_id)
+    assert ingest_id not in m._ENGINE_CACHE

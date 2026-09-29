@@ -18,10 +18,12 @@ from __future__ import annotations
 import io
 import itertools
 import json
+import math
 import os
 import re
 import secrets
 import sys
+import threading
 import time
 import uuid
 from typing import Any, Literal
@@ -32,13 +34,21 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "rental_and_subscription"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# ...and this package's own directory, so modules here are importable by the
+# bare name the engine code uses. scripts/ai_client.py's
+# _suggest_derived_column does `from derive_columns import ...` to validate a
+# drafted formula against the file's real columns; derive_columns lives here,
+# not in scripts/, so without this every /api/ai/derive-column call died with
+# ModuleNotFoundError -> 500. The failure was invisible in tests because
+# nothing imports ai_client's derive path outside the running server.
+sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
 import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from config import UE_MODEL_COST_DEFAULTS
+from config import FX, UE_MODEL_COST_DEFAULTS
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -53,6 +63,7 @@ load_dotenv()
 # Lending engine (see app.py's `_coerce_dates(raw, DATE_FIELDS, dayfirst)`).
 from ai_client import (
     _ask_data_chatbot,
+    _get_deepinfra_api_key,
     _suggest_derived_column,
     _suggest_escalation_writeup,
     _suggest_mapping,
@@ -60,10 +71,13 @@ from ai_client import (
 )
 from chat_context import _build_rental_chat_context
 from data_normalize import _clean_numeric, _coerce_dates as _coerce_lending_dates
-from export_workbook import _build_lending_export_workbook, _build_rental_export_workbook
+from export_workbook import (
+    _add_chat_history_sheet,
+    _build_lending_export_workbook,
+    _build_rental_export_workbook,
+)
+import warehouse
 from integrations import (
-    _get_redshift_api_key,
-    _get_redshift_api_url,
     _redshift_job_status,
     _redshift_list_columns,
     _redshift_list_schemas,
@@ -124,7 +138,12 @@ GOOGLE_REACT_APP_SCOPE = (
 GOOGLE_REACT_APP_REDIRECT_URI = os.environ.get(
     "GOOGLE_REACT_REDIRECT_URI", "http://localhost:5173/auth/google/callback"
 )
-_PENDING_GOOGLE_OAUTH_STATES: set[str] = set()
+# state -> issue time. login-url is public, so entries expire and the dict is
+# capped (insertion-ordered: the oldest go first) instead of growing forever.
+_PENDING_GOOGLE_OAUTH_STATES: dict[str, float] = {}
+_OAUTH_STATE_TTL_SECONDS = 600
+_OAUTH_STATE_MAX = 1000
+_OAUTH_STATE_LOCK = threading.Lock()
 
 # Persistent "remember me" session cookie for the React app. On a successful
 # sign-in (Google or the dummy fallback) the server issues this HttpOnly,
@@ -481,8 +500,11 @@ app = FastAPI(
 _PUBLIC_API_PREFIXES = (
     "/api/health",
     "/api/auth/",  # login-url, callback, dummy, me, logout, config
-    "/api/share/",  # loading a share is by unguessable token, by design
 )
+# /api/share/{token} is deliberately NOT public: each load registers an
+# ingest, so anonymous loads could evict every signed-in user's working
+# upload (the registry is capped). The React Shell only resumes a share after
+# sign-in, and an anonymous viewer couldn't analyse it anyway.
 
 
 @app.middleware("http")
@@ -525,6 +547,16 @@ class GeneralInputsBody(BaseModel):
     extractionDate: str | None = None
     daysAfterTerm: int = 90
     minLoansPerCohort: int = 10
+    # Optional "YYYY-MM" cohort range for the LTV Calculator's interest input
+    # only (UeAnalysis.avg_interest_pct) - loss, cohorts and every other tab
+    # still use the whole book. Blank = no limit on that end.
+    ltvCohortFrom: str | None = None
+    ltvCohortTo: str | None = None
+    # ISO 4217 code the mapped monetary columns are denominated in. Non-USD
+    # values trigger one live FX lookup and a rescale to USD before the engine
+    # runs - mirrors app.py's portfolio_currency selectbox. "USD"/None is a
+    # no-op, so the common case never touches the network.
+    currency: str | None = None
 
 
 class DerivedColumn(BaseModel):
@@ -582,6 +614,10 @@ class LendingAnalyseBody(BaseModel):
         description="Cohort month labels (e.g. '2025-06-01') to restrict the analysis to - "
         "the Cohorts tab's selection. None/empty means every cohort, same as today.",
     )
+    # Optional [{role, content}] chat turns, so /api/export/lending can include
+    # the Ask AI transcript as an extra sheet (mirrors app.py's opt-in
+    # "Include the Ask AI chat history" download). Ignored by /api/analyse.
+    chatHistory: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class RentalGeneralInputsBody(BaseModel):
@@ -596,6 +632,9 @@ class RentalGeneralInputsBody(BaseModel):
     fxDevalPct: float | None = None
     fxDiscount50pct: bool = True
     debtService180d: float | None = None
+    # Portfolio currency for the mapped monetary columns - see
+    # GeneralInputsBody.currency. Rescaled to USD before the engine runs.
+    currency: str | None = None
 
 
 class RentalAnalyseIngest(BaseModel):
@@ -615,6 +654,8 @@ class RentalAnalyseBody(BaseModel):
     ingest: RentalAnalyseIngest | None = None
     exportCharts: list[ChartSpecBody] = Field(default_factory=list)
     dedupeById: bool = False
+    # Optional Ask AI transcript for /api/export/rental - see LendingAnalyseBody.
+    chatHistory: list[dict[str, Any]] = Field(default_factory=list)
 
 
 RENTAL_REQUIRED_COLUMNS = [
@@ -698,31 +739,71 @@ _INGEST_TTL_SECONDS = int(os.environ.get("SC_INGEST_TTL_HOURS", "8")) * 3600
 _INGEST_LAST_USED: dict[str, float] = {}
 _INGEST_USE_SEQ: dict[str, int] = {}
 _ingest_use_counter = itertools.count()
+# Sync routes run on a threadpool, so eviction's walk over these dicts can race
+# another request's insert ("dictionary changed size during iteration").
+# Reentrant because _register_ingest holds it while calling touch/evict.
+_INGEST_LOCK = threading.RLock()
+# ingestId -> (settings key, raw frame it was computed from, (df, fx_warning, c)).
+# Only the LAST engine run per upload is kept, so memory is bounded by the
+# ingest cap: analyse -> chat -> export on the same settings runs the engine
+# once instead of per request. Dropped with its ingest (see _drop_ingest).
+_ENGINE_CACHE: dict[str, tuple[str, pd.DataFrame, tuple[Any, ...]]] = {}
+# The body fields the engine result depends on; export charts, chat history
+# and the chat-only fields don't change it, so they stay out of the key.
+_ENGINE_KEY_FIELDS = {"ingest", "generalInputs", "dedupeById", "selectedCohorts"}
+
+
+def _cached_pipeline(model: str, body: BaseModel, run) -> tuple[Any, ...]:
+    """(df, fx_warning, c) for this ingest + settings, computing via `run()`
+    only on a miss. Consumers only read these objects (verified: nothing
+    downstream mutates them in place), so sharing one result is safe."""
+    ingest = getattr(body, "ingest", None)
+    if ingest is None:  # direct `rows` payload - nothing stable to key on
+        return run()
+    key = model + json.dumps(
+        body.model_dump(include=_ENGINE_KEY_FIELDS, mode="json"), sort_keys=True, default=str
+    )
+    raw = INGESTS.get(ingest.ingestId)
+    hit = _ENGINE_CACHE.get(ingest.ingestId)
+    # Identity check on the raw frame: a sheet re-parse re-registers the same id.
+    if hit is not None and hit[0] == key and raw is not None and hit[1] is raw:
+        _touch_ingest(ingest.ingestId)
+        return hit[2]
+    result = run()
+    with _INGEST_LOCK:
+        # Only if the upload wasn't evicted/replaced while the engine ran.
+        if raw is not None and INGESTS.get(ingest.ingestId) is raw:
+            _ENGINE_CACHE[ingest.ingestId] = (key, raw, result)
+    return result
 
 
 def _touch_ingest(ingest_id: str) -> None:
     """Mark an ingest as in-use so eviction treats it as live."""
-    _INGEST_LAST_USED[ingest_id] = time.time()
-    _INGEST_USE_SEQ[ingest_id] = next(_ingest_use_counter)
+    with _INGEST_LOCK:
+        _INGEST_LAST_USED[ingest_id] = time.time()
+        _INGEST_USE_SEQ[ingest_id] = next(_ingest_use_counter)
 
 
 def _evict_ingests() -> None:
     """Drop expired ingests, then the least-recently-used until under cap."""
-    now = time.time()
-    for key in [k for k, t in _INGEST_LAST_USED.items() if now - t > _INGEST_TTL_SECONDS]:
-        _drop_ingest(key)
-    while len(INGESTS) > _INGEST_MAX:
-        oldest = min(_INGEST_USE_SEQ, key=_INGEST_USE_SEQ.get, default=None)
-        if oldest is None:
-            break
-        _drop_ingest(oldest)
+    with _INGEST_LOCK:
+        now = time.time()
+        for key in [k for k, t in _INGEST_LAST_USED.items() if now - t > _INGEST_TTL_SECONDS]:
+            _drop_ingest(key)
+        while len(INGESTS) > _INGEST_MAX:
+            oldest = min(_INGEST_USE_SEQ, key=_INGEST_USE_SEQ.get, default=None)
+            if oldest is None:
+                break
+            _drop_ingest(oldest)
 
 
 def _drop_ingest(ingest_id: str) -> None:
-    INGESTS.pop(ingest_id, None)
-    INGEST_RAW.pop(ingest_id, None)
-    _INGEST_LAST_USED.pop(ingest_id, None)
-    _INGEST_USE_SEQ.pop(ingest_id, None)
+    with _INGEST_LOCK:
+        INGESTS.pop(ingest_id, None)
+        INGEST_RAW.pop(ingest_id, None)
+        _ENGINE_CACHE.pop(ingest_id, None)
+        _INGEST_LAST_USED.pop(ingest_id, None)
+        _INGEST_USE_SEQ.pop(ingest_id, None)
 
 
 def _get_ingest(ingest_id: str) -> pd.DataFrame | None:
@@ -837,9 +918,17 @@ def _json_safe(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, np.generic):
         try:
-            return value.item()
+            value = value.item()
         except (ValueError, OverflowError):
             return None
+    # math.isnan explicitly, before the plain-scalar passthrough below: a
+    # Python float('nan') - from scripts/summary_metrics.py's own division
+    # guards (native floats, not numpy/pandas scalars) or from unwrapping
+    # np.generic just above - would otherwise serialize as the bare `NaN`
+    # token, which Python's json module accepts but JS JSON.parse rejects
+    # outright, breaking every fetch() call that hits this field.
+    if isinstance(value, float) and math.isnan(value):
+        return None
     if isinstance(value, (str, int, float, bool)):
         return value
     try:
@@ -861,6 +950,7 @@ def _register_ingest(
     sheet: str | None = None,
     ingest_id: str | None = None,
     df: pd.DataFrame | None = None,
+    enforce_size_cap: bool = True,
 ) -> dict[str, Any]:
     """Parse+register a raw upload (new, re-parsed at a different sheet, or
     restored from a save/share snapshot) and return the ingest response
@@ -878,8 +968,24 @@ def _register_ingest(
     which computes and caches it lazily the first time something (Save/
     Share) actually needs real bytes, instead of paying to_csv()'s cost
     (measured ~190s for a 2M-row fetch) on every such ingest whether or not
-    it's ever saved/shared."""
+    it's ever saved/shared.
+
+    `enforce_size_cap=False` is for save/share restores only: those bytes
+    were already accepted once (a capped upload, or a warehouse/merge frame
+    serialized at save time, which can be far past the cap)."""
     if df is None:
+        # Every byte-based source (upload, Drive, link, save/share restore)
+        # lands here, so the cap is checked once, before the in-memory parse.
+        # ponytail: Drive/link downloads are still buffered whole before this
+        # check; stream with a byte limit if remote files that big turn up.
+        if enforce_size_cap and len(file_bytes) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File is too large ({len(file_bytes) / 1024 / 1024:.0f}MB). "
+                    f"The limit is {_MAX_UPLOAD_BYTES // 1024 // 1024}MB."
+                ),
+            )
         try:
             df, sheets = _parse_upload(file_bytes, name, sheet)
         except Exception as exc:
@@ -890,10 +996,12 @@ def _register_ingest(
         raise HTTPException(status_code=422, detail="File parsed with no rows.")
     df.columns = [str(c) for c in df.columns]
     ingest_id = ingest_id or uuid.uuid4().hex[:12]
-    INGESTS[ingest_id] = df
-    INGEST_RAW[ingest_id] = (file_bytes, name)
-    _touch_ingest(ingest_id)
-    _evict_ingests()
+    with _INGEST_LOCK:
+        INGESTS[ingest_id] = df
+        INGEST_RAW[ingest_id] = (file_bytes, name)
+        _ENGINE_CACHE.pop(ingest_id, None)
+        _touch_ingest(ingest_id)
+        _evict_ingests()
     return {
         "ingestId": ingest_id,
         "name": name,
@@ -926,7 +1034,9 @@ def _ingest_raw_bytes(ingest_id: str) -> tuple[bytes, str]:
     if df is None:
         raise HTTPException(status_code=404, detail="ingestId not found (upload may have expired).")
     file_bytes = df.to_csv(index=False).encode("utf-8")
-    INGEST_RAW[ingest_id] = (file_bytes, name)
+    with _INGEST_LOCK:
+        if ingest_id in INGESTS:  # not evicted while to_csv ran
+            INGEST_RAW[ingest_id] = (file_bytes, name)
     return file_bytes, name
 
 
@@ -941,14 +1051,6 @@ async def ingest_file(file: UploadFile = File(...)) -> dict[str, Any]:
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file.")
-    if len(file_bytes) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"File is too large ({len(file_bytes) / 1024 / 1024:.0f}MB). "
-                f"The limit is {_MAX_UPLOAD_BYTES // 1024 // 1024}MB."
-            ),
-        )
     if not name.lower().endswith((".csv", ".xlsx", ".xls")):
         raise HTTPException(
             status_code=400, detail="Only CSV or Excel (.xlsx/.xls) files are supported."
@@ -1065,7 +1167,7 @@ def merge_ingest(body: MergeIngestBody) -> dict[str, Any]:
         if body.secondaryKey != body.primaryKey and body.secondaryKey in merged.columns:
             merged = merged.drop(columns=[body.secondaryKey])
 
-    primary_name = INGEST_RAW[body.primaryIngestId][1]
+    primary_name = INGEST_RAW.get(body.primaryIngestId, (None, "upload.csv"))[1]
     merged_name = (
         primary_name
         if primary_name.lower().endswith(".csv")
@@ -1074,23 +1176,24 @@ def merge_ingest(body: MergeIngestBody) -> dict[str, Any]:
     return _json_safe(_register_ingest(None, merged_name, df=merged))
 
 
-# Snowflake-backed tables, via the same warehouse Query API app.py's
-# "Redshift (Warehouse)" data source already talks to (see
-# scripts/integrations.py and handover_snowflake_api_link.md) - kept named
-# "redshift" throughout for the same backward-compatibility reason that doc
-# gives (matches the API's own deployed env vars/secrets).
+# Snowflake-backed tables, queried directly via the SQL Statement API (see
+# scripts/warehouse.py). These routes used to proxy to a local redshift-api
+# service; the routes keep the "redshift" name so the React client's URLs
+# did not have to change when that hop was removed.
 @app.get("/api/redshift/config")
 def redshift_config() -> dict[str, bool]:
-    return {"available": bool(_get_redshift_api_url() and _get_redshift_api_key())}
+    return {"available": warehouse.is_configured()}
 
 
-def _redshift_creds() -> tuple[str, str]:
-    url, key = _get_redshift_api_url(), _get_redshift_api_key()
-    if not url or not key:
+def _require_warehouse() -> None:
+    if not warehouse.is_configured():
         raise HTTPException(
-            status_code=503, detail="The warehouse API isn't configured on this server."
+            status_code=503,
+            detail=(
+                "Snowflake isn't configured on this server "
+                "(set SNOWFLAKE_ACCOUNT and SNOWFLAKE_PAT)."
+            ),
         )
-    return url, key
 
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -1101,12 +1204,12 @@ def redshift_schemas(database: str = "MAESTRO_SRC") -> list[str]:
     """Every schema under `database`, for the "Other table" mode's schema
     dropdown - unlike /borrowers (schemas that happen to own a LOANS table),
     this covers e.g. SALMON, which has no LOANS table."""
-    url, key = _redshift_creds()
+    _require_warehouse()
     if not _IDENTIFIER_RE.fullmatch(database):
         raise HTTPException(status_code=422, detail="Database must be a plain identifier.")
     try:
-        return _redshift_list_schemas(url, key, database)
-    except requests.RequestException as exc:
+        return _redshift_list_schemas(database)
+    except (requests.RequestException, warehouse.WarehouseError) as exc:
         raise HTTPException(
             status_code=502, detail=f"Couldn't list schemas from the warehouse: {exc}"
         ) from exc
@@ -1116,12 +1219,12 @@ def redshift_schemas(database: str = "MAESTRO_SRC") -> list[str]:
 def redshift_tables(schema: str, database: str = "MAESTRO_SRC") -> list[str]:
     """Every table in `database.schema`, for the "Other table" mode's table
     dropdown, once a schema is picked."""
-    url, key = _redshift_creds()
+    _require_warehouse()
     if not (_IDENTIFIER_RE.fullmatch(database) and _IDENTIFIER_RE.fullmatch(schema)):
         raise HTTPException(status_code=422, detail="Database/schema must be plain identifiers.")
     try:
-        return _redshift_list_tables(url, key, schema, database)
-    except requests.RequestException as exc:
+        return _redshift_list_tables(schema, database)
+    except (requests.RequestException, warehouse.WarehouseError) as exc:
         raise HTTPException(
             status_code=502, detail=f"Couldn't list tables from the warehouse: {exc}"
         ) from exc
@@ -1146,7 +1249,7 @@ def redshift_filter(body: RedshiftFilterBody) -> dict[str, Any]:
     run against the warehouse - see redshift_table's `where` param. Returns
     {"where": None} (not an error) when no DEEPINFRA_API_KEY is configured
     or the model declined as too vague, mirroring /api/ai/derive-column."""
-    url, key = _redshift_creds()
+    _require_warehouse()
     if not (
         _IDENTIFIER_RE.fullmatch(body.database)
         and _IDENTIFIER_RE.fullmatch(body.schemaName)
@@ -1156,8 +1259,8 @@ def redshift_filter(body: RedshiftFilterBody) -> dict[str, Any]:
             status_code=422, detail="Database/schema/table must be plain identifiers."
         )
     try:
-        columns = _redshift_list_columns(url, key, body.schemaName, body.table, body.database)
-    except requests.RequestException as exc:
+        columns = _redshift_list_columns(body.schemaName, body.table, body.database)
+    except (requests.RequestException, warehouse.WarehouseError) as exc:
         raise HTTPException(
             status_code=502, detail=f"Couldn't list columns from the warehouse: {exc}"
         ) from exc
@@ -1200,13 +1303,13 @@ def redshift_table_start(body: RedshiftTableStartBody) -> dict[str, str]:
     real progress (partitions fetched so far) instead of one request that
     blocks silently for however long a big table takes - see
     integrations._redshift_start_table_job."""
-    url, key = _redshift_creds()
+    _require_warehouse()
     _validate_redshift_identifiers(body.database, body.schemaName, body.table)
     try:
         job_id = _redshift_start_table_job(
-            url, key, body.database, body.schemaName, body.table, body.limit, body.where
+            body.database, body.schemaName, body.table, body.limit, body.where
         )
-    except requests.RequestException as exc:
+    except (requests.RequestException, warehouse.WarehouseError) as exc:
         raise HTTPException(status_code=502, detail=f"Couldn't start the fetch: {exc}") from exc
     return {"jobId": job_id}
 
@@ -1217,10 +1320,10 @@ def redshift_table_status(jobId: str, schema: str, table: str) -> dict[str, Any]
     returns partition progress only; once done, also registers the result as
     a normal ingest (same as the synchronous /api/redshift/table) and
     returns that payload alongside the final progress counts."""
-    url, key = _redshift_creds()
+    _require_warehouse()
     try:
-        status_payload = _redshift_job_status(url, key, jobId)
-    except requests.RequestException as exc:
+        status_payload = _redshift_job_status(jobId)
+    except (requests.RequestException, warehouse.WarehouseError) as exc:
         raise HTTPException(
             status_code=502, detail=f"Couldn't check fetch progress: {exc}"
         ) from exc
@@ -1296,15 +1399,15 @@ def _canonical_rows_from_mapping(
     raw: pd.DataFrame,
     mapping: dict[str, str],
     derived_columns: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    """Build canonical (template-field-keyed) rows from a raw uploaded DataFrame
-    and the user's field->source-column mapping. Mirrors app.py's mapping form:
-    each template field pulls its source column's values into a canonical key.
-    Missing columns / unmapped required fields surface as validation errors.
-    This only selects/reorders columns - no analysis math lives here. Optional
-    ``derived_columns`` ([{name, formula}]) are computed deterministically onto
-    the raw frame first, so a derived name becomes a first-class source column
-    the mapping can reference (see derive_columns.py)."""
+) -> pd.DataFrame:
+    """Build the canonical (template-field-keyed) DataFrame from a raw uploaded
+    DataFrame and the user's field->source-column mapping. Mirrors app.py's
+    mapping form: each template field pulls its source column's values into a
+    canonical key. Missing columns / unmapped required fields surface as
+    validation errors. This only selects/reorders columns - no analysis math
+    lives here. Optional ``derived_columns`` ([{name, formula}]) are computed
+    deterministically onto the raw frame first, so a derived name becomes a
+    first-class source column the mapping can reference (see derive_columns.py)."""
     if derived_columns:
         from .derive_columns import FormulaError, apply_derived_columns
 
@@ -1325,12 +1428,14 @@ def _canonical_rows_from_mapping(
             status_code=422,
             detail=f"Mapping references missing source columns: {', '.join(missing_srcs)}",
         )
-    data: dict[str, list[Any]] = {}
-    for src, fields in reverse.items():
-        for f in fields:
-            data[f] = raw[src].tolist()
-    rows = [dict(zip(data, vals)) for vals in zip(*data.values())] if data else []
-    return rows
+    # Build the canonical frame by selecting/renaming whole columns - never by
+    # materialising Python lists of 3M+ values (the old `raw[src].tolist()` +
+    # `[dict(zip(...))...]` + `pd.DataFrame(rows)` round-trip took ~20s and a
+    # ~1GB dict spike on a 3M-row tape for exactly the same result). Column
+    # order here matches the mapping's insertion order, as before.
+    if not reverse:
+        return pd.DataFrame()
+    return pd.DataFrame({f: raw[src] for src, fields in reverse.items() for f in fields})
 
 
 def _derived_dicts(derived: list | None) -> list[dict[str, Any]]:
@@ -1374,8 +1479,8 @@ def ingest_data(body: DataGridBody) -> dict[str, Any]:
     truncated = row_count > _DATA_GRID_LIMIT
     return _json_safe(
         {
-            "columns": list(rows[0].keys()) if rows else [],
-            "rows": rows[:_DATA_GRID_LIMIT],
+            "columns": list(rows.columns) if not rows.empty else [],
+            "rows": rows.head(_DATA_GRID_LIMIT).to_dict("records") if not rows.empty else [],
             "rowCount": row_count,
             "truncated": truncated,
         }
@@ -1383,6 +1488,80 @@ def ingest_data(body: DataGridBody) -> dict[str, Any]:
 
 
 LENDING_DATE_FIELDS = {"Disbursement Date", "Expected Completion Date"}
+
+# Monetary canonical fields rescaled when a non-USD portfolio currency is
+# selected - mirrors app.py's CURRENCY_FIELDS. Covers both models; only
+# whichever columns are present in the loaded file are touched.
+CURRENCY_FIELDS = {
+    "Principal Value",
+    "Expected Interest",
+    "Gross Loan Value",
+    "Expected Fee",
+    "Total Paid",
+    "Total Due",
+    "downpayment",
+    "total_contract_value",
+    "monthly_expected_payment",
+    "amount_expected_to_date",
+    "total_paid",
+    "cost_of_asset",
+    "current_asset_value",
+    "recovery_amount",
+}
+
+# Process-level FX cache, keyed by the API URL. A plain dict+timestamp rather
+# than Streamlit's @st.cache_data (integrations.py is imported by app.py and
+# pulls in streamlit at module load, so it can't be used here). One entry for
+# the one configured endpoint; TTL from config.FX["cache_ttl_seconds"].
+_FX_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _fetch_usd_fx_rates() -> dict:
+    """Live USD rates from the same free, keyless endpoint app.py uses
+    (config.FX["api_url"]). Returns {currency_code: units per 1 USD}, cached
+    for config.FX["cache_ttl_seconds"] so repeated runs don't re-hit it."""
+    url = FX["api_url"]
+    now = time.time()
+    cached = _FX_CACHE.get(url)
+    if cached and now - cached[0] < FX["cache_ttl_seconds"]:
+        return cached[1]
+    resp = requests.get(url, timeout=FX["request_timeout_seconds"], verify=_ca_bundle_path())
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("result") != "success":
+        raise ValueError(f"FX API returned {data.get('result', 'an error')}")
+    rates = data["rates"]
+    _FX_CACHE[url] = (now, rates)
+    return rates
+
+
+def _convert_to_usd(df: pd.DataFrame, currency: str | None) -> tuple[pd.DataFrame, str | None]:
+    """Rescale the monetary columns of `df` from `currency` to USD in place,
+    returning (df, warning). USD/None/blank is a no-op.
+
+    Matches app.py: the rate is units of `currency` per 1 USD, so each money
+    column is divided by it. A missing rate or a failed lookup does NOT abort
+    the run - the figures stay in the original currency and a warning is
+    returned for the UI, exactly as Streamlit shows a st.warning there."""
+    code = (currency or "").strip().upper()
+    if not code or code == "USD":
+        return df, None
+    try:
+        rate = _fetch_usd_fx_rates().get(code)
+    except (requests.RequestException, ValueError) as exc:
+        return df, (
+            f"Couldn't fetch a live {code}/USD exchange rate ({exc}) - "
+            f"figures are in {code}, not converted."
+        )
+    if not rate:
+        return df, (
+            f"No live rate available for {code} right now - figures are in {code}, not converted."
+        )
+    converted = [c for c in CURRENCY_FIELDS if c in df.columns]
+    for col in converted:
+        df[col] = df[col] / rate
+    return df, None
+
 
 # Canonical money/numeric fields the engine does arithmetic on directly (UE
 # analysis divides these; process_data_input only coerces a couple itself).
@@ -1402,9 +1581,10 @@ LENDING_NUMERIC_FIELDS = {
 }
 
 
-def _resolve_lending_df(body: LendingAnalyseBody) -> pd.DataFrame:
+def _resolve_lending_df(body: LendingAnalyseBody) -> tuple[pd.DataFrame, str | None]:
     """Return the canonical template-field-keyed DataFrame to analyse, from
-    either a direct ``rows`` payload or an ``ingest`` (raw upload + mapping).
+    either a direct ``rows`` payload or an ``ingest`` (raw upload + mapping),
+    plus any non-fatal FX-conversion warning (None when converted/not needed).
 
     Date columns are coerced here, before returning - not left to
     process_data_input's own internal coercion - because GeneralInputs'
@@ -1420,16 +1600,16 @@ def _resolve_lending_df(body: LendingAnalyseBody) -> pd.DataFrame:
             raise HTTPException(
                 status_code=404, detail="ingestId not found (upload may have expired)."
             )
-        mapped_rows = _canonical_rows_from_mapping(
+        mapped = _canonical_rows_from_mapping(
             raw, body.ingest.mapping, _derived_dicts(body.ingest.derivedColumns)
         )
-        missing = [f for f in REQUIRED_FIELDS if not any(f in (r or {}) for r in mapped_rows)]
+        missing = [f for f in REQUIRED_FIELDS if f not in mapped.columns]
         if missing:
             raise HTTPException(
                 status_code=422,
                 detail=f"Missing required template fields in your mapping: {', '.join(missing)}",
             )
-        df = pd.DataFrame(mapped_rows)
+        df = mapped
     else:
         if not body.rows:
             raise HTTPException(status_code=400, detail="No rows provided.")
@@ -1473,7 +1653,8 @@ def _resolve_lending_df(body: LendingAnalyseBody) -> pd.DataFrame:
             # Money-with-commas/percent text ("85,000", "$1,200"): strip the
             # currency junk, then parse - same as the previous behaviour.
             df[col] = pd.to_numeric(_clean_numeric(df[col]), errors="coerce")
-    return _coerce_lending_dates(df, LENDING_DATE_FIELDS, dayfirst=True)
+    df, fx_warning = _convert_to_usd(df, body.generalInputs.currency)
+    return _coerce_lending_dates(df, LENDING_DATE_FIELDS, dayfirst=True), fx_warning
 
 
 def _compute_lending(
@@ -1514,6 +1695,9 @@ def _compute_lending(
         filtered = filter_cohorts(cohorts, gi.min_loans_per_cohort)
         ue = UeAnalysis(processed)
         ltv = LtvAnalysis(processed, filtered)
+        ltv_interest = ue.avg_interest_pct(
+            gi_body.ltvCohortFrom or None, gi_body.ltvCohortTo or None
+        )
     except Exception as exc:  # engine failures -> 422 so the UI can surface them
         raise HTTPException(status_code=422, detail=f"Analysis failed: {exc}") from exc
 
@@ -1537,10 +1721,20 @@ def _compute_lending(
         "filtered": filtered,
         "ue": ue,
         "ltv": ltv,
+        "ltv_interest": ltv_interest,
+        "gi_body": gi_body,
         "chart_data": chart_data,
         "summary_cohorts": summary_cohorts,
         "term_supplied": term_supplied,
     }
+
+
+def _lending_pipeline(body: LendingAnalyseBody) -> tuple[pd.DataFrame, str | None, dict]:
+    def run():
+        df, fx_warning = _resolve_lending_df(body)
+        return df, fx_warning, _compute_lending(df, body.generalInputs, body.selectedCohorts)
+
+    return _cached_pipeline("lending", body, run)
 
 
 def _ue_model_payload(processed: pd.DataFrame, ue_data: dict) -> dict[str, Any]:
@@ -1596,12 +1790,163 @@ def _ue_model_payload(processed: pd.DataFrame, ue_data: dict) -> dict[str, Any]:
     }
 
 
+def _irr(cashflows: list[float]) -> float | None:
+    """Newton-Raphson IRR, ported 1:1 from the React UE Model tab's `irr()`
+    (AnalysisSession.tsx) so a figure the analyst reads off the workbook cell
+    matches the same figure on screen. Returns None when it can't converge,
+    same as the client and numpy_financial's npf.irr."""
+    if not cashflows:
+        return None
+    rate = 0.1
+    for _ in range(200):
+        f = 0.0
+        fd = 0.0
+        try:
+            for i, cf in enumerate(cashflows):
+                f += cf / (1 + rate) ** i
+                fd -= (i * cf) / (1 + rate) ** (i + 1)
+        except (OverflowError, ZeroDivisionError):
+            # JS yields Infinity/NaN here and the client returns null; match it.
+            return None
+        if abs(f) < 1e-9:
+            return rate
+        if not math.isfinite(fd) or fd == 0:
+            return None
+        rate = rate - f / fd
+        if not math.isfinite(rate):
+            return None
+    return None
+
+
+def _ue_model_metrics(ue_model: dict[str, Any]) -> dict[str, Any]:
+    """The lending UE Model sub-tab's derived figures (Gross/Net IRR, Estimated
+    APR, Implied Monthly Interest %, Loss %, Income/cost breakdown), ported 1:1
+    from AnalysisSession.tsx's LendingUeModelTab so the export's UE Model sheet
+    carries the same numbers the app shows at the default assumptions.
+
+    Mirrors the client: loss rate = Actual, costs = the engine's UE_MODEL_COST_
+    DEFAULTS. The app lets the user override these interactively; the export
+    records the defaults the analysis ran with (same values the sheet's own
+    input cells carry, so a reader can see the basis)."""
+    m = ue_model
+    defaults = m.get("costDefaults") or {}
+    upfront = defaults.get("upfront_cost_pct", 0) / 100
+    ongoing = defaults.get("ongoing_cost_pct", 0) / 100
+    financing = defaults.get("financing_cost_pct", 0) / 100
+    facility = defaults.get("facility_fee_pct", 0) / 100
+    hedge = defaults.get("hedge_cost_pct", 0) / 100
+
+    loss_rate = m.get("actualLossRate")
+    principal = m.get("principal")
+    matured_owed = m.get("maturedOwed")
+    matured_principal = m.get("maturedPrincipal")
+    nMatured = m.get("nMatured")
+    matured_term_m = m.get("maturedTermM")
+    avg_interest = m.get("averageInterestPct")
+    avg_term_days = m.get("averageExpectedTerm")
+
+    def _f(v):
+        return v if isinstance(v, (int, float)) and math.isfinite(v) else None
+
+    losses_dollar = (
+        loss_rate * matured_owed
+        if _f(loss_rate) is not None and _f(matured_owed) is not None
+        else None
+    )
+    losses_pct_of_gbv = (
+        losses_dollar / principal
+        if losses_dollar is not None and _f(principal) and principal
+        else None
+    )
+    term_m = _f(avg_term_days) / 30.4375 if _f(avg_term_days) is not None else None
+    implied_interest = (
+        (_f(avg_interest) / term_m) * 12 * 2 if _f(avg_interest) is not None and term_m else None
+    )
+    implied_monthly = implied_interest / 12 if implied_interest is not None else None
+
+    avg_principal_matured = matured_principal / nMatured if nMatured else None
+    avg_fee_matured = m.get("maturedOriginationIncome") / nMatured if nMatured else None
+    avg_gbv_matured = matured_owed / nMatured if nMatured and _f(matured_owed) is not None else None
+    n_periods = (
+        round(matured_term_m) + 3 if _f(matured_term_m) is not None and matured_term_m > 0 else None
+    )
+
+    gross_irr = None
+    if (
+        n_periods is not None
+        and _f(avg_principal_matured) is not None
+        and _f(avg_gbv_matured) is not None
+        and _f(loss_rate) is not None
+        and _f(matured_owed) is not None
+    ):
+        cf0 = -avg_principal_matured + avg_fee_matured - upfront * avg_principal_matured
+        monthly_cf = (avg_gbv_matured / n_periods) * (1 - loss_rate) - (
+            ongoing * avg_principal_matured
+        ) / n_periods
+        monthly_irr = _irr([cf0] + [monthly_cf] * n_periods)
+        if monthly_irr is not None:
+            gross_irr = (1 + monthly_irr) ** 12 - 1
+
+    cost_of_finance = financing + facility + hedge
+    net_irr = gross_irr - cost_of_finance if gross_irr is not None else None
+    variable_costs = upfront + ongoing
+    cost_of_finance_over_term = (
+        cost_of_finance * (matured_term_m / 12) if _f(matured_term_m) is not None else None
+    )
+
+    matured_revenue = m.get("maturedRevenue")
+    matured_origination_income = m.get("maturedOriginationIncome")
+    income_net_losses = (
+        matured_revenue + matured_origination_income - losses_dollar
+        if _f(matured_revenue) is not None
+        and _f(matured_origination_income) is not None
+        and losses_dollar is not None
+        else None
+    )
+    income_net_losses_margin = (
+        income_net_losses / matured_principal
+        if income_net_losses is not None and _f(matured_principal) and matured_principal
+        else None
+    )
+    variable_costs_dollar = (
+        variable_costs * matured_principal if _f(matured_principal) is not None else None
+    )
+    product_contribution = (
+        income_net_losses - variable_costs_dollar
+        if income_net_losses is not None and variable_costs_dollar is not None
+        else None
+    )
+    product_margin = (
+        product_contribution / matured_principal
+        if product_contribution is not None and _f(matured_principal) and matured_principal
+        else None
+    )
+
+    return {
+        "Loss Rate used (Actual)": loss_rate,
+        "Loss % of GBV": losses_pct_of_gbv,
+        "Estimated APR": implied_interest,
+        "Implied Monthly Interest %": implied_monthly,
+        "Gross IRR": gross_irr,
+        "Cost of Finance (% p.a.)": cost_of_finance,
+        "Net IRR": net_irr,
+        "Cost of Finance (over loan life)": cost_of_finance_over_term,
+        "Income (net of losses)": income_net_losses,
+        "Income (net of losses) margin": income_net_losses_margin,
+        "Variable costs": variable_costs_dollar,
+        "Product contribution": product_contribution,
+        "Product contribution margin": product_margin,
+        "Upfront cost (% of principal)": upfront,
+        "Ongoing cost (% of principal)": ongoing,
+        "Financing cost (% p.a.)": financing,
+        "Facility fee (% p.a.)": facility,
+        "Hedge cost (% p.a.)": hedge,
+    }
+
+
 def _run_lending_engine(
-    df: pd.DataFrame,
-    gi_body: GeneralInputsBody,
-    selected_cohorts: list[str] | None = None,
+    df: pd.DataFrame, c: dict[str, Any], fx_warning: str | None = None
 ) -> dict[str, Any]:
-    c = _compute_lending(df, gi_body, selected_cohorts)
     cohorts, filtered, chart_data = c["cohorts"], c["filtered"], c["chart_data"]
     ue_data, ltv_data = c["ue"].as_dict(), c["ltv"].as_dict()
     checks = _lending_data_quality_checks(df, cohorts, LENDING_DQ_CONFIG, c["gi"], filtered)
@@ -1647,14 +1992,26 @@ def _run_lending_engine(
                 ]
             ),
             "generalInputs": c["gi"].as_dict(),
+            # The LTV Calculator's interest input: Average Interest % limited
+            # to the General Inputs cohort range (equal to it when unset).
+            "ltvInterest": c["ltv_interest"],
+            # The range that figure was computed over, echoed back so the UI
+            # labels it with what was run, not whatever is in the inputs now.
+            "ltvInterestRange": {
+                "from": c["gi_body"].ltvCohortFrom or None,
+                "to": c["gi_body"].ltvCohortTo or None,
+            },
+            # Non-fatal FX notice (selected currency had no live rate) - the
+            # React Summary tab shows it; None when USD or conversion succeeded.
+            "fxWarning": fx_warning,
         }
     )
 
 
 @app.post("/api/analyse/lending")
 def analyse_lending(body: LendingAnalyseBody) -> dict[str, Any]:
-    df = _resolve_lending_df(body)
-    return _run_lending_engine(df, body.generalInputs, body.selectedCohorts)
+    df, fx_warning, c = _lending_pipeline(body)
+    return _run_lending_engine(df, c, fx_warning)
 
 
 def _export_charts_payload(specs: list[ChartSpecBody]) -> list[dict[str, Any]]:
@@ -1686,10 +2043,20 @@ def export_lending(body: LendingAnalyseBody) -> Response:
     logic re-implemented here, just wiring the same real pipeline's raw
     outputs into the existing (Streamlit-independent, verified working
     outside a script run) builder."""
-    df = _resolve_lending_df(body)
-    c = _compute_lending(df, body.generalInputs, body.selectedCohorts)
+    df, _, c = _lending_pipeline(body)
     ue_data, ltv_data = c["ue"].as_dict(), c["ltv"].as_dict()
     mapping = body.ingest.mapping if body.ingest else None
+    ue_model = _ue_model_payload(c["processed"], ue_data)
+    # The app's LTV Calculator tab runs /api/ltv-calculator with the analysis'
+    # green inputs; reproduce the same call here (at its default dropdown
+    # choices) so the workbook carries the suggested-LTV matrix + backups.
+    ltv_calculator = _ltv_calculator_payload(
+        LtvCalcBody(
+            averageInterest=c["ltv_interest"],
+            termDays=ltv_data.get("Average Term"),
+            lossRate=ltv_data.get("95th Percentile Losses"),
+        )
+    )
     xlsx_bytes = _build_lending_export_workbook(
         c["processed"],
         c["cohorts"],
@@ -1702,8 +2069,19 @@ def export_lending(body: LendingAnalyseBody) -> Response:
         _export_charts_payload(body.exportCharts),
         term_supplied=c["term_supplied"],
         mapping=mapping,
+        currency=body.generalInputs.currency,
         extraction_date=c["gi"].extraction_date,
+        # Same Summary figures the React Summary tab shows (summary_metrics.py),
+        # so the workbook's Summary sheet can never drift from the app.
+        summary_metrics=lending_summary_metrics(c["processed"], c["gi"], ue_data, ltv_data),
+        ltv_calculator=ltv_calculator,
+        ue_model=_ue_model_metrics(ue_model),
+        checks=_lending_data_quality_checks(
+            c["processed"], c["cohorts"], LENDING_DQ_CONFIG, c["gi"], c["filtered"]
+        ),
     )
+    if body.chatHistory:
+        xlsx_bytes = _add_chat_history_sheet(xlsx_bytes, body.chatHistory)
     return Response(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1711,29 +2089,28 @@ def export_lending(body: LendingAnalyseBody) -> Response:
     )
 
 
-def _resolve_rental_df(body: RentalAnalyseBody) -> pd.DataFrame:
+def _resolve_rental_df(body: RentalAnalyseBody) -> tuple[pd.DataFrame, str | None]:
     """Return the canonical rental DataFrame from either ``ingest`` (raw
     upload + mapping) or direct ``rows``, with date columns coerced to
     datetime and absent optional date columns pre-declared as NaT so the
-    engine's date arithmetic works under pandas 3.0."""
+    engine's date arithmetic works under pandas 3.0, plus any non-fatal
+    FX-conversion warning (None when converted/not needed)."""
     if body.ingest:
         raw = _get_ingest(body.ingest.ingestId)
         if raw is None:
             raise HTTPException(
                 status_code=404, detail="ingestId not found (upload may have expired)."
             )
-        mapped_rows = _canonical_rows_from_mapping(
+        mapped = _canonical_rows_from_mapping(
             raw, body.ingest.mapping, _derived_dicts(body.ingest.derivedColumns)
         )
-        missing = [
-            c for c in RENTAL_REQUIRED_COLUMNS if not any(c in (r or {}) for r in mapped_rows)
-        ]
+        missing = [c for c in RENTAL_REQUIRED_COLUMNS if c not in mapped.columns]
         if missing:
             raise HTTPException(
                 status_code=422,
                 detail=f"Missing required rental fields in your mapping: {', '.join(missing)}",
             )
-        df = pd.DataFrame(mapped_rows)
+        df = mapped
     else:
         if not body.rows:
             raise HTTPException(status_code=400, detail="No rows provided.")
@@ -1778,7 +2155,8 @@ def _resolve_rental_df(body: RentalAnalyseBody) -> pd.DataFrame:
     }:
         if c not in df.columns:
             df[c] = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
-    return df
+    df, fx_warning = _convert_to_usd(df, body.generalInputs.currency)
+    return df, fx_warning
 
 
 def _compute_rental(df: pd.DataFrame, gi_body: RentalGeneralInputsBody) -> dict[str, Any]:
@@ -1838,10 +2216,17 @@ def _compute_rental(df: pd.DataFrame, gi_body: RentalGeneralInputsBody) -> dict[
     }
 
 
+def _rental_pipeline(body: RentalAnalyseBody) -> tuple[pd.DataFrame, str | None, dict]:
+    def run():
+        df, fx_warning = _resolve_rental_df(body)
+        return df, fx_warning, _compute_rental(df, body.generalInputs)
+
+    return _cached_pipeline("rental", body, run)
+
+
 @app.post("/api/analyse/rental")
 def analyse_rental(body: RentalAnalyseBody) -> dict[str, Any]:
-    df = _resolve_rental_df(body)
-    c = _compute_rental(df, body.generalInputs)
+    df, fx_warning, c = _rental_pipeline(body)
     ue_data, ltv_data, churn_data = c["ue"].as_dict(), c["ltv"].as_dict(), c["churn"].as_dict()
     checks = _rental_data_quality_checks(
         df, c["cohorts"], RENTAL_DQ_CONFIG, c["gi"], c["filtered"], ue_data
@@ -1869,6 +2254,8 @@ def analyse_rental(body: RentalAnalyseBody) -> dict[str, Any]:
                 c["processed"], c["av"], c["gi"], ue_data, ltv_data, c["ts"]
             ),
             "generalInputs": c["gi_calc"],
+            # Non-fatal FX notice - see _run_lending_engine's fxWarning.
+            "fxWarning": fx_warning,
         }
     )
 
@@ -1984,15 +2371,17 @@ class LtvCalcBody(BaseModel):
     )
 
 
-@app.post("/api/ltv-calculator")
-def ltv_calculator(body: LtvCalcBody) -> dict[str, Any]:
+def _ltv_calculator_payload(body: LtvCalcBody) -> dict[str, Any]:
     """Mirror app.py's lending "LTV Analysis" tab (the LTV Calculator): snap
     the portfolio's weighted-avg term to a tenor bucket, pick the 95th %ile
     loss (falling back to the sector-minimum floor when it's n/a), then run
     the Receivables-sheet waterfall via template_analysis.ltv_calculator and
     return every output plus the dropdown options and the FX-by-tenor table
     so the React tab can render the waterfall matrix, backup tables and
-    charts exactly like Streamlit."""
+    charts exactly like Streamlit.
+
+    Shared by the /api/ltv-calculator route and /api/export/lending (which
+    records the same matrix in the workbook), so the two can't drift."""
     green_interest = body.averageInterest
     green_term_days = body.termDays
     green_loss = body.lossRate
@@ -2048,6 +2437,15 @@ def ltv_calculator(body: LtvCalcBody) -> dict[str, Any]:
         "options": _ltv_calc_options(),
         "ok": True,
         "warning": None,
+        # Echo the choices the run used, so the export sheet can record them
+        # (the React tab keeps them in local state and doesn't need this, but
+        # the workbook has no other record of which scenario was computed).
+        "dataSource": body.dataSource,
+        "country": body.country,
+        "macroFxRisk": body.macroFxRisk,
+        "segmentation": body.segmentation,
+        "hedgeRate": body.hedgeRate,
+        "rolledHedge": body.rolledHedge,
         "greenInterest": green_interest,
         "greenTermBucket": green_term_bucket,
         "greenLoss": green_loss,
@@ -2060,14 +2458,20 @@ def ltv_calculator(body: LtvCalcBody) -> dict[str, Any]:
     }
 
 
+@app.post("/api/ltv-calculator")
+def ltv_calculator(body: LtvCalcBody) -> dict[str, Any]:
+    """Route wrapper - the maths lives in _ltv_calculator_payload so the export
+    path reuses it (see that function)."""
+    return _ltv_calculator_payload(body)
+
+
 @app.post("/api/export/rental")
 def export_rental(body: RentalAnalyseBody) -> Response:
     """Same request shape as /api/analyse/rental (rows or ingest+mapping), but
     returns the real downloadable .xlsx from export_workbook.py's
     _build_rental_export_workbook instead of a JSON summary - no export logic
     re-implemented here (mirrors /api/export/lending)."""
-    df = _resolve_rental_df(body)
-    c = _compute_rental(df, body.generalInputs)
+    df, _, c = _rental_pipeline(body)
     ue_data, ltv_data, churn_data = c["ue"].as_dict(), c["ltv"].as_dict(), c["churn"].as_dict()
     mapping = body.ingest.mapping if body.ingest else None
     xlsx_bytes = _build_rental_export_workbook(
@@ -2083,7 +2487,17 @@ def export_rental(body: RentalAnalyseBody) -> Response:
         c["ts"],
         _export_charts_payload(body.exportCharts),
         mapping=mapping,
+        currency=body.generalInputs.currency,
+        # Same Summary figures the React Summary tab shows (summary_metrics.py).
+        summary_metrics=rental_summary_metrics(
+            c["processed"], c["av"], c["gi"], ue_data, ltv_data, c["ts"]
+        ),
+        checks=_rental_data_quality_checks(
+            c["processed"], c["cohorts"], RENTAL_DQ_CONFIG, c["gi"], c["filtered"], ue_data
+        ),
     )
+    if body.chatHistory:
+        xlsx_bytes = _add_chat_history_sheet(xlsx_bytes, body.chatHistory)
     return Response(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2148,7 +2562,13 @@ def derive_column(body: DeriveColumnBody) -> dict[str, Any]:
     computed deterministically server-side by web_api/derive_columns.py when the
     mapping is applied. Returns nulls (not an error) when no DEEPINFRA_API_KEY
     is configured, mirroring /api/ai/suggest-mapping; the frontend tells the
-    user to type a formula manually in that case."""
+    user to type a formula manually in that case.
+
+    `configured` distinguishes the two ways this returns no formula: no API
+    key at all, versus a key that works but a request the model could not
+    turn into one. Both used to come back as bare nulls, so the UI reported
+    "AI isn't configured" even when it was - sending people to check server
+    config when the fix was to rephrase the request."""
     try:
         result = _suggest_derived_column(body.columns, body.request)
     except requests.RequestException as exc:
@@ -2156,6 +2576,7 @@ def derive_column(body: DeriveColumnBody) -> dict[str, Any]:
     return {
         "name": result.get("name") if result else None,
         "formula": result.get("formula") if result else None,
+        "configured": bool(_get_deepinfra_api_key()),
     }
 
 
@@ -2237,8 +2658,7 @@ def ai_chat_lending(body: LendingChatBody) -> dict[str, Any]:
     context app.py's chat tab sends (never raw loan rows - see
     _build_lending_chat_context_lite's docstring for the one section it's
     still missing) and forwards the question to ai_client._ask_data_chatbot."""
-    df = _resolve_lending_df(body)
-    c = _compute_lending(df, body.generalInputs, body.selectedCohorts)
+    df, _, c = _lending_pipeline(body)
     ue_data, ltv_data = c["ue"].as_dict(), c["ltv"].as_dict()
     checks = _lending_data_quality_checks(
         df, c["cohorts"], LENDING_DQ_CONFIG, c["gi"], c["filtered"]
@@ -2264,8 +2684,7 @@ def ai_chat_rental(body: RentalChatBody) -> dict[str, Any]:
     calls the real, unmodified scripts/chat_context.py builder directly -
     every object it needs (gi/df/av/cohorts/ue/ltv/churn/ts) already comes
     out of _compute_rental, no reduced version required."""
-    df = _resolve_rental_df(body)
-    c = _compute_rental(df, body.generalInputs)
+    df, _, c = _rental_pipeline(body)
     ue_data, ltv_data, churn_data = c["ue"].as_dict(), c["ltv"].as_dict(), c["churn"].as_dict()
     checks = _rental_data_quality_checks(
         df, c["cohorts"], RENTAL_DQ_CONFIG, c["gi"], c["filtered"], ue_data
@@ -2306,7 +2725,9 @@ def _restore_payload(profile: dict[str, Any]) -> dict[str, Any]:
     """Re-ingest a saved/shared upload and build the payload the frontend
     needs to jump straight back into the mapping/analysis screens with the
     same file, mapping, general inputs and chat history."""
-    ingest = _register_ingest(profile["upload_bytes"], profile.get("upload_name") or "upload")
+    ingest = _register_ingest(
+        profile["upload_bytes"], profile.get("upload_name") or "upload", enforce_size_cap=False
+    )
     mapping = profile.get("mapping") or {}
     return _json_safe(
         {
@@ -2494,7 +2915,15 @@ def google_login_url() -> dict[str, str]:
     if not (_get_google_client_id() and _get_google_client_secret()):
         raise HTTPException(status_code=503, detail="Google sign-in is not configured.")
     state = secrets.token_urlsafe(16)
-    _PENDING_GOOGLE_OAUTH_STATES.add(state)
+    now = time.time()
+    pending = _PENDING_GOOGLE_OAUTH_STATES
+    with _OAUTH_STATE_LOCK:
+        while pending and (
+            len(pending) >= _OAUTH_STATE_MAX
+            or now - next(iter(pending.values())) > _OAUTH_STATE_TTL_SECONDS
+        ):
+            pending.pop(next(iter(pending)))
+        pending[state] = now
     url = _google_auth_url(
         state, scope=GOOGLE_REACT_APP_SCOPE, redirect_uri=GOOGLE_REACT_APP_REDIRECT_URI
     )
@@ -2517,11 +2946,12 @@ def google_callback(body: GoogleCallbackBody, response: Response) -> dict[str, A
     download the user's files without the token ever touching the browser.
     Also issues the signed remember-me cookie, so later loads skip the
     login screen."""
-    if body.state not in _PENDING_GOOGLE_OAUTH_STATES:
+    with _OAUTH_STATE_LOCK:
+        issued = _PENDING_GOOGLE_OAUTH_STATES.pop(body.state, None)
+    if issued is None or time.time() - issued > _OAUTH_STATE_TTL_SECONDS:
         raise HTTPException(
             status_code=400, detail="Invalid or expired sign-in attempt - please try again."
         )
-    _PENDING_GOOGLE_OAUTH_STATES.discard(body.state)
     try:
         token = _exchange_google_code(body.code, redirect_uri=GOOGLE_REACT_APP_REDIRECT_URI)
         userinfo = _fetch_google_userinfo(token["access_token"])
@@ -2612,9 +3042,14 @@ if os.path.isdir(_WEB_DIST_DIR):
         if not os.path.isfile(index_path):
             raise HTTPException(status_code=404, detail="Not found.")
         # Bare static files copied from public/ (e.g. favicon.svg, manifest).
-        if "/" not in path and os.path.isfile(os.path.join(_WEB_DIST_DIR, path)):
+        # Resolve before checking: "\" is a separator on Windows, so a plain
+        # "/" test let ..%5C escape dist and serve any file (e.g. .env).
+        static_path = os.path.realpath(os.path.join(_WEB_DIST_DIR, path))
+        if os.path.dirname(static_path) == os.path.realpath(_WEB_DIST_DIR) and os.path.isfile(
+            static_path
+        ):
             return Response(
-                content=open(os.path.join(_WEB_DIST_DIR, path), "rb").read(),
+                content=open(static_path, "rb").read(),
                 media_type="image/svg+xml" if path.endswith(".svg") else "application/octet-stream",
             )
         return Response(content=open(index_path, "rb").read(), media_type="text/html")

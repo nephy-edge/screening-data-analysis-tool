@@ -14,7 +14,7 @@ class GeneralInputs:
     useful_life_years=5)."""
 
     def __init__(self, df, **overrides):
-        self.extraction_date = overrides.get("extraction_date", df["start_date"].max())
+        self.extraction_date = overrides.get("extraction_date") or df["start_date"].max()
         self.days_after_term = overrides.get("days_after_term", 0)
         self.months_since_default = overrides.get("months_since_default", 3)
         self.min_loans_per_cohort = overrides.get("min_loans_per_cohort", 20)
