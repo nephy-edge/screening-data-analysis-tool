@@ -36,6 +36,39 @@ export const RENTAL_TEMPLATE_FIELDS: MappingField[] = [
   { key: 'recovery_amount', label: 'Recovery Amount', required: false, description: 'Recovered amount' },
 ];
 
+// Revolving Lending: the required fields are the Revolving Lending template's
+// Outputs columns (A1:K1), under the same names. The bucket balances are
+// optional - when all seven core ones are mapped the full roll-rate model runs,
+// otherwise a 3-link approximation from these columns
+// (scripts/revolving_analysis/transition_matrices.py).
+export const REVOLVING_TEMPLATE_FIELDS: MappingField[] = [
+  { key: 'report_month', label: 'report_month', required: true, description: 'Report month (one row per month)' },
+  { key: 'number_of_customers', label: 'number_of_customers', required: true, description: 'Borrowers on book in the month' },
+  { key: 'total_credit_line', label: 'total_credit_line', required: true, description: 'Sum of approved credit limits' },
+  { key: 'interest_collected', label: 'interest_collected', required: true, description: 'Cash interest collected in the month' },
+  { key: 'principal_collected', label: 'principal_collected', required: true, description: 'Cash principal repaid in the month' },
+  { key: 'principal_issued', label: 'principal_issued', required: true, description: 'New principal drawn in the month' },
+  { key: 'principal_outstanding', label: 'principal_outstanding', required: true, description: 'Closing principal outstanding, incl. defaulted stock' },
+  { key: 'principal_outstanding-active', label: 'principal_outstanding-active', required: true, description: 'Balance not past due (New + Current)' },
+  { key: 'principal_outstanding-par30-60', label: 'principal_outstanding-par30-60', required: true, description: 'Balance 1-60 days past due' },
+  { key: 'principal_outstanding-par60-90', label: 'principal_outstanding-par60-90', required: true, description: 'Balance 61-90 days past due' },
+  { key: 'principal_written-off', label: 'principal_written-off', required: true, description: 'Principal written off in the month (flow)' },
+  { key: 'BAL_NEW', label: 'Balance: New', required: false, description: 'Balance of lines in their origination month (optional - enables the full roll-rate model)' },
+  { key: 'BAL_CURRENT', label: 'Balance: Current', required: false, description: 'Balance not past due (optional - enables the full roll-rate model)' },
+  { key: 'BAL_PAR_1_30', label: 'Balance: PAR 1-30', required: false, description: 'Balance 1-30 days past due (optional - enables the full roll-rate model)' },
+  { key: 'BAL_PAR_31_60', label: 'Balance: PAR 31-60', required: false, description: 'Balance 31-60 days past due (optional - enables the full roll-rate model)' },
+  { key: 'BAL_PAR_61_90', label: 'Balance: PAR 61-90', required: false, description: 'Balance 61-90 days past due (optional - enables the full roll-rate model)' },
+  { key: 'BAL_PAR_91_120', label: 'Balance: PAR 91-120', required: false, description: 'Balance 91-120 days past due (optional - enables the full roll-rate model)' },
+  { key: 'BAL_DEFAULT', label: 'Balance: Defaulted', required: false, description: 'Defaulted / written-off balance still held as stock (optional - enables the full roll-rate model)' },
+  { key: 'BAL_PAR_121_150', label: 'Balance: PAR 121-150', required: false, description: 'Balance 121-150 days past due (0 if absent)' },
+  { key: 'BAL_PAR_151_180', label: 'Balance: PAR 151-180', required: false, description: 'Balance 151-180 days past due (0 if absent)' },
+  { key: 'BAL_PAR_180_PLUS', label: 'Balance: PAR 180+', required: false, description: 'Balance over 180 days past due (0 if absent)' },
+  { key: 'DUP_LOAN_MONTHS', label: 'Duplicate Loan-Months', required: false, description: 'Data-quality: duplicate loan-month rows in the source' },
+  { key: 'SOURCE_ROWS', label: 'Source Rows', required: false, description: 'Data-quality: source rows behind the month' },
+  { key: 'MONTHS_FILLED_BY_CARRYFWD', label: 'Months Filled by Carry-Forward', required: false, description: 'Data-quality: loan-months carried forward' },
+  { key: 'UNEXPLAINED', label: 'Unexplained Movement', required: false, description: 'Data-quality: balance movement not explained by flows' },
+];
+
 export const DEMO_FILE = {
   name: 'sample_loan_tape.xlsx',
   columns: [

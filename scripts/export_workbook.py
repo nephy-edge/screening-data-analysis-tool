@@ -13,7 +13,7 @@ import json
 
 import pandas as pd
 import streamlit as st
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.chart import AreaChart, BarChart, LineChart, Reference, ScatterChart, Series
 from openpyxl.utils import get_column_letter
 from rental_analysis.data_input import OPTIONAL_COLUMNS, REQUIRED_COLUMNS
@@ -1165,4 +1165,93 @@ def _build_rental_export_workbook(
             cfg_ws.sheet_state = "hidden"
 
     buf.seek(0)
+    return buf.getvalue()
+
+
+def _write_frame(ws, df, row, title=None, index=True):
+    """Write `df` (with its index as the first column) starting at `row`, under
+    an optional section title; returns the next free row after a blank gap."""
+    if title:
+        ws.cell(row=row, column=1, value=title)
+        row += 1
+    frame = df.reset_index() if index else df
+    for c, name in enumerate(frame.columns, start=1):
+        ws.cell(row=row, column=c, value=str(name))
+    for r, values in enumerate(frame.itertuples(index=False), start=row + 1):
+        for c, v in enumerate(values, start=1):
+            ws.cell(row=r, column=c, value=None if pd.isna(v) else v)
+    return row + len(frame) + 2
+
+
+def _build_revolving_export_workbook(c, general_inputs):
+    """Revolving Lending export: the template's Outputs tab (fact block A:K,
+    then the UE / LTV ratio block five rows below it, as in the template) with
+    every ratio the fact block can express written as a live formula, plus the
+    Transition Matrices sheet and the inputs the run used."""
+    facts = c["facts"]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Outputs"
+    for col, name in enumerate(facts.columns, start=1):
+        ws.cell(row=1, column=col, value=name)
+    for r, values in enumerate(facts.itertuples(index=False), start=2):
+        for col, v in enumerate(values, start=1):
+            if col == 1:
+                v = pd.Timestamp(v).to_pydatetime()
+            ws.cell(row=r, column=col, value=None if pd.isna(v) else v)
+
+    a = len(facts) + 1  # as-of row (the last fact row)
+    w0 = max(2, a - int(general_inputs["ratioWindowMonths"]) + 1)
+    base = a + 5  # template: last fact row 3, "UE / LTV" header row 8
+
+    def at(template_row):
+        return base + template_row - 8
+
+    ws.cell(row=base, column=1, value="UE / LTV")
+    formulas = {
+        9: f'=IFERROR(1/((E{a}+D{a}-F{a})/AVERAGE(G{w0}:G{a})),"")',
+        10: f'=IFERROR(SUM(D{w0}:D{a})/SUM(G{w0}:G{a}),"")',
+        11: f'=IFERROR(B{at(10)}*B{at(9)},"")',
+        15: f'=IFERROR(H{a}/G{a},"")',
+        16: f'=IFERROR(I{a}/G{a},"")',
+        17: f'=IFERROR(J{a}/H{a},"")',
+        18: f'=IFERROR(J{a}/G{a},"")',
+        19: f'=IFERROR(K{a}/AVERAGE(G{w0}:G{a}),"")',
+        21: f'=IFERROR(B{at(20)}/G{a},"")',
+        22: f"=G{a}",
+        23: f"=B{a}",
+        24: f'=IFERROR(G{a}/C{a},"")',
+    }
+    for item in c["ratios"]:
+        r = at(item["row"])
+        ws.cell(row=r, column=1, value=item["label"])
+        ws.cell(row=r, column=2, value=formulas.get(item["row"], item["value"]))
+        if item["annotation"]:
+            ws.cell(row=r, column=3, value=item["annotation"])
+    ws.cell(row=at(12), column=4, value="Rollrate analysis use the monthly data > ")
+    ws.cell(row=at(12), column=5, value="rcl_rollrate_ecl_3.xlsx")
+    row = at(24) + 3
+    for note in c["warnings"]:
+        ws.cell(row=row, column=1, value=note)
+        row += 1
+
+    tm = wb.create_sheet("Transition Matrices")
+    row = _write_frame(tm, c["balances"], 1, "1. Balances by bucket")
+    row = _write_frame(tm, c["rollRates"], row, "2. Roll rates")
+    row = _write_frame(tm, c["lossFactors"], row, "3. Cumulative loss factor")
+    row = _write_frame(tm, c["ecl"], row, "4. Expected credit loss", index=False)
+    summary = pd.Series(c["eclSummary"], name="Value").to_frame()
+    summary.index.name = "Measure"
+    row = _write_frame(tm, summary, row)
+    row = _write_frame(tm, c["checks"], row, "5. Data quality")
+    row = _write_frame(tm, c["distribution"], row, "6. Point-in-time loss rate - distribution")
+    _write_frame(tm, c["pit"], row, "7. Point-in-time loss rate - by month", index=False)
+
+    inputs_ws = wb.create_sheet("Inputs")
+    inputs = pd.Series(general_inputs, name="Value").to_frame()
+    inputs.index.name = "Input"
+    _write_frame(inputs_ws, inputs, 1)
+
+    buf = io.BytesIO()
+    wb.save(buf)
     return buf.getvalue()

@@ -59,3 +59,26 @@ def test_asset_view_counts_statuses_per_asset(processed):
     assert av["open_count"].tolist() == [1, 0]
     assert av["closed_count"].tolist() == [1, 1]
     assert av["paidoff_count"].tolist() == [0, 0]
+
+
+def test_mob_rounds_halves_up_like_excel_round():
+    """Asset View MOB = ROUND(days/30, 0). Excel rounds x.5 away from zero;
+    pandas' default half-to-even put 75 days (2.5 months) in bucket 2."""
+    ext = T("2025-01-01")
+    raw = pd.DataFrame(
+        {
+            "asset_id": ["A", "B", "C"],
+            "start_date": [ext - pd.Timedelta(days=d) for d in (45, 75, 74)],
+            "expected_end_date": [ext] * 3,
+            "closed_date": [pd.NaT] * 3,
+            "status": ["Open"] * 3,
+            "cost_of_asset": [100.0] * 3,
+            "total_contract_value": [100.0] * 3,
+            "amount_expected_to_date": [10.0] * 3,
+            "total_paid": [10.0] * 3,
+        }
+    )
+    gi = GeneralInputs(raw, extraction_date=ext).as_calc_dict()
+    df, _ = apply_fallbacks(raw, gi["useful_life_years"], gi["extraction_date"])
+    av = build_asset_view(process_data_input(df, gi), gi).set_index("asset_id")
+    assert av["mob"].tolist() == [2, 3, 2]

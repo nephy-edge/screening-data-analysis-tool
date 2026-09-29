@@ -120,6 +120,7 @@ def _save_snapshot(
     chat_history: list | None = None,
     label: str | None = None,
     analysis_result: dict | None = None,
+    ingest_info: dict | None = None,
     extra: dict | None = None,
 ) -> None:
     upload_hash = hashlib.sha256(upload_bytes).hexdigest()
@@ -147,6 +148,9 @@ def _save_snapshot(
         # S3, re-parsing the whole file, and re-running the engine - see
         # web_api/main.py's _restore_payload.
         "analysis_result": analysis_result,
+        # The parsed upload's columns/rowCount/preview/sheet, so a lazy load
+        # can hand back a usable ingest without downloading the data.
+        "ingest_info": ingest_info,
         **snapshot_fields(
             upload_name=upload_name,
             mapping=mapping,
@@ -162,10 +166,19 @@ def _save_snapshot(
     _put_json(meta_key, payload)
 
 
-def _load_snapshot(meta_key: str, data_key: str) -> dict | None:
+def _load_snapshot(meta_key: str, data_key: str, lazy_data: bool = False) -> dict | None:
+    """`lazy_data=True` skips downloading the upload: the state gets a
+    `load_upload_bytes()` callable instead of `upload_bytes`, so a caller
+    that can render from `analysis_result` pays for the data only if needed."""
     meta = _get_json(meta_key)
     if meta is None:
         return None
+    if lazy_data:
+        state = dict(meta)
+        state["load_upload_bytes"] = lambda: (
+            _client().get_object(Bucket=_bucket(), Key=data_key)["Body"].read()
+        )
+        return state
     try:
         upload_bytes = _client().get_object(Bucket=_bucket(), Key=data_key)["Body"].read()
     except Exception:
@@ -221,10 +234,12 @@ def save_profile(user_id: str, session_id: str, **snapshot_kwargs) -> None:
     _save_snapshot(f"{prefix}{safe_session}.json", f"{prefix}{safe_session}.bin", **snapshot_kwargs)
 
 
-def load_profile(user_id: str, session_id: str) -> dict | None:
+def load_profile(user_id: str, session_id: str, lazy_data: bool = False) -> dict | None:
     prefix = _user_sessions_prefix(user_id)
     safe_session = _safe_session_id(session_id)
-    return _load_snapshot(f"{prefix}{safe_session}.json", f"{prefix}{safe_session}.bin")
+    return _load_snapshot(
+        f"{prefix}{safe_session}.json", f"{prefix}{safe_session}.bin", lazy_data=lazy_data
+    )
 
 
 def create_share(shared_by: str, **snapshot_kwargs) -> str:
@@ -243,9 +258,9 @@ def create_share(shared_by: str, **snapshot_kwargs) -> str:
     return token
 
 
-def load_share(token: str) -> dict | None:
+def load_share(token: str, lazy_data: bool = False) -> dict | None:
     safe_token = re.sub(r"[^A-Za-z0-9_-]", "", token or "")
     if not safe_token:
         return None
     prefix = _share_prefix(safe_token)
-    return _load_snapshot(f"{prefix}state.json", f"{prefix}upload.bin")
+    return _load_snapshot(f"{prefix}state.json", f"{prefix}upload.bin", lazy_data=lazy_data)

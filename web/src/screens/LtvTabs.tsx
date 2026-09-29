@@ -29,12 +29,25 @@ const fmt = (v: unknown, digits = 0): string => {
   return n === null ? 'n/a' : n.toFixed(digits);
 };
 
-/** Rows for the "Loss per Cohort" chart - mirrors AnalysisSession's toChartRows. */
-function lossChartRows(records: Array<Record<string, unknown>> | undefined) {
-  return (records ?? []).map((r) => ({
-    cohort: String(r['Cohort'] ?? '').slice(0, 7),
-    lossRate: num(r['Loss Rate']),
-  }));
+/** True when a "YYYY-MM..." cohort falls inside the LTV cohort range (either
+ * end open when null/absent). "YYYY-MM" strings compare correctly as text. */
+export function inLtvCohortRange(cohort: string, range?: { from: string | null; to: string | null }) {
+  const month = cohort.slice(0, 7);
+  return (!range?.from || month >= range.from) && (!range?.to || month <= range.to);
+}
+
+/** Rows for the "Loss per Cohort" chart - mirrors AnalysisSession's toChartRows,
+ * limited to the LTV cohort range so the chart shows what the 95th %ile uses. */
+function lossChartRows(
+  records: Array<Record<string, unknown>> | undefined,
+  range?: { from: string | null; to: string | null },
+) {
+  return (records ?? [])
+    .map((r) => ({
+      cohort: String(r['Cohort'] ?? '').slice(0, 7),
+      lossRate: num(r['Loss Rate']),
+    }))
+    .filter((r) => inLtvCohortRange(r.cohort, range));
 }
 
 /** A small Metric | Value table with a muted help line under each label -
@@ -99,11 +112,13 @@ function FxChart({ response, country }: { response: LtvCalculatorResponse; count
 function LossPerCohortChart({
   response,
   chartRecords,
+  range,
 }: {
   response: LtvCalculatorResponse;
   chartRecords?: Array<Record<string, unknown>>;
+  range?: { from: string | null; to: string | null };
 }) {
-  const rows = lossChartRows(chartRecords);
+  const rows = lossChartRows(chartRecords, range);
   const green = response.greenLoss;
   if (rows.length === 0) return null;
   return (
@@ -148,22 +163,34 @@ export function LendingLtvTab() {
   const { state, dispatch } = useAppStore();
   const ue = state.analysisResponse?.ue as Record<string, unknown> | undefined;
   const ltv = state.analysisResponse?.ltv as Record<string, unknown> | undefined;
-  // ltvInterest = Average Interest % limited to the General Inputs LTV
-  // cohort range; older saved sessions predate it, so fall back.
-  const ltvInterest = state.analysisResponse?.ltvInterest;
-  const range = state.analysisResponse?.ltvInterestRange;
-  // Only claim the range when the backend actually returned a ranged figure.
-  const interestRangeNote =
-    ltvInterest != null && range && (range.from || range.to)
+  // ltvInterest / ltvLoss = the interest and 95th %ile loss limited to the
+  // General Inputs LTV cohort range. A key that is present but null means the
+  // range held no data (n/a, not the whole book); only sessions saved before
+  // these keys existed fall back to the whole-book figures.
+  const resp = state.analysisResponse;
+  const range = resp?.ltvCohortRange;
+  const rangeNote =
+    range && (range.from || range.to)
       ? ` - cohorts ${range.from || 'first'} to ${range.to || 'latest'} only (General Inputs)`
       : '';
-  const greenInterest = ltvInterest != null ? num(ltvInterest) : ue ? num(ue['Average Interest %']) : null;
+  const greenInterest =
+    resp && resp.ltvInterest !== undefined ? num(resp.ltvInterest) : ue ? num(ue['Average Interest %']) : null;
   const greenTermDays = ltv ? num(ltv['Average Term']) : null;
-  const greenLoss = ltv ? num(ltv['95th Percentile Losses']) : null;
-
   // In the store, not useState: leaving the tab unmounts it, which used to
   // reset every dropdown to its default.
-  const { dataSource, country, macroFx, segmentation, hedgeRate, rolledHedge } = state.ltvInputs;
+  const { dataSource, country, macroFx, segmentation, hedgeRate, rolledHedge, includeUnfinished } = state.ltvInputs;
+  // The checkbox swaps in the loss counted over every loan in each cohort,
+  // finished or not; off, it's the template's matured-only (T+3) loss.
+  const allLoansAvailable = resp?.ltvLossAllLoans !== undefined;
+  const useAllLoans = includeUnfinished && allLoansAvailable;
+  const greenLoss = useAllLoans
+    ? num(resp!.ltvLossAllLoans)
+    : resp && resp.ltvLoss !== undefined
+      ? num(resp.ltvLoss)
+      : ltv
+        ? num(ltv['95th Percentile Losses'])
+        : null;
+  const lossBasisNote = useAllLoans ? ', counting every loan in each cohort (finished or not)' : ', matured loans only';
   const set = (inputs: Partial<typeof state.ltvInputs>) => dispatch({ type: 'setLtvInputs', inputs });
   const setDataSource = (dataSource: string) => set({ dataSource });
   const setCountry = (country: string) => set({ country });
@@ -171,6 +198,7 @@ export function LendingLtvTab() {
   const setSegmentation = (segmentation: string) => set({ segmentation });
   const setHedgeRate = (hedgeRate: string) => set({ hedgeRate });
   const setRolledHedge = (rolledHedge: string) => set({ rolledHedge });
+  const setIncludeUnfinished = (includeUnfinished: boolean) => set({ includeUnfinished });
   const [response, setResponse] = useState<LtvCalculatorResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -277,6 +305,23 @@ export function LendingLtvTab() {
               ))}
             </Select>
           </div>
+          <div className="sd-field">
+            <span>Loss rate basis</span>
+            <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={!!includeUnfinished}
+                disabled={!allLoansAvailable}
+                onChange={(e) => setIncludeUnfinished(e.target.checked)}
+              />
+              Include unfinished loans
+            </label>
+            <span className="sd-muted">
+              {allLoansAvailable
+                ? 'Counts every loan in each cohort, finished or not (Salmon-sheet basis). Recent cohorts will look like heavy losses unless the LTV cohort range excludes them.'
+                : 'Re-run the analysis to enable this option.'}
+            </span>
+          </div>
         </div>
       ) : null}
 
@@ -326,18 +371,22 @@ export function LendingLtvTab() {
           <h3 className="sd-h2" style={{ fontSize: '1rem', marginTop: 12 }}>Credit Stress Backup</h3>
           <SnapshotTable
             rows={[
-              { label: 'Product Interest Rate', value: fmtPct(response.greenInterest), help: `Weighted average gross interest rate, pulled from this analysis${interestRangeNote}.` },
+              { label: 'Product Interest Rate', value: fmtPct(response.greenInterest), help: `Weighted average gross interest rate, pulled from this analysis${rangeNote}.` },
               {
                 label: '95th %ile Loss',
                 value: fmtPct(response.greenLoss),
-                help: "95th percentile loss rate at T+3, pulled from this analysis - or, when that's n/a for this portfolio, the Min Sector Loss Rate used as a fallback (see the note above).",
+                help: `95th percentile loss rate, pulled from this analysis${rangeNote}${lossBasisNote} - or, when that's n/a, the Min Sector Loss Rate used as a fallback (see the note above).`,
               },
               { label: 'Stress Loss', value: fmtPct(result.stress_loss_rate), help: `Loss rate multiplied by the credit stress factor (${result.credit_stress_factor}x).` },
               { label: 'Min Sector Loss Rate', value: fmtPct(result.minimum_stress_loss), help: 'Sector-minimum stress loss floor for the selected segmentation and data source.' },
               { label: 'Selected Stress Loss', value: fmtPct(result.selected_stress_loss), help: 'Max(stress loss rate, minimum stress loss floor).' },
             ]}
           />
-          <LossPerCohortChart response={response} chartRecords={state.analysisResponse?.chart} />
+          <LossPerCohortChart
+            response={response}
+            chartRecords={useAllLoans ? resp?.cohortLossesAllLoans : state.analysisResponse?.chart}
+            range={range}
+          />
         </>
       ) : null}
     </div>

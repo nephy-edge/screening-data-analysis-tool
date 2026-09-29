@@ -102,6 +102,21 @@ hedge_cost_pct = 3.0
 fx_stress_factor = 1.2
 credit_stress_factor = 1.7
 
+# Revolving Lending (RCL) model - General Inputs defaults, from
+# rcl_rollrate_ecl_3.xlsx ('Roll Rate ECL' B5:B8, 'Loss Rate LTV' B9:B12) and
+# the Revolving Lending template's Outputs tab (2-month ratio window).
+[revolving_defaults]
+lgd = 1.0
+roll_rate_window = "T12"          # T3 / T6 / T12 / ALL
+ratio_window_months = 2           # months (ending at the as-of month) the Outputs averages use
+min_outstanding_in_sample = 1000000000.0
+stress_percentile = 0.95
+denominator_lag_months = 5
+lagged_blend_weight = 0.5
+loss_rate_basis = "Blended"       # Naive / Blended / Lagged - feeds Outputs Loss Rate / 95th %ile
+balance_tolerance = 1.0           # buckets must sum to PRINCIPAL_OUTSTANDING within this
+unexplained_warning_pct = 0.05    # warn when UNEXPLAINED / outstanding exceeds this
+
 # Raw-header spellings that should auto-map to each template field, keyed by
 # model ("lending" / "rental") so an alias never leaks across models (e.g.
 # Lending's "start date" -> "Disbursement Date" must not also claim a Rental

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useAppStore } from '../state/AppStore';
 import { Button, Alert, Select, Table, type TableColumn } from '../components/ui';
 import { suggestMapping, deriveColumn, type DerivedColumn } from '../api/engine';
-import { TEMPLATE_FIELDS, RENTAL_TEMPLATE_FIELDS } from '../data/template';
+import { TEMPLATE_FIELDS, RENTAL_TEMPLATE_FIELDS, REVOLVING_TEMPLATE_FIELDS } from '../data/template';
 import type { ModelKey } from '../state/types';
 
 interface MappingProps {
@@ -73,7 +73,8 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
   const [deriveNote, setDeriveNote] = useState<string | null>(null);
 
   const isRental = modelKey === 'rental';
-  const fields = isRental ? RENTAL_TEMPLATE_FIELDS : TEMPLATE_FIELDS;
+  const isRevolving = modelKey === 'revolving';
+  const fields = isRevolving ? REVOLVING_TEMPLATE_FIELDS : isRental ? RENTAL_TEMPLATE_FIELDS : TEMPLATE_FIELDS;
 
   // Instant, offline baseline: normalised-name matching against the real
   // file's columns (see suggestSource above). Always applied first so the
@@ -81,7 +82,9 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
   const applyHeuristic = () => {
     let count = 0;
     for (const field of fields) {
-      const src = suggestSource(field.label, columns);
+      // Revolving source headers are the field keys themselves (e.g. BAL_NEW).
+      const src =
+        suggestSource(field.label, columns) ?? (isRevolving ? suggestSource(field.key, columns) : undefined);
       if (src) {
         dispatch({ type: 'setMapping', fieldKey: field.key, sourceColumn: src });
         count += 1;

@@ -18,6 +18,7 @@ type Step = 'input' | 'mapping' | 'inputs' | 'analysis' | 'jsonUpload';
 const MODEL_LABELS: Record<ModelKey, string> = {
   lending: 'Lending',
   rental: 'Rental & Subscription',
+  revolving: 'Revolving Lending',
 };
 
 function modelTitle(model: ModelKey, step: Step): { title: string; sub: string } {
@@ -28,7 +29,9 @@ function modelTitle(model: ModelKey, step: Step): { title: string; sub: string }
       sub:
         model === 'lending'
           ? 'Load a loan tape, map columns to the template, and review cohort-level LTV / loss-rate results.'
-          : 'Load contract-level lease/rental data, map your columns to the Data Input template, and review asset-cohort LTV, churn, unit economics and TS covenants.',
+          : model === 'revolving'
+            ? 'Load a monthly credit-line report (one row per month), map its columns, and review the Outputs ratios and roll-rate transition matrices with ECL.'
+            : 'Load contract-level lease/rental data, map your columns to the Data Input template, and review asset-cohort LTV, churn, unit economics and TS covenants.',
     };
   }
   if (step === 'mapping')
@@ -37,7 +40,13 @@ function modelTitle(model: ModelKey, step: Step): { title: string; sub: string }
     return { title: 'General Inputs', sub: `Set the conventions the ${base} analysis engine uses.` };
   if (step === 'jsonUpload')
     return { title: 'Upload analysis JSON', sub: 'View a pre-computed analysis result without re-running the engine.' };
-  return { title: `${base} analysis results`, sub: `Cohort-level outputs computed for this ${base} portfolio.` };
+  return {
+    title: `${base} analysis results`,
+    sub:
+      model === 'revolving'
+        ? 'Outputs ratios and roll-rate transition matrices computed from the monthly report.'
+        : `Cohort-level outputs computed for this ${base} portfolio.`,
+  };
 }
 
 function Shell() {
@@ -107,6 +116,7 @@ function Shell() {
             >
               <option value="lending">Lending</option>
               <option value="rental">Rental &amp; Subscription</option>
+              <option value="revolving">Revolving Lending</option>
             </Select>
           </div>
         )}

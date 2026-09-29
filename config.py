@@ -269,6 +269,18 @@ _DEFAULTS = {
         "fx_stress_factor": 1.2,
         "credit_stress_factor": 1.7,
     },
+    "revolving_defaults": {
+        "lgd": 1.0,
+        "roll_rate_window": "T12",
+        "ratio_window_months": 2,
+        "min_outstanding_in_sample": 1_000_000_000.0,
+        "stress_percentile": 0.95,
+        "denominator_lag_months": 5,
+        "lagged_blend_weight": 0.5,
+        "loss_rate_basis": "Blended",
+        "balance_tolerance": 1.0,
+        "unexplained_warning_pct": 0.05,
+    },
     "field_aliases": {
         "lending": {
             "Loan ID": [
@@ -399,6 +411,7 @@ FX = CONFIG["fx"]
 GENERAL_INPUTS_DEFAULTS = CONFIG["general_inputs_defaults"]
 UE_MODEL_COST_DEFAULTS = CONFIG["ue_model_cost_defaults"]
 CREDIT_STRESS = CONFIG["credit_stress"]
+REVOLVING_DEFAULTS = CONFIG["revolving_defaults"]
 FIELD_ALIASES = CONFIG["field_aliases"]
 
 
