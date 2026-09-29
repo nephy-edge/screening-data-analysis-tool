@@ -15,7 +15,20 @@ numpy-financial==1.0.0
 requests==2.34.2
 certifi==2026.7.22
 boto3==1.43.96
+# Required by st.login() / st.user (Streamlit's native OIDC). Streamlit needs
+# Authlib>=1.3.2 but does not depend on it, so it has to be listed explicitly.
+#
+# DO NOT DOWNGRADE BELOW 1.6.12. Authlib is what verifies the Cognito ID token
+# signature, and everything below that carries open advisories against exactly
+# that job -- including a CRITICAL JWS/JWK header-injection signature-
+# verification bypass and a fail-open OIDC hash binding flaw (both patched in
+# 1.6.9), plus an open redirect patched in 1.6.12. A vulnerable Authlib means
+# the login gate can be bypassed, not merely that a library is out of date.
 Authlib==1.8.0
+# Required by Authlib, which does NOT declare it. st.login's import chain
+# reaches authlib.integrations.httpx_client and does a bare `import httpx`, so
+# without this the login route dies with ModuleNotFoundError -- a 500 only at
+# the moment a user clicks Log in, never at build or start-up.
 httpx==0.28.1
 # >= 1.2.2 clears a symlink-following flaw in set_key (arbitrary file overwrite
 # via the cross-device rename fallback). This app only calls load_dotenv(), so

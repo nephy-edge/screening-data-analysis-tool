@@ -24,7 +24,9 @@ jobs:
         run: ruff format --check .
 
       - name: Run tests
-        run: pytest
+        # `python -m` puts the project root on sys.path, which the tests need
+        # to import web_api; the bare `pytest` entry point does not.
+        run: python -m pytest
 
   frontend-build:
     runs-on: ubuntu-latest
