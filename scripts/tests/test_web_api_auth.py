@@ -279,8 +279,14 @@ def test_restoring_a_saved_run_skips_the_size_cap(monkeypatch):
 
 
 def test_oauth_states_are_capped_and_expire(client, monkeypatch):
+    import google_oauth
+
     monkeypatch.setattr(m, "_get_google_client_id", lambda: "id")
     monkeypatch.setattr(m, "_get_google_client_secret", lambda: "secret")
+    # _google_auth_url reads the client id through google_oauth's own global,
+    # not web_api.main's imported name - without this it is None wherever
+    # GOOGLE_CLIENT_ID is unset (CI), and quote(None) raises.
+    monkeypatch.setattr(google_oauth, "_get_google_client_id", lambda: "id")
     monkeypatch.setattr(m, "_OAUTH_STATE_MAX", 3)
     m._PENDING_GOOGLE_OAUTH_STATES.clear()
     for _ in range(10):
