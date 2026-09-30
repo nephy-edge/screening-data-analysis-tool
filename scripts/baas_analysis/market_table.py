@@ -17,8 +17,16 @@ _TRUE = {"1", "1.0", "true", "yes", "y"}
 
 
 def template_frame(markets: list[BaasMarket]) -> pd.DataFrame:
-    """The upload template: every field as a column, one row per market."""
-    return pd.DataFrame([asdict(m) for m in markets], columns=ALL_FIELDS)
+    """The upload template, one row per market: the required fields plus any
+    optional field a market sets away from its default. The others are left
+    out; a user can still add one as a column, and a missing one defaults."""
+    defaults = BaasMarket.__dataclass_fields__
+    cols = [
+        f
+        for f in ALL_FIELDS
+        if f in REQUIRED_FIELDS or any(getattr(m, f) != defaults[f].default for m in markets)
+    ]
+    return pd.DataFrame([asdict(m) for m in markets], columns=cols)
 
 
 def _market_from_row(row: dict) -> tuple[BaasMarket | None, list[str]]:

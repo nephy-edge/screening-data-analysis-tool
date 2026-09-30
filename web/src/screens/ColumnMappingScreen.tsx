@@ -197,6 +197,7 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
     const current = mapped.find((m) => m.fieldKey === field.key)?.sourceColumn ?? '';
     return { ...field, current };
   });
+  const optionalRows = rows.filter((r) => !r.required);
 
   const cols: TableColumn<(typeof rows)[number]>[] = [
     {
@@ -369,7 +370,26 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
         {deriveNote ? <Alert tone="info">{deriveNote}</Alert> : null}
       </div>
 
-      <Table columns={cols} rows={rows} />
+      <div style={{ padding: '12px', border: '1px solid #e5e7eb', borderRadius: 8 }}>
+        <h3 className="sd-h2" style={{ marginTop: 0 }}>
+          Required fields
+        </h3>
+        <Table columns={cols} rows={rows.filter((r) => r.required)} />
+      </div>
+      {optionalRows.length > 0 ? (
+        <details style={{ marginTop: 14, padding: '12px', border: '1px solid #e5e7eb', borderRadius: 8 }}>
+          <summary style={{ cursor: 'pointer' }}>
+            <strong>Optional fields</strong>{' '}
+            <span className="sd-muted">
+              ({optionalRows.filter((r) => r.current).length}/{optionalRows.length} mapped; blank fields use
+              their defaults)
+            </span>
+          </summary>
+          <div style={{ marginTop: 12 }}>
+            <Table columns={cols} rows={optionalRows} />
+          </div>
+        </details>
+      ) : null}
       <div className="sd-actions" style={{ marginTop: 16 }}>
         <Button variant="ghost" onClick={() => dispatch({ type: 'setFile', file: null })}>
           ← Back

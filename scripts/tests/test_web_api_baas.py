@@ -46,6 +46,14 @@ def test_template_round_trips_to_the_workbook_numbers():
     assert set(body["cashflows"][0]) == {"Month", "Date", *by_name}
 
 
+def test_template_leaves_out_optional_fields_every_market_defaults():
+    cols = set(_template_rows(_client())[0])
+    assert set(m.BAAS_REQUIRED_FIELDS) <= cols
+    assert "wht_pct" in cols  # seeds set it to 15
+    assert "signup_fee" not in cols and "commission_pct" not in cols  # all at default
+    assert len(cols) == 27  # 15 required + 12 the seeds set
+
+
 def test_bad_market_is_reported_and_the_rest_still_run():
     client = _client()
     rows = _template_rows(client)

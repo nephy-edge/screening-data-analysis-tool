@@ -31,16 +31,16 @@ class BaasMarket:
     pack_capacity_kwh: float
     lifetime_months: float  # months of revenue generation
     batteries_per_swap: float
-    batteries_in_bike: float
     batteries_per_bike: float  # incl. spares
     station_capex_usd: float  # per bike deployed
-    station_life_years: float
     swaps_per_day: float
     electricity_lcy_per_kwh: float
     station_rent_usd_month: float  # per bike
     interest_rate_pct: float
     facility_tenor_months: float
     facility_grace_months: float = 0.0
+    batteries_in_bike: float = 0.0  # per swap unit; 0 = same as batteries_per_swap
+    station_life_years: float = 7.0
     upfront_fee_pct: float = 0.0
     wht_pct: float = 0.0
     hedging_pct: float = 0.0
@@ -155,7 +155,7 @@ def run_market(m: BaasMarket, valuation_date: datetime.date) -> dict:
 
     # Revenue per day. NB: like the workbook, salvage and insurance divide the
     # USD pack cost by FX.
-    pct_in_vehicle = m.batteries_in_bike / m.batteries_per_bike
+    pct_in_vehicle = (m.batteries_in_bike or m.batteries_per_swap) / m.batteries_per_bike
     usage = m.swaps_per_day * m.price_per_swap / fx
     signup = (
         (life // m.signup_renewal_months + 1) * m.signup_fee / fx / (life * 30) * pct_in_vehicle
