@@ -7,6 +7,7 @@ import {
   RevolvingBacktestStressTab,
   RevolvingFacilityTab,
   RevolvingOutputsTab,
+  RevolvingSummaryTab,
   RevolvingTransitionTab,
 } from './RevolvingTabs';
 import {
@@ -1763,6 +1764,7 @@ export function AnalysisSession({
     { id: 'ai', label: 'Ask AI' },
   ];
   const revolvingTabs = [
+    { id: 'revSummary', label: 'Summary' },
     { id: 'outputs', label: 'Outputs' },
     { id: 'transition', label: 'Transition Matrices' },
     { id: 'backtest', label: 'Backtest & Stress' },
@@ -1796,6 +1798,7 @@ export function AnalysisSession({
       {tab === 'general' && <GeneralAnalysisTab />}
       {tab === 'viz' && <VizTab />}
       {tab === 'ai' && <AiTab />}
+      {tab === 'revSummary' && <RevolvingSummaryTab />}
       {tab === 'outputs' && <RevolvingOutputsTab />}
       {tab === 'transition' && <RevolvingTransitionTab />}
       {tab === 'backtest' && <RevolvingBacktestStressTab />}

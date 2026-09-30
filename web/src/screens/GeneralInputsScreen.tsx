@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../state/AppStore';
-import { Button, Input, Select, Card, Alert, Table } from '../components/ui';
+import { Button, Input, Select, Card, Alert, Table, HelpTip } from '../components/ui';
 import { CURRENCY_CODES, CURRENCY_NAMES } from '../data/currencies';
 import {
   getRevolvingOptions,
@@ -137,9 +137,15 @@ function RevolvingInputsSection() {
     set({ scenarios: ri.scenarios.map((sc, j) => (j === i ? { ...sc, ...patch } : sc)) });
   const setCovenant = (i: number, patch: Partial<RevolvingCovenant>) =>
     set({ covenants: ri.covenants.map((cv, j) => (j === i ? { ...cv, ...patch } : cv)) });
-  const numberField = (label: string, key: keyof RevolvingGeneralInputs, step = 'any') => (
+  const label = (text: string, help: string) => (
+    <span>
+      {text}
+      <HelpTip text={help} />
+    </span>
+  );
+  const numberField = (text: string, help: string, key: keyof RevolvingGeneralInputs, step = 'any') => (
     <div className="sd-field">
-      <span>{label}</span>
+      {label(text, help)}
       <Input
         type="number"
         step={step}
@@ -154,11 +160,11 @@ function RevolvingInputsSection() {
       <h2 className="sd-h2">Roll-rate &amp; ECL</h2>
       <Card className="sd-grid sd-grid--2">
         <div className="sd-field">
-          <span>As-of month (blank = last month in the data)</span>
+          {label('As-of month (blank = last month in the data)', 'The month the analysis is struck at. Everything uses only months up to this one, with no look-ahead. Leave blank to use the last month in the data.')}
           <Input type="month" value={ri.asOfMonth ?? ''} onChange={(e) => set({ asOfMonth: e.target.value || null })} />
         </div>
         <div className="sd-field">
-          <span>Roll-rate averaging window</span>
+          {label('Roll-rate averaging window', 'How many recent months the roll rates are averaged over (T3/T6/T12 = last 3/6/12 months, ALL = every month). The selected average drives the loss factor and the whole ECL.')}
           <Select
             value={ri.rollRateWindow}
             onChange={(e) => set({ rollRateWindow: e.target.value })}
@@ -170,13 +176,13 @@ function RevolvingInputsSection() {
             ))}
           </Select>
         </div>
-        {numberField('LGD (loss given default)', 'lgd')}
-        {numberField('Outputs ratio window (months, ending at as-of)', 'ratioWindowMonths', '1')}
+        {numberField('LGD (loss given default)', 'Share of a defaulted balance that is lost (0-1). Multiplies the roll-rate loss factor into ECL and the loss rate. 1 = no recoveries.', 'lgd')}
+        {numberField('Outputs ratio window (months, ending at as-of)', 'How many months, ending at the as-of month, the Outputs ratios average over (e.g. Interest Rate (m) = Σ interest ÷ Σ outstanding over the window).', 'ratioWindowMonths', '1')}
       </Card>
       <h2 className="sd-h2">Loss rate (feeds Outputs Loss Rate / 95th %ile)</h2>
       <Card className="sd-grid sd-grid--2">
         <div className="sd-field">
-          <span>Loss-rate basis</span>
+          {label('Loss-rate basis', 'Denominator for the point-in-time loss rate. Naive divides by all principal issued to date, so it is a lower bound. Lagged divides by principal issued as at the lag below. Blended mixes the two using the blend weight.')}
           <Select
             value={ri.lossRateBasis}
             onChange={(e) => set({ lossRateBasis: e.target.value as RevolvingGeneralInputs['lossRateBasis'] })}
@@ -188,16 +194,16 @@ function RevolvingInputsSection() {
             ))}
           </Select>
         </div>
-        {numberField('Stress percentile (0-1)', 'stressPercentile')}
-        {numberField('Minimum outstanding to be in sample', 'minOutstandingInSample')}
-        {numberField('Denominator lag (months)', 'denominatorLagMonths', '1')}
-        {numberField('Blend weight on the lagged rate (0-1)', 'laggedBlendWeight')}
+        {numberField('Stress percentile (0-1)', 'Percentile of the in-sample monthly loss rates used as the stressed loss rate (Outputs 95th %ile). That rate sets the maximum advance rate.', 'stressPercentile')}
+        {numberField('Minimum outstanding to be in sample', 'A month only counts in the loss-rate distribution when principal outstanding is at least this much. It keeps small, early months out of the sample.', 'minOutstandingInSample')}
+        {numberField('Denominator lag (months)', 'For the Lagged loss rate: divide by cumulative principal issued this many months earlier, so recent lending that has not had time to default does not dilute the rate.', 'denominatorLagMonths', '1')}
+        {numberField('Blend weight on the lagged rate (0-1)', 'For the Blended loss rate: weight on the Lagged rate. The rest goes on the Naive rate (0.5 = an equal mix).', 'laggedBlendWeight')}
       </Card>
 
       <h2 className="sd-h2">LGD &amp; unit economics</h2>
       <Card className="sd-grid sd-grid--2">
         <div className="sd-field">
-          <span>LGD basis</span>
+          {label('LGD basis', 'Where LGD comes from. Input uses the LGD value above. Recoveries derives it as 1 − recoveries ÷ principal written off to date, which needs the recoveries column mapped.')}
           <Select
             value={ri.lgdBasis}
             onChange={(e) => set({ lgdBasis: e.target.value as RevolvingGeneralInputs['lgdBasis'] })}
@@ -206,16 +212,16 @@ function RevolvingInputsSection() {
             <option value="Recoveries">Derived from the recoveries column</option>
           </Select>
         </div>
-        {numberField('Cost of funds (% p.a., 0-1)', 'costOfFundsPct')}
-        {numberField('Operating costs (% p.a., 0-1)', 'opexPct')}
-        {numberField('Advance-rate haircut (0-1)', 'advanceHaircut')}
+        {numberField('Cost of funds (% p.a., 0-1)', 'Annual funding cost as a share of outstanding (0.13 = 13%). Deducted in unit economics to get net yield.', 'costOfFundsPct')}
+        {numberField('Operating costs (% p.a., 0-1)', 'Annual operating cost as a share of outstanding (0.02 = 2%). Deducted in unit economics to get net yield.', 'opexPct')}
+        {numberField('Advance-rate haircut (0-1)', 'Extra cushion taken off the advance rate: max advance rate = 1 − stress loss rate − haircut.', 'advanceHaircut')}
       </Card>
 
       <h2 className="sd-h2">Backtest &amp; early warning</h2>
       <Card className="sd-grid sd-grid--2">
-        {numberField('Backtest: months of history before the first test', 'backtestMinHistoryMonths', '1')}
-        {numberField('Early warning: lookback (months)', 'earlyWarningLookbackMonths', '1')}
-        {numberField('Early warning: flag when worse by (0-1, relative)', 'earlyWarningThreshold')}
+        {numberField('Backtest: months of history before the first test', 'The backtest forecasts losses using only data available at each month and compares them with what actually happened. This many months of history are needed before the first test month.', 'backtestMinHistoryMonths', '1')}
+        {numberField('Early warning: lookback (months)', 'Each early-warning metric at the as-of month is compared with its average over this many preceding months.', 'earlyWarningLookbackMonths', '1')}
+        {numberField('Early warning: flag when worse by (0-1, relative)', 'Flag a metric when it is this much worse than its lookback average, in relative terms (0.2 = 20% worse).', 'earlyWarningThreshold')}
       </Card>
 
       <h2 className="sd-h2">Stress scenarios</h2>
@@ -224,12 +230,12 @@ function RevolvingInputsSection() {
         columns={[
           {
             key: 'name',
-            header: 'Scenario',
+            header: <>Scenario<HelpTip text="Name shown on the Backtest & Stress and Summary tabs." /></>,
             render: (r) => <Input value={r.name} onChange={(e) => setScenario(r.i, { name: e.target.value })} />,
           },
           {
             key: 'roll',
-            header: 'Roll-rate multiplier',
+            header: <>Roll-rate multiplier<HelpTip text="Scales the selected roll rates in this scenario (1.25 = 25% more balance rolls to the next bucket), capped at the configured stress cap (100% by default)." /></>,
             render: (r) => (
               <Input
                 type="number"
@@ -241,7 +247,7 @@ function RevolvingInputsSection() {
           },
           {
             key: 'lgd',
-            header: 'LGD multiplier',
+            header: <>LGD multiplier<HelpTip text="Scales LGD in this scenario (1.1 = 10% higher), capped at 100%." /></>,
             render: (r) => (
               <Input
                 type="number"
@@ -278,7 +284,7 @@ function RevolvingInputsSection() {
         columns={[
           {
             key: 'metric',
-            header: 'Metric',
+            header: <>Metric<HelpTip text="The figure the covenant tests, as of the as-of month." /></>,
             render: (r) => (
               <Select value={r.metric} onChange={(e) => setCovenant(r.i, { metric: e.target.value })}>
                 {(metrics.length ? metrics : [{ key: r.metric, label: r.metric }]).map((m) => (
@@ -291,7 +297,7 @@ function RevolvingInputsSection() {
           },
           {
             key: 'op',
-            header: 'Test',
+            header: <>Test<HelpTip text="Whether the metric must stay at or below (≤) or at or above (≥) the limit." /></>,
             render: (r) => (
               <Select
                 value={r.operator}
@@ -304,7 +310,7 @@ function RevolvingInputsSection() {
           },
           {
             key: 'limit',
-            header: 'Limit (0-1 for %)',
+            header: <>Limit (0-1 for %)<HelpTip text="The facility limit. Enter percentages as decimals (0.15 = 15%). A breach shows on the Facility and Summary tabs." /></>,
             render: (r) => (
               <Input
                 type="number"
