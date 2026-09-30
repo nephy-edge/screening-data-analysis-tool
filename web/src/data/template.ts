@@ -67,6 +67,7 @@ export const REVOLVING_TEMPLATE_FIELDS: MappingField[] = [
   { key: 'SOURCE_ROWS', label: 'Source Rows', required: false, description: 'Data-quality: source rows behind the month' },
   { key: 'MONTHS_FILLED_BY_CARRYFWD', label: 'Months Filled by Carry-Forward', required: false, description: 'Data-quality: loan-months carried forward' },
   { key: 'UNEXPLAINED', label: 'Unexplained Movement', required: false, description: 'Data-quality: balance movement not explained by flows' },
+  { key: 'recoveries', label: 'recoveries', required: false, description: 'Cash recovered in the month on written-off balances (optional - lets LGD be derived)' },
 ];
 
 export const DEMO_FILE = {

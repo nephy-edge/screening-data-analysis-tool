@@ -1247,8 +1247,36 @@ def _build_revolving_export_workbook(c, general_inputs):
     row = _write_frame(tm, c["distribution"], row, "6. Point-in-time loss rate - distribution")
     _write_frame(tm, c["pit"], row, "7. Point-in-time loss rate - by month", index=False)
 
+    sm = wb.create_sheet("Standard Metrics")
+    std = pd.DataFrame(c["standardMetrics"])[["label", "value", "formula", "note"]]
+    row = _write_frame(sm, std, 1, "1. Standard-definition metrics at the as-of month", index=False)
+    row = _write_frame(
+        sm, pd.DataFrame(c["unitEconomics"]), row, "2. Unit economics after costs", index=False
+    )
+    ew = pd.DataFrame(c["earlyWarnings"])
+    if not ew.empty:
+        ew = ew[["label", "now", "prior", "change", "flag"]]
+    row = _write_frame(sm, ew, row, "3. Early warnings (vs lookback average)", index=False)
+    _write_frame(sm, c["overTime"], row, "4. Metrics over time")
+
+    bs = wb.create_sheet("Backtest & Stress")
+    summary = pd.Series(c["backtestSummary"], name="Value").to_frame()
+    summary.index.name = "Backtest summary"
+    row = _write_frame(bs, summary, 1, "1. Backtest - forecast vs actual write-offs")
+    row = _write_frame(bs, c["backtest"], row, index=False)
+    _write_frame(bs, pd.DataFrame(c["stress"]), row, "2. Stress scenarios", index=False)
+
+    fac = wb.create_sheet("Facility")
+    adv = pd.Series(c["advance"], name="Value").to_frame()
+    adv.index.name = "Advance rate"
+    row = _write_frame(fac, adv, 1, "1. Advance rate = MAX(0, 1 - stress loss rate - haircut)")
+    _write_frame(fac, pd.DataFrame(c["covenants"]), row, "2. Covenant tests", index=False)
+
     inputs_ws = wb.create_sheet("Inputs")
-    inputs = pd.Series(general_inputs, name="Value").to_frame()
+    inputs = pd.Series(
+        {k: json.dumps(v) if isinstance(v, (list, dict)) else v for k, v in general_inputs.items()},
+        name="Value",
+    ).to_frame()
     inputs.index.name = "Input"
     _write_frame(inputs_ws, inputs, 1)
 

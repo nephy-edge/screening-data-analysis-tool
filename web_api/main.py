@@ -493,6 +493,15 @@ from revolving_analysis.engine import RevolvingInputs
 from revolving_analysis.engine import run as run_revolving
 from revolving_analysis.monthly_input import OPTIONAL_COLUMNS as REVOLVING_OPTIONAL_COLUMNS
 from revolving_analysis.monthly_input import REQUIRED_COLUMNS as REVOLVING_REQUIRED_COLUMNS
+from revolving_analysis.metrics import BY_KEY as REVOLVING_METRICS
+from revolving_analysis.facility import EXTRA_METRICS as _REVOLVING_EXTRA_METRICS
+from revolving_analysis.settings import WINDOW_LENGTHS as REVOLVING_WINDOWS
+
+# Every metric a covenant can test: the catalogue plus the ECL / net-yield figures.
+REVOLVING_COVENANT_METRICS = {
+    **{k: (m.label, m.kind) for k, m in REVOLVING_METRICS.items()},
+    **_REVOLVING_EXTRA_METRICS,
+}
 
 app = FastAPI(
     title="SC Analysis Engine API",
@@ -672,18 +681,57 @@ class RentalAnalyseBody(BaseModel):
     chatHistory: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class RevolvingScenarioBody(BaseModel):
+    name: str
+    rollRateMultiplier: float = Field(..., gt=0)
+    lgdMultiplier: float = Field(..., gt=0)
+
+
+class RevolvingCovenantBody(BaseModel):
+    metric: str = Field(..., description="A revolving metric key, e.g. 'par91_total'.")
+    operator: Literal["<=", ">="]
+    limit: float
+
+
 class RevolvingGeneralInputsBody(BaseModel):
     """Revolving model tunables; defaults from config.toml [revolving_defaults]."""
 
     asOfMonth: str | None = Field(None, description="'YYYY-MM'; None = last month in the data.")
     lgd: float = REVOLVING_DEFAULTS["lgd"]
-    rollRateWindow: Literal["T3", "T6", "T12", "ALL"] = REVOLVING_DEFAULTS["roll_rate_window"]
+    rollRateWindow: str = Field(
+        REVOLVING_DEFAULTS["roll_rate_window"],
+        description="A window name from config.toml [revolving_defaults.roll_rate_windows].",
+    )
     ratioWindowMonths: int = Field(REVOLVING_DEFAULTS["ratio_window_months"], ge=1)
     minOutstandingInSample: float = REVOLVING_DEFAULTS["min_outstanding_in_sample"]
     stressPercentile: float = Field(REVOLVING_DEFAULTS["stress_percentile"], ge=0, le=1)
     denominatorLagMonths: int = Field(REVOLVING_DEFAULTS["denominator_lag_months"], ge=0)
     laggedBlendWeight: float = Field(REVOLVING_DEFAULTS["lagged_blend_weight"], ge=0, le=1)
     lossRateBasis: Literal["Naive", "Blended", "Lagged"] = REVOLVING_DEFAULTS["loss_rate_basis"]
+    lgdBasis: Literal["Input", "Recoveries"] = REVOLVING_DEFAULTS["lgd_basis"]
+    costOfFundsPct: float = Field(REVOLVING_DEFAULTS["cost_of_funds_pct"], ge=0)
+    opexPct: float = Field(REVOLVING_DEFAULTS["opex_pct"], ge=0)
+    advanceHaircut: float = Field(REVOLVING_DEFAULTS["advance_haircut"], ge=0, le=1)
+    backtestMinHistoryMonths: int = Field(REVOLVING_DEFAULTS["backtest_min_history_months"], ge=1)
+    earlyWarningLookbackMonths: int = Field(
+        REVOLVING_DEFAULTS["early_warning_lookback_months"], ge=1
+    )
+    earlyWarningThreshold: float = Field(REVOLVING_DEFAULTS["early_warning_threshold"], ge=0)
+    scenarios: list[RevolvingScenarioBody] = Field(
+        default_factory=lambda: [
+            RevolvingScenarioBody(
+                name=s["name"],
+                rollRateMultiplier=s["roll_rate_multiplier"],
+                lgdMultiplier=s["lgd_multiplier"],
+            )
+            for s in REVOLVING_DEFAULTS["scenarios"]
+        ]
+    )
+    covenants: list[RevolvingCovenantBody] = Field(
+        default_factory=lambda: [
+            RevolvingCovenantBody(**c) for c in REVOLVING_DEFAULTS["covenants"]
+        ]
+    )
 
 
 class RevolvingAnalyseBody(BaseModel):
@@ -1794,9 +1842,7 @@ def _compute_lending(
         ltv_loss = ltv.percentile_95_losses(*ltv_range)
         # The LTV tab's "include unfinished loans" option (Salmon-sheet basis).
         all_loans_losses = ltv.all_loans_cohort_losses(gi.min_loans_per_cohort)
-        ltv_loss_all_loans = ltv.percentile_95_losses_all_loans(
-            gi.min_loans_per_cohort, *ltv_range
-        )
+        ltv_loss_all_loans = ltv.percentile_95_losses_all_loans(gi.min_loans_per_cohort, *ltv_range)
     except Exception as exc:  # engine failures -> 422 so the UI can surface them
         raise HTTPException(status_code=422, detail=f"Analysis failed: {exc}") from exc
 
@@ -2751,6 +2797,16 @@ def _revolving_pipeline(body: RevolvingAnalyseBody) -> tuple[pd.DataFrame, None,
     def run():
         df = _resolve_revolving_df(body)
         gi = body.generalInputs
+        if gi.rollRateWindow not in REVOLVING_WINDOWS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Roll-rate window must be one of {', '.join(REVOLVING_WINDOWS)}",
+            )
+        unknown = [c.metric for c in gi.covenants if c.metric not in REVOLVING_COVENANT_METRICS]
+        if unknown:
+            raise HTTPException(
+                status_code=422, detail=f"Unknown covenant metric(s): {', '.join(unknown)}"
+            )
         inputs = RevolvingInputs(
             as_of_month=gi.asOfMonth or None,
             lgd=gi.lgd,
@@ -2763,6 +2819,16 @@ def _revolving_pipeline(body: RevolvingAnalyseBody) -> tuple[pd.DataFrame, None,
             loss_rate_basis=gi.lossRateBasis,
             balance_tolerance=REVOLVING_DEFAULTS["balance_tolerance"],
             unexplained_warning_pct=REVOLVING_DEFAULTS["unexplained_warning_pct"],
+            lgd_basis=gi.lgdBasis,
+            cost_of_funds_pct=gi.costOfFundsPct,
+            opex_pct=gi.opexPct,
+            advance_haircut=gi.advanceHaircut,
+            backtest_min_history_months=gi.backtestMinHistoryMonths,
+            early_warning_lookback_months=gi.earlyWarningLookbackMonths,
+            early_warning_threshold=gi.earlyWarningThreshold,
+            scenarios=[sc.model_dump() for sc in gi.scenarios],
+            covenants=[cv.model_dump() for cv in gi.covenants],
+            stress_roll_rate_cap=REVOLVING_DEFAULTS["stress_roll_rate_cap"],
         )
         try:
             return df, None, run_revolving(df, inputs)
@@ -2777,6 +2843,18 @@ def revolving_defaults() -> dict[str, Any]:
     """The revolving General Inputs defaults (config.toml), so the UI shows the
     values a run will use without keeping its own copy of them."""
     return RevolvingGeneralInputsBody().model_dump()
+
+
+@app.get("/api/revolving/options")
+def revolving_options() -> dict[str, Any]:
+    """The General Inputs pickers' choices, from config / the metric
+    catalogue: roll-rate window names and the metrics a covenant can test."""
+    return {
+        "rollRateWindows": list(REVOLVING_WINDOWS),
+        "covenantMetrics": [
+            {"key": k, "label": label} for k, (label, _) in REVOLVING_COVENANT_METRICS.items()
+        ],
+    }
 
 
 @app.post("/api/analyse/revolving")
@@ -2801,9 +2879,28 @@ def analyse_revolving(body: RevolvingAnalyseBody) -> dict[str, Any]:
             "checks": records(c["checks"]),
             "lossRates": _frame_to_records(c["pit"]),
             "lossRateDistribution": records(c["distribution"]),
+            "lgdUsed": c["lgdUsed"],
+            "lgdBasis": c["lgdBasis"],
+            "standardMetrics": c["standardMetrics"],
+            "overTime": _revolving_over_time_records(c["overTime"]),
+            "unitEconomics": c["unitEconomics"],
+            "earlyWarnings": c["earlyWarnings"],
+            "backtest": _frame_to_records(c["backtest"]),
+            "backtestSummary": c["backtestSummary"],
+            "stress": c["stress"],
+            "advance": c["advance"],
+            "covenants": c["covenants"],
             "generalInputs": body.generalInputs.model_dump(),
         }
     )
+
+
+def _revolving_over_time_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    """Metrics-by-month rows, each labelled and typed for display."""
+    labelled = frame.copy()
+    labelled.insert(0, "kind", [REVOLVING_METRICS[k].kind for k in labelled.index])
+    labelled.insert(0, "Metric", [REVOLVING_METRICS[k].label for k in labelled.index])
+    return _frame_to_records(labelled.reset_index(names="key"))
 
 
 @app.post("/api/export/revolving")

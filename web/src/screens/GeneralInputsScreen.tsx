@@ -2,8 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../state/AppStore';
 import { Button, Input, Select, Card, Alert, Table } from '../components/ui';
 import { CURRENCY_CODES, CURRENCY_NAMES } from '../data/currencies';
-import { getRevolvingDefaults, getStatusValues, type StatusValuesResponse } from '../api/engine';
-import type { ModelKey, RevolvingGeneralInputs } from '../state/types';
+import {
+  getRevolvingOptions,
+  getRevolvingDefaults,
+  getStatusValues,
+  type RevolvingOptions,
+  type StatusValuesResponse,
+} from '../api/engine';
+import type { ModelKey, RevolvingCovenant, RevolvingGeneralInputs, RevolvingScenario } from '../state/types';
 
 interface Props {
   onNext: () => void;
@@ -102,21 +108,35 @@ function StatusMappingSection() {
  * the Outputs ratio window). Starts from the server's config.toml defaults. */
 function RevolvingInputsSection() {
   const { state, dispatch } = useAppStore();
-  const ri = state.generalInputs.revolving;
+  // Inputs saved before a field existed are completed from the defaults.
+  const saved = state.generalInputs.revolving;
+  const ri = saved && saved.scenarios !== undefined ? saved : null;
   const [error, setError] = useState<string | null>(null);
+  const [options, setOptions] = useState<RevolvingOptions | null>(null);
+  const metrics = options?.covenantMetrics ?? [];
 
   useEffect(() => {
     if (ri) return;
     getRevolvingDefaults()
-      .then((d) => dispatch({ type: 'setGeneralInputs', inputs: { revolving: d } }))
+      .then((d) => dispatch({ type: 'setGeneralInputs', inputs: { revolving: { ...d, ...(saved ?? {}) } } }))
       .catch((err) => setError(err instanceof Error ? err.message : 'Could not load the default inputs.'));
-  }, [ri, dispatch]);
+  }, [ri, saved, dispatch]);
+
+  useEffect(() => {
+    getRevolvingOptions()
+      .then(setOptions)
+      .catch(() => setOptions(null));
+  }, []);
 
   if (error) return <Alert tone="error">{error}</Alert>;
   if (!ri) return <p className="sd-muted">Loading default inputs…</p>;
 
   const set = (patch: Partial<RevolvingGeneralInputs>) =>
     dispatch({ type: 'setGeneralInputs', inputs: { revolving: { ...ri, ...patch } } });
+  const setScenario = (i: number, patch: Partial<RevolvingScenario>) =>
+    set({ scenarios: ri.scenarios.map((sc, j) => (j === i ? { ...sc, ...patch } : sc)) });
+  const setCovenant = (i: number, patch: Partial<RevolvingCovenant>) =>
+    set({ covenants: ri.covenants.map((cv, j) => (j === i ? { ...cv, ...patch } : cv)) });
   const numberField = (label: string, key: keyof RevolvingGeneralInputs, step = 'any') => (
     <div className="sd-field">
       <span>{label}</span>
@@ -141,9 +161,9 @@ function RevolvingInputsSection() {
           <span>Roll-rate averaging window</span>
           <Select
             value={ri.rollRateWindow}
-            onChange={(e) => set({ rollRateWindow: e.target.value as RevolvingGeneralInputs['rollRateWindow'] })}
+            onChange={(e) => set({ rollRateWindow: e.target.value })}
           >
-            {['T3', 'T6', 'T12', 'ALL'].map((w) => (
+            {(options?.rollRateWindows ?? [ri.rollRateWindow]).map((w) => (
               <option key={w} value={w}>
                 {w}
               </option>
@@ -173,6 +193,145 @@ function RevolvingInputsSection() {
         {numberField('Denominator lag (months)', 'denominatorLagMonths', '1')}
         {numberField('Blend weight on the lagged rate (0-1)', 'laggedBlendWeight')}
       </Card>
+
+      <h2 className="sd-h2">LGD &amp; unit economics</h2>
+      <Card className="sd-grid sd-grid--2">
+        <div className="sd-field">
+          <span>LGD basis</span>
+          <Select
+            value={ri.lgdBasis}
+            onChange={(e) => set({ lgdBasis: e.target.value as RevolvingGeneralInputs['lgdBasis'] })}
+          >
+            <option value="Input">Input (LGD above)</option>
+            <option value="Recoveries">Derived from the recoveries column</option>
+          </Select>
+        </div>
+        {numberField('Cost of funds (% p.a., 0-1)', 'costOfFundsPct')}
+        {numberField('Operating costs (% p.a., 0-1)', 'opexPct')}
+        {numberField('Advance-rate haircut (0-1)', 'advanceHaircut')}
+      </Card>
+
+      <h2 className="sd-h2">Backtest &amp; early warning</h2>
+      <Card className="sd-grid sd-grid--2">
+        {numberField('Backtest: months of history before the first test', 'backtestMinHistoryMonths', '1')}
+        {numberField('Early warning: lookback (months)', 'earlyWarningLookbackMonths', '1')}
+        {numberField('Early warning: flag when worse by (0-1, relative)', 'earlyWarningThreshold')}
+      </Card>
+
+      <h2 className="sd-h2">Stress scenarios</h2>
+      <Table<RevolvingScenario & { i: number }>
+        rows={ri.scenarios.map((sc, i) => ({ ...sc, i }))}
+        columns={[
+          {
+            key: 'name',
+            header: 'Scenario',
+            render: (r) => <Input value={r.name} onChange={(e) => setScenario(r.i, { name: e.target.value })} />,
+          },
+          {
+            key: 'roll',
+            header: 'Roll-rate multiplier',
+            render: (r) => (
+              <Input
+                type="number"
+                step="0.05"
+                value={String(r.rollRateMultiplier)}
+                onChange={(e) => setScenario(r.i, { rollRateMultiplier: Number(e.target.value) })}
+              />
+            ),
+          },
+          {
+            key: 'lgd',
+            header: 'LGD multiplier',
+            render: (r) => (
+              <Input
+                type="number"
+                step="0.05"
+                value={String(r.lgdMultiplier)}
+                onChange={(e) => setScenario(r.i, { lgdMultiplier: Number(e.target.value) })}
+              />
+            ),
+          },
+          {
+            key: 'rm',
+            header: '',
+            render: (r) => (
+              <Button variant="ghost" onClick={() => set({ scenarios: ri.scenarios.filter((_, j) => j !== r.i) })}>
+                Remove
+              </Button>
+            ),
+          },
+        ]}
+      />
+      <Button
+        variant="secondary"
+        onClick={() =>
+          set({ scenarios: [...ri.scenarios, { name: 'New scenario', rollRateMultiplier: 1, lgdMultiplier: 1 }] })
+        }
+      >
+        + Add scenario
+      </Button>
+
+      <h2 className="sd-h2">Covenant tests</h2>
+      <Alert tone="info">Example limits from config — set them to this deal&apos;s facility terms.</Alert>
+      <Table<RevolvingCovenant & { i: number }>
+        rows={ri.covenants.map((cv, i) => ({ ...cv, i }))}
+        columns={[
+          {
+            key: 'metric',
+            header: 'Metric',
+            render: (r) => (
+              <Select value={r.metric} onChange={(e) => setCovenant(r.i, { metric: e.target.value })}>
+                {(metrics.length ? metrics : [{ key: r.metric, label: r.metric }]).map((m) => (
+                  <option key={m.key} value={m.key}>
+                    {m.label}
+                  </option>
+                ))}
+              </Select>
+            ),
+          },
+          {
+            key: 'op',
+            header: 'Test',
+            render: (r) => (
+              <Select
+                value={r.operator}
+                onChange={(e) => setCovenant(r.i, { operator: e.target.value as RevolvingCovenant['operator'] })}
+              >
+                <option value="<=">≤ (at most)</option>
+                <option value=">=">≥ (at least)</option>
+              </Select>
+            ),
+          },
+          {
+            key: 'limit',
+            header: 'Limit (0-1 for %)',
+            render: (r) => (
+              <Input
+                type="number"
+                step="any"
+                value={String(r.limit)}
+                onChange={(e) => setCovenant(r.i, { limit: Number(e.target.value) })}
+              />
+            ),
+          },
+          {
+            key: 'rm',
+            header: '',
+            render: (r) => (
+              <Button variant="ghost" onClick={() => set({ covenants: ri.covenants.filter((_, j) => j !== r.i) })}>
+                Remove
+              </Button>
+            ),
+          },
+        ]}
+      />
+      <Button
+        variant="secondary"
+        disabled={!metrics.length}
+        onClick={() => set({ covenants: [...ri.covenants, { metric: metrics[0].key, operator: '<=', limit: 0 }] })}
+      >
+        + Add covenant
+      </Button>
     </>
   );
 }

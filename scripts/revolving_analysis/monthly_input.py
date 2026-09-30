@@ -44,7 +44,10 @@ DATA_QUALITY_COLUMNS = [
     "MONTHS_FILLED_BY_CARRYFWD",
     "UNEXPLAINED",
 ]
-OPTIONAL_COLUMNS = CORE_BUCKET_COLUMNS + ZERO_FILLED_COLUMNS + DATA_QUALITY_COLUMNS
+# Cash recovered in the month on previously written-off balances; lets LGD
+# be derived instead of entered.
+RECOVERIES = "recoveries"
+OPTIONAL_COLUMNS = CORE_BUCKET_COLUMNS + ZERO_FILLED_COLUMNS + DATA_QUALITY_COLUMNS + [RECOVERIES]
 
 
 def has_full_buckets(df: pd.DataFrame) -> bool:

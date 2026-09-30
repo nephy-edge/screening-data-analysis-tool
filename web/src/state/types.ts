@@ -31,13 +31,36 @@ export interface RevolvingGeneralInputs {
   /** "YYYY-MM" or '' / null = the last month in the data. */
   asOfMonth: string | null;
   lgd: number;
-  rollRateWindow: 'T3' | 'T6' | 'T12' | 'ALL';
+  /** A window name from config.toml [revolving_defaults.roll_rate_windows]. */
+  rollRateWindow: string;
   ratioWindowMonths: number;
   minOutstandingInSample: number;
   stressPercentile: number;
   denominatorLagMonths: number;
   laggedBlendWeight: number;
   lossRateBasis: 'Naive' | 'Blended' | 'Lagged';
+  lgdBasis: 'Input' | 'Recoveries';
+  costOfFundsPct: number;
+  opexPct: number;
+  advanceHaircut: number;
+  backtestMinHistoryMonths: number;
+  earlyWarningLookbackMonths: number;
+  earlyWarningThreshold: number;
+  scenarios: RevolvingScenario[];
+  covenants: RevolvingCovenant[];
+}
+
+export interface RevolvingScenario {
+  name: string;
+  rollRateMultiplier: number;
+  lgdMultiplier: number;
+}
+
+export interface RevolvingCovenant {
+  /** A metric key from scripts/revolving_analysis/metrics.py (or coverage_perf / coverage_total / net_yield_annual). */
+  metric: string;
+  operator: '<=' | '>=';
+  limit: number;
 }
 
 export interface AnalysisResult {

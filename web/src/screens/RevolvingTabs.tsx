@@ -1,6 +1,6 @@
 import { useAppStore } from '../state/AppStore';
 import { Alert, Metric, Table, type TableColumn } from '../components/ui';
-import type { RevolvingRatio } from '../api/engine';
+import type { MetricKind, RevolvingRatio } from '../api/engine';
 
 type Row = Record<string, unknown>;
 
@@ -10,11 +10,23 @@ const fpct = (v: unknown, digits = 2) => (isNum(v) ? `${((v as number) * 100).to
 const fmoney = (v: unknown) =>
   isNum(v) ? (Math.round(v as number) + 0).toLocaleString() : '—';
 const fdec = (v: unknown, digits = 2) => (isNum(v) ? (v as number).toFixed(digits) : '—');
+/** Format a catalogue metric by its kind. */
+const fkind = (v: unknown, kind: MetricKind | string) =>
+  kind === 'months' ? fdec(v) : kind === 'money' ? fmoney(v) : fpct(v);
 const fcell = (v: unknown) => (isNum(v) ? fmoney(v) : v === null || v === undefined ? '—' : String(v));
 
 /** Months-across table: every key of the first row becomes a column. */
-function WideTable({ rows, format }: { rows: Row[]; format: (v: unknown, col: string, row: Row) => string }) {
-  const keys = Object.keys(rows[0] ?? {});
+function WideTable({
+  rows,
+  format,
+  hide = [],
+}: {
+  rows: Row[];
+  format: (v: unknown, col: string, row: Row) => string;
+  /** Keys carried for formatting only, not shown as columns. */
+  hide?: string[];
+}) {
+  const keys = Object.keys(rows[0] ?? {}).filter((k) => !hide.includes(k));
   const cols: TableColumn<Row>[] = keys.map((key, i) => ({
     key,
     header: key,
@@ -68,6 +80,179 @@ export function RevolvingOutputsTab() {
       <WideTable
         rows={res.lossRateDistribution}
         format={(v, _c, row) => (row.Statistic === 'Months in sample' ? fdec(v, 0) : fpct(v))}
+      />
+
+      <h2 className="sd-h2">Standard-definition metrics — as of {res.eclSummary.asOfMonth}</h2>
+      <p className="sd-muted">
+        Standard credit definitions next to the template&apos;s own ratios above, which stay as the template defines
+        them.
+      </p>
+      <Table
+        columns={[
+          { key: 'label', header: 'Metric' },
+          {
+            key: 'value',
+            header: 'Value',
+            align: 'right',
+            render: (r: RevolvingStd) => <span className="sd-mono">{fkind(r.value, r.kind)}</span>,
+          },
+          {
+            key: 'formula',
+            header: 'How calculated',
+            render: (r: RevolvingStd) => <span className="sd-muted">{r.note || r.formula}</span>,
+          },
+        ]}
+        rows={res.standardMetrics}
+      />
+
+      <h2 className="sd-h2">Unit economics after costs (per dollar outstanding)</h2>
+      <Table
+        columns={[
+          { key: 'item', header: '' },
+          { key: 'monthly', header: 'Monthly', align: 'right', render: (r: RevolvingUe) => <span className="sd-mono">{fpct(r.monthly)}</span> },
+          { key: 'annualised', header: 'Annualised', align: 'right', render: (r: RevolvingUe) => <span className="sd-mono">{fpct(r.annualised)}</span> },
+          { key: 'overTenor', header: 'Over the principal tenor', align: 'right', render: (r: RevolvingUe) => <span className="sd-mono">{fpct(r.overTenor)}</span> },
+        ]}
+        rows={res.unitEconomics}
+      />
+
+      <h2 className="sd-h2">Early warnings</h2>
+      {res.earlyWarnings.some((e) => e.flag) ? (
+        <Alert tone="warning">
+          {res.earlyWarnings.filter((e) => e.flag).length} metric(s) deteriorated beyond the early-warning threshold.
+        </Alert>
+      ) : (
+        <Alert tone="info">No metric deteriorated beyond the early-warning threshold.</Alert>
+      )}
+      <Table
+        columns={[
+          { key: 'label', header: 'Metric' },
+          { key: 'now', header: 'As-of', align: 'right', render: (r: RevolvingEw) => <span className="sd-mono">{fkind(r.now, r.kind)}</span> },
+          { key: 'prior', header: 'Lookback average', align: 'right', render: (r: RevolvingEw) => <span className="sd-mono">{fkind(r.prior, r.kind)}</span> },
+          { key: 'change', header: 'Change', align: 'right', render: (r: RevolvingEw) => <span className="sd-mono">{fpct(r.change, 1)}</span> },
+          { key: 'flag', header: 'Flag', render: (r: RevolvingEw) => (r.flag ? '⚠ Worse' : '') },
+        ]}
+        rows={res.earlyWarnings}
+      />
+
+      <h2 className="sd-h2">Metrics over time</h2>
+      <WideTable
+        rows={res.overTime}
+        hide={['key', 'kind']}
+        format={(v, _c, row) => fkind(v, String(row.kind))}
+      />
+    </>
+  );
+}
+
+type RevolvingResult = NonNullable<ReturnType<typeof useAppStore>['state']['revolvingResponse']>;
+type RevolvingStd = RevolvingResult['standardMetrics'][number];
+type RevolvingUe = RevolvingResult['unitEconomics'][number];
+type RevolvingEw = RevolvingResult['earlyWarnings'][number];
+
+/** Backtest (forecast vs actual write-offs) and stress scenarios. */
+export function RevolvingBacktestStressTab() {
+  const { state } = useAppStore();
+  const res = state.revolvingResponse;
+  if (!res) return <Alert tone="info">Run analysis to see the backtest and stress scenarios.</Alert>;
+  const b = res.backtestSummary;
+  return (
+    <>
+      <h2 className="sd-h2">1. Backtest — forecast vs actual write-offs</h2>
+      <p className="sd-muted">
+        At each past month the ECL chain is struck on data up to that month only; its forecast of write-offs from the
+        book then on balance sheet is compared with the write-offs booked in {b.window}. Below 1 means the forecast was
+        conservative.
+      </p>
+      <div className="sd-grid sd-grid--metrics">
+        <Metric label="Months tested" value={String(b.months)} hint="Months whose full outcome window is observed." />
+        <Metric label="Actual ÷ forecast (pooled)" value={fdec(b.pooledRatio, 3)} hint="Σ actual ÷ Σ forecast over the tested months." />
+        <Metric label="Median ratio" value={fdec(b.medianRatio, 3)} />
+        <Metric label="Range" value={`${fdec(b.minRatio, 2)} – ${fdec(b.maxRatio, 2)}`} hint="Lowest and highest monthly ratio." />
+        <Metric label="Mean absolute error" value={fpct(b.meanAbsError, 1)} hint="Average |ratio − 1|." />
+      </div>
+      {b.months === 0 ? (
+        <Alert tone="info">Not enough history yet for a backtest (see General Inputs → Backtest).</Alert>
+      ) : null}
+      <WideTable
+        rows={res.backtest}
+        format={(v, col) =>
+          col === 'Actual ÷ forecast'
+            ? fdec(v, 3)
+            : col === 'Coverage (performing)'
+              ? fpct(v)
+              : col === 'Outcome observed'
+                ? v
+                  ? 'Yes'
+                  : 'Not yet'
+                : fcell(v)
+        }
+      />
+
+      <h2 className="sd-h2">2. Stress scenarios</h2>
+      <p className="sd-muted">
+        Selected roll rates and LGD scaled per scenario (a stressed rate is capped at 100% unless already above it).
+        Loss rate is the as-of point-in-time rate on the chosen basis; the advance rate is 1 − loss rate − haircut.
+      </p>
+      <Table
+        columns={[
+          { key: 'name', header: 'Scenario' },
+          { key: 'roll', header: 'Roll ×', align: 'right', render: (r: Stress) => fdec(r.rollRateMultiplier, 2) },
+          { key: 'lgdm', header: 'LGD ×', align: 'right', render: (r: Stress) => fdec(r.lgdMultiplier, 2) },
+          { key: 'lgd', header: 'LGD', align: 'right', render: (r: Stress) => fpct(r.lgd) },
+          { key: 'ecl', header: 'Total ECL', align: 'right', render: (r: Stress) => <span className="sd-mono">{fmoney(r.totalEcl)}</span> },
+          { key: 'cp', header: 'Coverage (performing)', align: 'right', render: (r: Stress) => fpct(r.coveragePerforming) },
+          { key: 'ct', header: 'Coverage (total)', align: 'right', render: (r: Stress) => fpct(r.coverageTotal) },
+          { key: 'lr', header: 'Loss rate', align: 'right', render: (r: Stress) => fpct(r.lossRate) },
+          { key: 'adv', header: 'Advance rate', align: 'right', render: (r: Stress) => fpct(r.advanceRate) },
+        ]}
+        rows={res.stress}
+      />
+      {res.stress.some((s) => !s.valid) ? (
+        <Alert tone="error">Balances don&apos;t tie at the as-of month — stressed ECL withheld.</Alert>
+      ) : null}
+    </>
+  );
+}
+
+type Stress = RevolvingResult['stress'][number];
+type Covenant = RevolvingResult['covenants'][number];
+
+/** Advance rate and covenant tests. */
+export function RevolvingFacilityTab() {
+  const { state } = useAppStore();
+  const res = state.revolvingResponse;
+  if (!res) return <Alert tone="info">Run analysis to see the facility view.</Alert>;
+  const a = res.advance;
+  const breaches = res.covenants.filter((c) => c.status === 'BREACH').length;
+  return (
+    <>
+      <h2 className="sd-h2">1. Advance rate</h2>
+      <div className="sd-grid sd-grid--metrics">
+        <Metric label="Stress loss rate" value={fpct(a.stressLossRate)} hint="Outputs 95th %ile (point-in-time loss rate at the stress percentile)." />
+        <Metric label="Haircut" value={fpct(a.haircut)} hint="Additional haircut from General Inputs." />
+        <Metric label="Maximum advance rate" value={fpct(a.advanceRate)} hint="MAX(0, 1 − stress loss rate − haircut) — 'Loss Rate LTV' row 65." />
+      </div>
+
+      <h2 className="sd-h2">2. Covenant tests — as of {res.eclSummary.asOfMonth}</h2>
+      {breaches ? (
+        <Alert tone="error">{breaches} covenant(s) breached.</Alert>
+      ) : (
+        <Alert tone="info">No covenant breached. Limits are set in General Inputs.</Alert>
+      )}
+      <Table
+        columns={[
+          { key: 'label', header: 'Metric' },
+          { key: 'test', header: 'Test', render: (c: Covenant) => `${c.operator === '<=' ? '≤' : '≥'} ${fkind(c.limit, c.kind)}` },
+          { key: 'value', header: 'Value', align: 'right', render: (c: Covenant) => <span className="sd-mono">{fkind(c.value, c.kind)}</span> },
+          { key: 'headroom', header: 'Headroom', align: 'right', render: (c: Covenant) => <span className="sd-mono">{fkind(c.headroom, c.kind)}</span> },
+          {
+            key: 'status',
+            header: 'Result',
+            render: (c: Covenant) => (c.status === 'BREACH' ? '✖ BREACH' : c.status === 'PASS' ? '✔ PASS' : 'N/A (map bucket balances)'),
+          },
+        ]}
+        rows={res.covenants}
       />
     </>
   );

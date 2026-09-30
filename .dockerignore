@@ -23,9 +23,6 @@ data/
 pyproject.toml
 pytest.ini
 requirements-dev.txt
-PROGRESS.md
-GOALS_CHECKLIST.md
-OUTSTANDING_CHECKLIST.md
 README.md
 AGENTS.md
 streamlit_err.log

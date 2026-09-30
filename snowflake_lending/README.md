@@ -1,6 +1,6 @@
 # Lending analysis on Snowflake (Snowpark)
 
-(See also [../README-MCP-SNOWFLAKE.md](../README-MCP-SNOWFLAKE.md) for the
+(See also [../docs/README-MCP-SNOWFLAKE.md](../docs/README-MCP-SNOWFLAKE.md) for the
 separate Kilo/MCP read-only query wiring - a different integration, with its
 own PAT, independent of this one.)
 

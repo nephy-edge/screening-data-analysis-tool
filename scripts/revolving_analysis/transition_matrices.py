@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from .monthly_input import BUCKET_COLUMNS, DATA_QUALITY_COLUMNS, MONTH
+from .settings import DEFAULTS, WINDOW_LENGTHS
 
 WRITTEN_OFF = "principal_written-off"
 OUTSTANDING = "principal_outstanding"
@@ -97,11 +98,11 @@ COARSE_SPEC = Spec(
             1,
         ),
         (
-            "PAR 61-90 → Written off (2 months on)",
+            f"PAR 61-90 → Written off ({DEFAULTS['approx_writeoff_lag_months']} months on)",
             "PAR 61-90",
             ["principal_outstanding-par60-90"],
             WRITTEN_OFF,
-            2,
+            DEFAULTS["approx_writeoff_lag_months"],
         ),
     ],
     ecl_buckets=[
@@ -112,8 +113,8 @@ COARSE_SPEC = Spec(
     absorbed=("91+ and defaulted stock (G − H − I − J)", REMAINDER),
 )
 
-# Averaging windows ('Roll Rate ECL' AN28:AQ28); None = every observable rate.
-WINDOW_LENGTHS: dict[str, int | None] = {"T3": 3, "T6": 6, "T12": 12, "ALL": None}
+# Averaging windows ('Roll Rate ECL' AN28:AQ28) are config.toml's
+# roll_rate_windows - see settings.WINDOW_LENGTHS (None = every observable rate).
 
 
 def with_remainder(monthly: pd.DataFrame) -> pd.DataFrame:
@@ -186,18 +187,29 @@ def balance_checks(monthly: pd.DataFrame, spec: Spec, tolerance: float) -> pd.Da
                 monthly[REMAINDER] > -tolerance, "OK", "CHECK"
             )
         }
+    # Roll-forward from the Outputs columns: closing - (opening + issued -
+    # collected - written off). Equals the source's own UNEXPLAINED column.
+    unexplained = total - (
+        total.shift()
+        + monthly["principal_issued"]
+        - monthly["principal_collected"]
+        - monthly[WRITTEN_OFF]
+    )
+    rows["Roll-forward: unexplained movement"] = unexplained.to_numpy()
+    rows["Unexplained as % of outstanding"] = (unexplained / total.replace(0, np.nan)).to_numpy()
+    if "UNEXPLAINED" in monthly.columns:
+        # Month 1 has no opening balance, so only later months are compared.
+        agree = (unexplained - monthly["UNEXPLAINED"]).abs() < tolerance
+        rows["Roll-forward agrees with source UNEXPLAINED"] = np.where(
+            unexplained.isna(), "", np.where(agree, "OK", "CHECK")
+        )
     labels = {
         "DUP_LOAN_MONTHS": "Duplicate loan-months in source",
         "MONTHS_FILLED_BY_CARRYFWD": "Loan-months filled by carry-forward",
-        "UNEXPLAINED": "Unexplained balance movement",
     }
     for col in DATA_QUALITY_COLUMNS:
         if col in labels and col in monthly.columns:
             rows[labels[col]] = monthly[col].to_numpy()
-    if "UNEXPLAINED" in monthly.columns:
-        rows["Unexplained as % of outstanding"] = (
-            monthly["UNEXPLAINED"] / total.replace(0, np.nan)
-        ).to_numpy()
     out = pd.DataFrame(rows, index=month_labels(monthly)).T
     out.index.name = "Check"
     return out

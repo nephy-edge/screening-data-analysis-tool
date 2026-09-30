@@ -3,7 +3,12 @@ import { createPortal } from 'react-dom';
 import { useAppStore, getChartDataSources, type ChartCardSpec } from '../state/AppStore';
 import { Button, Input, Metric, Table, Tabs, Alert, Select, type TableColumn } from '../components/ui';
 import { LendingLtvTab, RentalLtvTab, inLtvCohortRange } from './LtvTabs';
-import { RevolvingOutputsTab, RevolvingTransitionTab } from './RevolvingTabs';
+import {
+  RevolvingBacktestStressTab,
+  RevolvingFacilityTab,
+  RevolvingOutputsTab,
+  RevolvingTransitionTab,
+} from './RevolvingTabs';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -1760,6 +1765,8 @@ export function AnalysisSession({
   const revolvingTabs = [
     { id: 'outputs', label: 'Outputs' },
     { id: 'transition', label: 'Transition Matrices' },
+    { id: 'backtest', label: 'Backtest & Stress' },
+    { id: 'facility', label: 'Facility' },
   ];
   const tabs = isRevolving ? revolvingTabs : isRental ? rentalTabs : lendingTabs;
   const [tab, setTab] = useState<string>(tabs[0].id);
@@ -1791,6 +1798,8 @@ export function AnalysisSession({
       {tab === 'ai' && <AiTab />}
       {tab === 'outputs' && <RevolvingOutputsTab />}
       {tab === 'transition' && <RevolvingTransitionTab />}
+      {tab === 'backtest' && <RevolvingBacktestStressTab />}
+      {tab === 'facility' && <RevolvingFacilityTab />}
 
       <div className="sd-actions" style={{ marginTop: 24, flexWrap: 'wrap' }}>
         <Button variant="ghost" onClick={onEditMapping}>

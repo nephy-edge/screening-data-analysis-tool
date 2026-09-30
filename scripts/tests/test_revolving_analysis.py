@@ -337,7 +337,14 @@ def test_export_writes_outputs_with_live_formulas():
     res = _client().post("/api/export/revolving", json={"rows": _rows()})
     assert res.status_code == 200, res.text
     wb = load_workbook(io.BytesIO(res.content))
-    assert wb.sheetnames == ["Outputs", "Transition Matrices", "Inputs"]
+    assert wb.sheetnames == [
+        "Outputs",
+        "Transition Matrices",
+        "Standard Metrics",
+        "Backtest & Stress",
+        "Facility",
+        "Inputs",
+    ]
     ws = wb["Outputs"]
     assert ws["K1"].value == "principal_written-off"
     # 3 fact rows -> as-of row 4, "UE / LTV" header at row 9, B9 (tenor) at row 10.
@@ -350,3 +357,174 @@ def test_saved_revolving_mapping_restores_as_revolving():
     mapping = {"report_month": "m", "principal_outstanding-active": "a"}
     assert m._infer_model_key(mapping) == "revolving"
     assert m._infer_model_key({"Loan ID": "id"}) == "lending"
+
+
+# --- Base-template additions: roll-forward, standard metrics, UE, early
+# warnings, backtest, stress, LGD from recoveries, facility / covenants.
+
+SCENARIOS = [
+    {"name": "Base", "rollRateMultiplier": 1.0, "lgdMultiplier": 1.0},
+    {"name": "Stress", "rollRateMultiplier": 1.25, "lgdMultiplier": 1.1},
+    {"name": "Severe", "rollRateMultiplier": 1.5, "lgdMultiplier": 1.25},
+]
+
+
+@needs_reference
+def test_roll_forward_reproduces_the_source_unexplained_column():
+    checks = run(_reference_frame(), RevolvingInputs())["checks"]
+    agree = checks.loc["Roll-forward agrees with source UNEXPLAINED"].tolist()
+    assert agree[0] == "" and set(agree[1:]) == {"OK"}
+
+
+@needs_reference
+def test_backtest_matches_the_out_of_sample_check():
+    """Same figures as the hand backtest: forecast write-offs vs actual."""
+    full = run(_reference_frame(), RevolvingInputs())["backtestSummary"]
+    assert (full["window"], full["months"]) == ("t+1..t+5", 19)
+    assert full["pooledRatio"] == pytest.approx(0.913, abs=5e-4)
+    coarse = run(_reference_frame(with_buckets=False), RevolvingInputs())["backtestSummary"]
+    assert (coarse["window"], coarse["months"]) == ("t+2..t+4", 20)
+    assert coarse["pooledRatio"] == pytest.approx(0.904, abs=5e-4)
+
+
+@needs_reference
+def test_standard_metrics_on_the_reference_book():
+    res = run(_reference_frame(), RevolvingInputs())
+    std = {m["key"]: m["value"] for m in res["standardMetrics"]}
+    assert std["par91_total"] == pytest.approx(0.1763, abs=5e-5)  # template "PAR90" is 2.97%
+    assert std["principal_tenor"] == pytest.approx(3.507, abs=5e-4)
+    assert std["defaulted_share"] == pytest.approx(0.1489, abs=5e-5)
+
+
+@needs_reference
+def test_base_scenario_reproduces_the_unstressed_ecl_and_stress_is_worse():
+    res = run(_reference_frame(), RevolvingInputs(scenarios=SCENARIOS))
+    base, stress, severe = res["stress"]
+    assert base["totalEcl"] == pytest.approx(res["eclSummary"]["totalEcl"])
+    assert base["totalEcl"] < stress["totalEcl"] < severe["totalEcl"]
+    assert base["advanceRate"] > stress["advanceRate"] > severe["advanceRate"]
+
+
+def test_stressed_links_are_capped_at_100_percent():
+    from revolving_analysis.backtest_stress import stressed_links
+
+    assert stressed_links([0.5, 0.9, 1.02], 1.5, cap=1.0) == [0.75, 1.0, 1.02]
+
+
+def _small_book():
+    return _monthly(
+        interest_collected=[5.0, 6.0, 8.0, 9.0, 9.0],
+        principal_collected=[20.0, 25.0, 30.0, 30.0, 35.0],
+        principal_issued=[100.0, 30.0, 30.0, 30.0, 30.0],
+        total_credit_line=[400.0] * 5,
+        **{
+            "principal_outstanding-active": [90.0, 90.0, 85.0, 80.0, 70.0],
+            "principal_outstanding-par30-60": [5.0, 5.0, 8.0, 10.0, 15.0],
+            "principal_outstanding-par60-90": [0.0, 1.0, 2.0, 3.0, 5.0],
+            "principal_written-off": [0.0, 0.0, 1.0, 2.0, 4.0],
+        },
+        principal_outstanding=[100.0, 100.0, 100.0, 100.0, 100.0],
+    )
+
+
+def test_standard_metrics_and_unit_economics_by_hand():
+    res = run(
+        _small_book(),
+        RevolvingInputs(cost_of_funds_pct=0.12, opex_pct=0.06, min_outstanding_in_sample=0),
+    )
+    std = {m["key"]: m["value"] for m in res["standardMetrics"]}
+    assert std["par91_total"] == pytest.approx((100 - 70 - 15 - 5) / 100)
+    assert std["par61_total"] == pytest.approx((100 - 70 - 15) / 100)
+    assert std["payment_rate"] == pytest.approx(35 / 100)
+    assert std["principal_tenor"] == pytest.approx(100 / 35)
+    assert std["defaulted_share"] is None  # needs the bucket balances
+    ue = {r["item"]: r["monthly"] for r in res["unitEconomics"]}
+    # Window 2: (9 + 9) / (100 + 100); write-offs 4 / 100; costs 18% / 12.
+    assert ue["Net yield"] == pytest.approx(0.09 - 0.04 - 0.015)
+
+
+def test_early_warning_flags_a_deteriorating_metric():
+    res = run(
+        _small_book(),
+        RevolvingInputs(
+            early_warning_lookback_months=3,
+            early_warning_threshold=0.2,
+            min_outstanding_in_sample=0,
+        ),
+    )
+    flags = {e["key"]: e for e in res["earlyWarnings"]}
+    # PAR 91+ by month is 5%, 4%, 5%, 7%, 10%: now 10% vs mean(4%, 5%, 7%).
+    assert flags["par91_total"]["flag"]
+    assert flags["par91_total"]["prior"] == pytest.approx((0.04 + 0.05 + 0.07) / 3)
+
+
+def test_covenants_pass_breach_and_headroom():
+    cov = [
+        {"metric": "par91_total", "operator": "<=", "limit": 0.08},
+        {"metric": "payment_rate", "operator": ">=", "limit": 0.30},
+        {"metric": "defaulted_share", "operator": "<=", "limit": 0.1},
+    ]
+    res = run(_small_book(), RevolvingInputs(covenants=cov, min_outstanding_in_sample=0))
+    par, pay, dft = res["covenants"]
+    assert (par["status"], par["headroom"]) == ("BREACH", pytest.approx(0.08 - 0.10))
+    assert (pay["status"], pay["headroom"]) == ("PASS", pytest.approx(0.35 - 0.30))
+    assert dft["status"] == "N/A"  # needs the bucket balances
+
+
+def test_lgd_from_recoveries():
+    df = _small_book().assign(recoveries=[0.0, 0.0, 0.0, 1.0, 1.75])
+    res = run(df, RevolvingInputs(lgd_basis="Recoveries", min_outstanding_in_sample=0))
+    assert res["lgdUsed"] == pytest.approx(1 - 2.75 / 7)
+    with pytest.raises(ValueError, match="recoveries column"):
+        run(_small_book(), RevolvingInputs(lgd_basis="Recoveries"))
+
+
+def test_api_rejects_an_unknown_covenant_metric():
+    body = {
+        "rows": _rows(),
+        "generalInputs": {
+            "covenants": [{"metric": "no_such_metric", "operator": "<=", "limit": 1}]
+        },
+    }
+    res = _client().post("/api/analyse/revolving", json=body)
+    assert res.status_code == 422 and "no_such_metric" in res.json()["detail"]
+
+
+def test_defaults_endpoint_carries_scenarios_and_covenants():
+    d = _client().get("/api/revolving/defaults").json()
+    assert [s["name"] for s in d["scenarios"]] == ["Base", "Stress", "Severe"]
+    assert d["covenants"][0]["metric"] == "par91_total"
+    assert d["costOfFundsPct"] == pytest.approx(0.13)
+
+
+def test_engine_defaults_come_from_config_toml():
+    """No tunable is hard-coded in the engine: every RevolvingInputs default,
+    the averaging windows and the approximation's lag are config.toml's."""
+    from dataclasses import fields
+
+    from revolving_analysis.settings import DEFAULTS, WINDOW_LENGTHS
+    from revolving_analysis.transition_matrices import COARSE_SPEC
+
+    defaults = RevolvingInputs()
+    for f in fields(RevolvingInputs):
+        # scenarios/covenants are converted to the engine's key names; checked below.
+        if f.name in DEFAULTS and f.name not in ("scenarios", "covenants"):
+            assert getattr(defaults, f.name) == DEFAULTS[f.name], f.name
+    assert WINDOW_LENGTHS == {k: (v or None) for k, v in DEFAULTS["roll_rate_windows"].items()}
+    assert COARSE_SPEC.edges[-1][4] == DEFAULTS["approx_writeoff_lag_months"]
+    assert [s["name"] for s in defaults.scenarios] == [s["name"] for s in DEFAULTS["scenarios"]]
+
+
+def test_options_endpoint_serves_windows_and_covenant_metrics():
+    opts = _client().get("/api/revolving/options").json()
+    assert opts["rollRateWindows"] == ["T3", "T6", "T12", "ALL"]
+    assert {"key": "par91_total", "label": "PAR 91+ incl. defaulted stock"} in opts[
+        "covenantMetrics"
+    ]
+
+
+def test_api_rejects_a_window_not_in_config():
+    res = _client().post(
+        "/api/analyse/revolving", json={"rows": _rows(), "generalInputs": {"rollRateWindow": "T24"}}
+    )
+    assert res.status_code == 422 and "T3, T6, T12, ALL" in res.json()["detail"]

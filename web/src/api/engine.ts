@@ -486,8 +486,52 @@ export interface RevolvingResponse {
   checks: Array<Record<string, unknown>>;
   lossRates: Array<Record<string, unknown>>;
   lossRateDistribution: Array<Record<string, unknown>>;
+  lgdUsed: number;
+  lgdBasis: 'Input' | 'Recoveries';
+  standardMetrics: Array<{ key: string; label: string; value: number | null; kind: MetricKind; formula: string; note: string }>;
+  /** One row per metric: key, Metric, kind, then one key per "YYYY-MM". */
+  overTime: Array<Record<string, unknown>>;
+  unitEconomics: Array<{ item: string; monthly: number | null; annualised: number | null; overTenor: number | null }>;
+  earlyWarnings: Array<{ key: string; label: string; kind: MetricKind; now: number; prior: number; change: number; flag: boolean }>;
+  backtest: Array<Record<string, unknown>>;
+  backtestSummary: {
+    window: string;
+    months: number;
+    pooledRatio: number | null;
+    medianRatio: number | null;
+    minRatio: number | null;
+    maxRatio: number | null;
+    meanAbsError: number | null;
+  };
+  stress: Array<{
+    name: string;
+    valid: boolean;
+    rollRateMultiplier?: number;
+    lgdMultiplier?: number;
+    lgd?: number;
+    lossFactorCurrent?: number;
+    performingEcl?: number;
+    totalEcl?: number;
+    coveragePerforming?: number | null;
+    coverageTotal?: number | null;
+    lossRate?: number | null;
+    advanceRate?: number | null;
+  }>;
+  advance: { stressLossRate: number | null; haircut: number; advanceRate: number | null };
+  covenants: Array<{
+    metric: string;
+    label: string;
+    kind: MetricKind;
+    operator: '<=' | '>=';
+    limit: number;
+    value: number | null;
+    headroom: number | null;
+    status: 'PASS' | 'BREACH' | 'N/A';
+  }>;
   generalInputs: Record<string, unknown>;
 }
+
+export type MetricKind = 'pct' | 'months' | 'money';
 
 export interface RevolvingAnalyseInput {
   ingest: LendingIngest;
@@ -508,6 +552,17 @@ export function exportRevolvingWorkbook(input: RevolvingAnalyseInput): Promise<B
     ingest: input.ingest,
     ...(input.generalInputs ? { generalInputs: input.generalInputs } : {}),
   });
+}
+
+/** The revolving General Inputs pickers' choices (from config.toml and the
+ * metric catalogue): roll-rate window names, and the metrics a covenant can test. */
+export interface RevolvingOptions {
+  rollRateWindows: string[];
+  covenantMetrics: Array<{ key: string; label: string }>;
+}
+
+export function getRevolvingOptions(): Promise<RevolvingOptions> {
+  return get<RevolvingOptions>('/revolving/options');
 }
 
 /** The revolving General Inputs defaults from the server's config.toml. */

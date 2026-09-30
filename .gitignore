@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 venv/
 env/
+.pytest_cache/
+.ruff_cache/
 
 # Streamlit secrets (never commit API keys)
 .streamlit/secrets.toml
@@ -27,7 +29,7 @@ env/
 data/.google_session_tokens.json
 
 # Local session/state
-PROGRESS.md
+docs/progress/PROGRESS.md
 
 # Streamlit / IDE
 .streamlit/*.toml.bak

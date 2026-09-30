@@ -280,6 +280,26 @@ _DEFAULTS = {
         "loss_rate_basis": "Blended",
         "balance_tolerance": 1.0,
         "unexplained_warning_pct": 0.05,
+        "lgd_basis": "Input",
+        "cost_of_funds_pct": 0.13,
+        "opex_pct": 0.02,
+        "advance_haircut": 0.0,
+        "backtest_min_history_months": 12,
+        "early_warning_lookback_months": 3,
+        "early_warning_threshold": 0.2,
+        "approx_writeoff_lag_months": 2,
+        "stress_roll_rate_cap": 1.0,
+        "roll_rate_windows": {"T3": 3, "T6": 6, "T12": 12, "ALL": 0},
+        "scenarios": [
+            {"name": "Base", "roll_rate_multiplier": 1.0, "lgd_multiplier": 1.0},
+            {"name": "Stress", "roll_rate_multiplier": 1.25, "lgd_multiplier": 1.1},
+            {"name": "Severe", "roll_rate_multiplier": 1.5, "lgd_multiplier": 1.25},
+        ],
+        "covenants": [
+            {"metric": "par91_total", "operator": "<=", "limit": 0.15},
+            {"metric": "writeoff_m", "operator": "<=", "limit": 0.03},
+            {"metric": "coverage_perf", "operator": "<=", "limit": 0.25},
+        ],
     },
     "field_aliases": {
         "lending": {
