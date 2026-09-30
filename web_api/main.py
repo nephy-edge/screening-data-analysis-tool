@@ -15,6 +15,8 @@ The React dev server (web/) proxies ``/api/**`` to this server (port 8000).
 
 from __future__ import annotations
 
+import calendar
+import datetime
 import io
 import itertools
 import json
@@ -73,6 +75,7 @@ from chat_context import _build_rental_chat_context
 from data_normalize import _clean_numeric, _coerce_dates as _coerce_lending_dates
 from export_workbook import (
     _add_chat_history_sheet,
+    _build_baas_export_workbook,
     _build_lending_export_workbook,
     _build_rental_export_workbook,
     _build_revolving_export_workbook,
@@ -503,6 +506,13 @@ REVOLVING_COVENANT_METRICS = {
     **_REVOLVING_EXTRA_METRICS,
 }
 
+# BaaS (battery-as-a-service) unit-economics engine
+from baas_analysis.engine import REQUIRED_FIELDS as BAAS_REQUIRED_FIELDS
+from baas_analysis.market_table import OPTIONAL_FIELDS as BAAS_OPTIONAL_FIELDS
+from baas_analysis.market_table import run as run_baas
+from baas_analysis.market_table import template_frame as baas_template_frame
+from baas_analysis.seed_markets import SEED_MARKETS as BAAS_SEED_MARKETS
+
 app = FastAPI(
     title="SC Analysis Engine API",
     version="0.1.0",
@@ -743,6 +753,26 @@ class RevolvingAnalyseBody(BaseModel):
     ingest: LendingAnalyseIngest | None = None
 
 
+def _end_of_this_month() -> datetime.date:
+    today = datetime.date.today()
+    return datetime.date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
+
+
+class BaasGeneralInputsBody(BaseModel):
+    """Month 0 of every market's cash flows; defaults to the end of this month."""
+
+    valuationDate: datetime.date = Field(default_factory=_end_of_this_month)
+
+
+class BaasAnalyseBody(BaseModel):
+    rows: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="One row per market, keyed by the BaaS field names (market, fx_rate, ...).",
+    )
+    generalInputs: BaasGeneralInputsBody = Field(default_factory=BaasGeneralInputsBody)
+    ingest: LendingAnalyseIngest | None = None
+
+
 RENTAL_REQUIRED_COLUMNS = [
     "contract_id",
     "asset_id",
@@ -787,6 +817,10 @@ RENTAL_DQ_CONFIG = {
 REVOLVING_DQ_CONFIG = {
     "input_columns": [(c, True) for c in REVOLVING_REQUIRED_COLUMNS]
     + [(c, False) for c in REVOLVING_OPTIONAL_COLUMNS],
+}
+BAAS_DQ_CONFIG = {
+    "input_columns": [(c, True) for c in BAAS_REQUIRED_FIELDS]
+    + [(c, False) for c in BAAS_OPTIONAL_FIELDS],
 }
 
 # In-memory registry of ingested uploads. A real file upload stores its parsed
@@ -2916,6 +2950,111 @@ def export_revolving(body: RevolvingAnalyseBody) -> Response:
     )
 
 
+def _resolve_baas_df(body: BaasAnalyseBody) -> pd.DataFrame:
+    """The market table from ``ingest`` (upload + mapping) or direct ``rows``.
+    Values stay as uploaded; baas_analysis.market_table parses and validates."""
+    if body.ingest:
+        raw = _get_ingest(body.ingest.ingestId)
+        if raw is None:
+            raise HTTPException(
+                status_code=404, detail="ingestId not found (upload may have expired)."
+            )
+        df = _canonical_rows_from_mapping(
+            raw, body.ingest.mapping, _derived_dicts(body.ingest.derivedColumns)
+        )
+    elif body.rows:
+        df = pd.DataFrame(body.rows)
+    else:
+        raise HTTPException(status_code=400, detail="No rows provided.")
+    missing = [c for c in BAAS_REQUIRED_FIELDS if c not in df.columns]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Missing required BaaS fields in your mapping: {', '.join(missing)}",
+        )
+    return df
+
+
+def _baas_pipeline(body: BaasAnalyseBody) -> tuple[pd.DataFrame, None, list[dict]]:
+    def run():
+        df = _resolve_baas_df(body)
+        try:
+            return df, None, run_baas(df, body.generalInputs.valuationDate)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Analysis failed: {exc}") from exc
+
+    return _cached_pipeline("baas", body, run)
+
+
+def _baas_cashflow_rows(runs: list[dict]) -> list[dict[str, Any]]:
+    """Months down, one net-cash-flow column per market that ran."""
+    ok = [r for r in runs if r["result"]]
+    if not ok:
+        return []
+    rows = []
+    for i, first in enumerate(ok[0]["result"]["cashflows"]):
+        row = {"Month": first["month"], "Date": first["date"].isoformat()}
+        for r in ok:
+            row[r["market"]] = r["result"]["cashflows"][i]["net"]
+        rows.append(row)
+    return rows
+
+
+@app.get("/api/baas/defaults")
+def baas_defaults() -> dict[str, Any]:
+    """The BaaS General Inputs defaults, so the UI shows the date a run will use."""
+    return BaasGeneralInputsBody().model_dump(mode="json")
+
+
+@app.get("/api/baas/template")
+def baas_template() -> Response:
+    """The upload template: one column per BaaS field, the 8 seed markets as rows."""
+    csv = baas_template_frame(BAAS_SEED_MARKETS).to_csv(index=False)
+    return Response(
+        content=csv,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="baas_markets_template.csv"'},
+    )
+
+
+@app.post("/api/analyse/baas")
+def analyse_baas(body: BaasAnalyseBody) -> dict[str, Any]:
+    _, _, runs = _baas_pipeline(body)
+    markets = []
+    for r in runs:
+        res = r["result"] or {}
+        markets.append(
+            {
+                "market": r["market"],
+                "issues": r["issues"],
+                "metrics": {k: v for k, v in res.items() if k not in ("cashflows", "break_even")},
+                "breakEven": res.get("break_even"),
+            }
+        )
+    return _json_safe(
+        {
+            "summary": {"rows": len(runs), "cohorts": 0},
+            "markets": markets,
+            "cashflows": _baas_cashflow_rows(runs),
+            "generalInputs": body.generalInputs.model_dump(mode="json"),
+        }
+    )
+
+
+@app.post("/api/export/baas")
+def export_baas(body: BaasAnalyseBody) -> Response:
+    """Same request shape as /api/analyse/baas; returns the results as .xlsx."""
+    df, _, runs = _baas_pipeline(body)
+    xlsx_bytes = _build_baas_export_workbook(
+        df, runs, _baas_cashflow_rows(runs), body.generalInputs.valuationDate
+    )
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="SC_Analysis_BaaS.xlsx"'},
+    )
+
+
 class SuggestMappingBody(BaseModel):
     modelKey: str = Field(..., description="'lending' or 'rental'.")
     columns: list[str] = Field(..., description="Raw uploaded file's column headers.")
@@ -2935,6 +3074,7 @@ def suggest_mapping(body: SuggestMappingBody) -> dict[str, Any]:
     config = {
         "lending": LENDING_DQ_CONFIG,
         "revolving": REVOLVING_DQ_CONFIG,
+        "baas": BAAS_DQ_CONFIG,
     }.get(body.modelKey, RENTAL_DQ_CONFIG)
     # Same 20000/6000 truncation app.py's mapping-suggestion call uses
     # (_ai_context_text(max_chars=20000, per_doc=6000)) - keeps this cheaper,
@@ -3348,6 +3488,8 @@ def _infer_model_key(mapping: dict[str, Any]) -> str:
         return "rental"
     if "principal_outstanding-active" in mapping:  # revolving fields are disjoint too
         return "revolving"
+    if "pack_cost_usd" in mapping:  # and so are the BaaS fields
+        return "baas"
     return "lending"
 
 

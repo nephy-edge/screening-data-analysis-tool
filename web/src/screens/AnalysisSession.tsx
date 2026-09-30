@@ -10,6 +10,7 @@ import {
   RevolvingSummaryTab,
   RevolvingTransitionTab,
 } from './RevolvingTabs';
+import { BaasCashFlowsTab, BaasResultsTab } from './BaasTabs';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -1770,7 +1771,12 @@ export function AnalysisSession({
     { id: 'backtest', label: 'Backtest & Stress' },
     { id: 'facility', label: 'Facility' },
   ];
-  const tabs = isRevolving ? revolvingTabs : isRental ? rentalTabs : lendingTabs;
+  const baasTabs = [
+    { id: 'baasResults', label: 'Results' },
+    { id: 'baasCashflows', label: 'Cash Flows' },
+  ];
+  const isBaas = state.modelKey === 'baas';
+  const tabs = isBaas ? baasTabs : isRevolving ? revolvingTabs : isRental ? rentalTabs : lendingTabs;
   const [tab, setTab] = useState<string>(tabs[0].id);
 
   const error = state.analysisError;
@@ -1779,9 +1785,10 @@ export function AnalysisSession({
     <div>
       {error ? <Alert tone="error">{error}</Alert> : null}
 
-      {!state.analysisResponse && !state.rentalResponse && !state.revolvingResponse ? (
+      {!state.analysisResponse && !state.rentalResponse && !state.revolvingResponse && !state.baasResponse ? (
         <Alert tone="info">
-          Run analysis to load live engine results for the {isRevolving ? 'revolving' : isRental ? 'rental' : 'lending'} model.
+          Run analysis to load live engine results for the{' '}
+          {isBaas ? 'BaaS' : isRevolving ? 'revolving' : isRental ? 'rental' : 'lending'} model.
         </Alert>
       ) : null}
 
@@ -1803,6 +1810,8 @@ export function AnalysisSession({
       {tab === 'transition' && <RevolvingTransitionTab />}
       {tab === 'backtest' && <RevolvingBacktestStressTab />}
       {tab === 'facility' && <RevolvingFacilityTab />}
+      {tab === 'baasResults' && <BaasResultsTab />}
+      {tab === 'baasCashflows' && <BaasCashFlowsTab />}
 
       <div className="sd-actions" style={{ marginTop: 24, flexWrap: 'wrap' }}>
         <Button variant="ghost" onClick={onEditMapping}>

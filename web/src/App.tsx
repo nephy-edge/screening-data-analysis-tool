@@ -19,6 +19,7 @@ const MODEL_LABELS: Record<ModelKey, string> = {
   lending: 'Lending',
   rental: 'Rental & Subscription',
   revolving: 'Revolving Lending',
+  baas: 'Battery as a Service',
 };
 
 function modelTitle(model: ModelKey, step: Step): { title: string; sub: string } {
@@ -31,7 +32,9 @@ function modelTitle(model: ModelKey, step: Step): { title: string; sub: string }
           ? 'Load a loan tape, map columns to the template, and review cohort-level LTV / loss-rate results.'
           : model === 'revolving'
             ? 'Load a monthly credit-line report (one row per month), map its columns, and review the Outputs ratios and roll-rate transition matrices with ECL.'
-            : 'Load contract-level lease/rental data, map your columns to the Data Input template, and review asset-cohort LTV, churn, unit economics and TS covenants.',
+            : model === 'baas'
+              ? 'Load a market assumptions table (one row per market - download the template below), map its columns, and review each market’s battery-swap unit economics, IRRs and break-even.'
+              : 'Load contract-level lease/rental data, map your columns to the Data Input template, and review asset-cohort LTV, churn, unit economics and TS covenants.',
     };
   }
   if (step === 'mapping')
@@ -45,7 +48,9 @@ function modelTitle(model: ModelKey, step: Step): { title: string; sub: string }
     sub:
       model === 'revolving'
         ? 'Outputs ratios and roll-rate transition matrices computed from the monthly report.'
-        : `Cohort-level outputs computed for this ${base} portfolio.`,
+        : model === 'baas'
+          ? 'Per-market unit economics, IRRs and monthly cash flows computed from the assumptions table.'
+          : `Cohort-level outputs computed for this ${base} portfolio.`,
   };
 }
 
@@ -117,6 +122,7 @@ function Shell() {
               <option value="lending">Lending</option>
               <option value="rental">Rental &amp; Subscription</option>
               <option value="revolving">Revolving Lending</option>
+              <option value="baas">Battery as a Service</option>
             </Select>
           </div>
         )}

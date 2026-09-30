@@ -1283,3 +1283,29 @@ def _build_revolving_export_workbook(c, general_inputs):
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _build_baas_export_workbook(markets, runs, cashflow_rows, valuation_date):
+    """BaaS export (values): one results row per market (with any input
+    issues), the monthly net cash flows, and the market table as uploaded."""
+    wb = Workbook()
+    results_ws = wb.active
+    results_ws.title = "Results"
+    rows = []
+    for r in runs:
+        res = r["result"] or {}
+        be = res.get("break_even") or {}
+        row = {"market": r["market"], "issues": " ".join(r["issues"]) or "OK"}
+        row.update({k: v for k, v in res.items() if k not in ("market", "cashflows", "break_even")})
+        row["vehicles_to_break_even"] = be.get("vehicles_to_break_even", "n/a")
+        row["batteries_to_break_even"] = be.get("batteries_to_break_even", "n/a")
+        rows.append(row)
+    results_ws.cell(row=1, column=1, value="Valuation date (month 0)")
+    results_ws.cell(row=1, column=2, value=valuation_date)
+    _write_frame(results_ws, pd.DataFrame(rows), 3, index=False)
+    _write_frame(wb.create_sheet("Cash flows"), pd.DataFrame(cashflow_rows), 1, index=False)
+    _write_frame(wb.create_sheet("Inputs"), markets, 1, index=False)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
