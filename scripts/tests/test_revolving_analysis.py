@@ -650,6 +650,7 @@ def test_ageing_mix_sums_to_100_percent():
     assert run(_small_book(), RevolvingInputs(min_outstanding_in_sample=0))["ageingMix"] == []
 
 
+@needs_reference
 def test_backtest_shows_gap_and_tenor():
     table = run(_reference_frame(), RevolvingInputs())["backtest"]
     done = table[table["Outcome observed"]]
