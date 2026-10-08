@@ -109,6 +109,7 @@ credit_stress_factor = 1.7
 lgd = 1.0
 roll_rate_window = "T12"          # T3 / T6 / T12 / ALL
 ratio_window_months = 2           # months (ending at the as-of month) the Outputs averages use
+writeoff_window_months = 1        # write-off rate averaged over this many months (1 = as-of month only, as the template)
 min_outstanding_in_sample = 1000000000.0
 stress_percentile = 0.95
 denominator_lag_months = 5
@@ -147,21 +148,12 @@ name = "Severe"
 roll_rate_multiplier = 1.5
 lgd_multiplier = 1.25
 
-# Covenant tests - EXAMPLE limits only; set them per deal in General Inputs.
-# metric is a key from scripts/revolving_analysis/metrics.py (or coverage_perf,
-# coverage_total, net_yield_annual).
-[[revolving_defaults.covenants]]
-metric = "par91_total"
-operator = "<="
-limit = 0.15
-[[revolving_defaults.covenants]]
-metric = "writeoff_m"
-operator = "<="
-limit = 0.03
-[[revolving_defaults.covenants]]
-metric = "coverage_perf"
-operator = "<="
-limit = 0.25
+# Covenant tests: none by default - limits are deal-specific, so they are
+# entered per deal in General Inputs. To pre-fill some, add blocks like:
+#   [[revolving_defaults.covenants]]
+#   metric = "par91_total"   # a key from scripts/revolving_analysis/metrics.py
+#   operator = "<="          # (or coverage_perf, coverage_total, net_yield_annual)
+#   limit = 0.15
 
 # Raw-header spellings that should auto-map to each template field, keyed by
 # model ("lending" / "rental") so an alias never leaks across models (e.g.

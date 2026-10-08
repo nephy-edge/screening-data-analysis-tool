@@ -367,6 +367,13 @@ export function exportLendingWorkbook(input: LendingAnalyseInput): Promise<Blob>
   return postForBlob('/export/lending', input);
 }
 
+/** Standalone read-only HTML report of the current analysis (what Share
+ * downloads until the app is deployed). `body` is the model's analyse
+ * request; `ltv` the LTV tab's dropdown choices (lending/revolving only). */
+export function exportShareHtml(model: string, body: unknown, ltv?: unknown): Promise<Blob> {
+  return postForBlob(`/export/html/${model}`, ltv === undefined ? body : { body, ltv });
+}
+
 export interface RentalResponse {
   summary: { rows: number; cohorts: number };
   ue: Record<string, unknown>;
@@ -464,6 +471,8 @@ export interface RevolvingResponse {
   facts: Array<Record<string, unknown>>;
   ratios: RevolvingRatio[];
   warnings: string[];
+  /** Data Checks tab - same shape as the Lending/Rental checks. */
+  qualityChecks: QualityCheck[];
   /** The tables below are months-across: a label column plus one key per "YYYY-MM". */
   balances: Array<Record<string, unknown>>;
   rollRates: Array<Record<string, unknown>>;
@@ -492,6 +501,28 @@ export interface RevolvingResponse {
   /** One row per metric: key, Metric, kind, then one key per "YYYY-MM". */
   overTime: Array<Record<string, unknown>>;
   unitEconomics: Array<{ item: string; monthly: number | null; annualised: number | null; overTenor: number | null }>;
+  /** Performance tab: one row per figure, one key per "YYYY-MM", plus the
+   * term and loss rate the LTV Calculator and Unit Economics tabs use. */
+  performance: {
+    table: Array<{ key: string; Metric: string; kind: 'money' | 'pct' | 'months' | 'count'; group: 'balance' | 'breakdown' | 'metric' } & Record<string, unknown>>;
+    avgTerm: number | null;
+    termMonths: number;
+    lossRateNow: number | null;
+    lossRate95: number | null;
+    lossRateMonths: number;
+  };
+  /** Product interest rate for the LTV Calculator: interest rate (m) x avg term. */
+  ltvInterest: number | null;
+  /** The inputs behind the principal tenor used in unit economics. */
+  tenorInputs: {
+    principalCollected: number;
+    averageOutstanding: number;
+    windowMonths: number;
+    paymentRate: number | null;
+    principalTenor: number | null;
+  };
+  /** Standard ageing split at the as-of month; empty without the bucket columns. */
+  ageingMix: Array<{ bucket: string; balance: number; share: number | null }>;
   earlyWarnings: Array<{ key: string; label: string; kind: MetricKind; now: number; prior: number; change: number; flag: boolean }>;
   backtest: Array<Record<string, unknown>>;
   backtestSummary: {
@@ -728,6 +759,19 @@ export function askAi(
   },
 ): Promise<{ answer: string }> {
   return post<{ answer: string }>(`/ai/chat/${modelKey}`, input);
+}
+
+/** Ask AI, Revolving Lending model: the same run inputs as runRevolvingAnalysis. */
+export function askRevolvingAi(
+  input: RevolvingAnalyseInput & {
+    question: string;
+    history: ChatMessage[];
+    userContext?: string;
+    documents?: ContextDocument[];
+  },
+): Promise<{ answer: string }> {
+  const { generalInputs, ...rest } = input;
+  return post<{ answer: string }>('/ai/chat/revolving', { ...rest, ...(generalInputs ? { generalInputs } : {}) });
 }
 
 /** Result of the Data-Checks "Escalate flagged cohorts to analytics" action -

@@ -47,35 +47,86 @@ def ratio_block(
     g, h = now["principal_outstanding"], now["principal_outstanding-active"]
     j = now["principal_outstanding-par60-90"]
     rows = [
-        ("Expected Tenor (m)", tenor, "UE / LTV", "1 / ((E + D − F) at as-of ÷ average G)"),
-        ("Interest Rate (m)", rate_m, "UE", "Σ D ÷ Σ G over the window"),
+        (
+            "Expected Tenor (m)",
+            tenor,
+            "UE / LTV",
+            "One divided by the as-of month's collections plus interest, less new drawings, "
+            "as a share of average outstanding over the window",
+        ),
+        (
+            "Interest Rate (m)",
+            rate_m,
+            "UE",
+            "Interest collected over the window divided by principal outstanding over the window",
+        ),
         (
             "Interest Rate (overall)",
             rate_m * tenor if rate_m is not None and tenor is not None else None,
             "LTV Product Interest Rate",
-            "Interest Rate (m) × Expected Tenor (m)",
+            "The monthly interest rate multiplied by the expected tenor",
         ),
-        ("Loss Rate", loss_rate, "UE ", "Point-in-time roll-rate loss rate, mean"),
+        (
+            "Loss Rate",
+            loss_rate,
+            "UE ",
+            "Average of the monthly point-in-time loss rates in the sample",
+        ),
         (
             "95th %ile",
             stress_loss_rate,
             "LTV",
-            "Point-in-time roll-rate loss rate, stress percentile",
+            "The monthly point-in-time loss rate at the stress percentile",
         ),
-        ("Active", _div(h, g), "today & overtime", "H ÷ G"),
-        ("PAR30", _div(now["principal_outstanding-par30-60"], g), "today & overtime", "I ÷ G"),
-        ("PAR60", _div(j, h), "today & overtime", "J ÷ H"),
-        ("PAR90", _div(j, g), "today & overtime", "J ÷ G"),
-        ("Write offs", _div(now["principal_written-off"], avg_out), None, "K ÷ average G"),
-        ("ECL", total_ecl, None, "Total ECL at as-of (Transition Matrices)"),
-        ("Loss Rate", _div(total_ecl, g), None, "ECL ÷ G"),
-        ("Outstanding", float(g), None, "G at as-of"),
-        ("number of customers", _num(now["number_of_customers"]), None, "B at as-of"),
+        (
+            "Active",
+            _div(h, g),
+            "today & overtime",
+            "Active balance divided by principal outstanding",
+        ),
+        (
+            "PAR30",
+            _div(now["principal_outstanding-par30-60"], g),
+            "today & overtime",
+            "Balance 1-60 days past due divided by principal outstanding",
+        ),
+        (
+            "PAR60",
+            _div(j, h),
+            "today & overtime",
+            "Balance 61-90 days past due divided by the active balance",
+        ),
+        (
+            "PAR90",
+            _div(j, g),
+            "today & overtime",
+            "Balance 61-90 days past due divided by principal outstanding",
+        ),
+        (
+            "Write offs",
+            _div(now["principal_written-off"], avg_out),
+            None,
+            "Principal written off in the month divided by average outstanding over the window",
+        ),
+        (
+            "ECL",
+            total_ecl,
+            None,
+            "Total expected credit loss at the as-of month (Transition Matrices)",
+        ),
+        ("Loss Rate", _div(total_ecl, g), None, "Total ECL divided by principal outstanding"),
+        ("Outstanding", float(g), None, "Principal outstanding at the as-of month"),
+        (
+            "number of customers",
+            _num(now["number_of_customers"]),
+            None,
+            "Number of customers at the as-of month",
+        ),
         (
             "% of credit line utilized",
             _div(g, now["total_credit_line"]),
             "today & overtime",
-            "G ÷ C",
+            "Principal outstanding divided by the total of approved credit lines",
         ),
     ]
     return [

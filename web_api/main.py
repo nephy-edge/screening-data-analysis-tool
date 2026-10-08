@@ -80,6 +80,7 @@ from export_workbook import (
     _build_rental_export_workbook,
     _build_revolving_export_workbook,
 )
+from share_html import build_share_html
 import warehouse
 from integrations import (
     _redshift_job_status,
@@ -713,6 +714,7 @@ class RevolvingGeneralInputsBody(BaseModel):
         description="A window name from config.toml [revolving_defaults.roll_rate_windows].",
     )
     ratioWindowMonths: int = Field(REVOLVING_DEFAULTS["ratio_window_months"], ge=1)
+    writeoffWindowMonths: int = Field(REVOLVING_DEFAULTS["writeoff_window_months"], ge=1)
     minOutstandingInSample: float = REVOLVING_DEFAULTS["min_outstanding_in_sample"]
     stressPercentile: float = Field(REVOLVING_DEFAULTS["stress_percentile"], ge=0, le=1)
     denominatorLagMonths: int = Field(REVOLVING_DEFAULTS["denominator_lag_months"], ge=0)
@@ -739,7 +741,7 @@ class RevolvingGeneralInputsBody(BaseModel):
     )
     covenants: list[RevolvingCovenantBody] = Field(
         default_factory=lambda: [
-            RevolvingCovenantBody(**c) for c in REVOLVING_DEFAULTS["covenants"]
+            RevolvingCovenantBody(**c) for c in REVOLVING_DEFAULTS.get("covenants", [])
         ]
     )
 
@@ -2846,6 +2848,7 @@ def _revolving_pipeline(body: RevolvingAnalyseBody) -> tuple[pd.DataFrame, None,
             lgd=gi.lgd,
             roll_rate_window=gi.rollRateWindow,
             ratio_window_months=gi.ratioWindowMonths,
+            writeoff_window_months=gi.writeoffWindowMonths,
             min_outstanding_in_sample=gi.minOutstandingInSample,
             stress_percentile=gi.stressPercentile,
             denominator_lag_months=gi.denominatorLagMonths,
@@ -2905,6 +2908,7 @@ def analyse_revolving(body: RevolvingAnalyseBody) -> dict[str, Any]:
             "facts": _frame_to_records(c["facts"]),
             "ratios": c["ratios"],
             "warnings": c["warnings"],
+            "qualityChecks": c["qualityChecks"],
             "balances": records(c["balances"]),
             "rollRates": records(c["rollRates"]),
             "lossFactors": records(c["lossFactors"]),
@@ -2918,6 +2922,10 @@ def analyse_revolving(body: RevolvingAnalyseBody) -> dict[str, Any]:
             "standardMetrics": c["standardMetrics"],
             "overTime": _revolving_over_time_records(c["overTime"]),
             "unitEconomics": c["unitEconomics"],
+            "performance": c["performance"],
+            "ltvInterest": c["ltvInterest"],
+            "tenorInputs": c["tenorInputs"],
+            "ageingMix": c["ageingMix"],
             "earlyWarnings": c["earlyWarnings"],
             "backtest": _frame_to_records(c["backtest"]),
             "backtestSummary": c["backtestSummary"],
@@ -3055,6 +3063,66 @@ def export_baas(body: BaasAnalyseBody) -> Response:
     )
 
 
+# Standalone read-only HTML report (what Share downloads until the app is
+# deployed). Each route reruns the model's own (cached) analyse endpoint and
+# hands that exact JSON to scripts/share_html.py - no figures recomputed. The
+# LTV choices are the user's LTV-tab dropdowns; the green inputs are filled in
+# here from the analysis, the same way each LTV tab does.
+def _html_response(
+    model: str, result: dict, inputs: dict | None, ltv_calc: dict | None = None
+) -> Response:
+    ltv_calc = _json_safe(ltv_calc) if ltv_calc else None
+    return Response(
+        content=build_share_html(model, _json_safe(result), inputs, ltv_calc),
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="SC_Analysis_{model}.html"'},
+    )
+
+
+@app.post("/api/export/html/lending")
+def export_html_lending(body: LendingAnalyseBody, ltv: LtvCalcBody | None = None) -> Response:
+    result = analyse_lending(body)
+    ue, ltv_data = result.get("ue") or {}, result.get("ltv") or {}
+    use_all = bool(ltv and ltv.includeUnfinishedLoans)
+    ltv_calc = _ltv_calculator_payload(
+        (ltv or LtvCalcBody()).model_copy(
+            update={
+                "averageInterest": result.get("ltvInterest", ue.get("Average Interest %")),
+                "termDays": ltv_data.get("Average Term"),
+                "lossRate": result.get("ltvLossAllLoans") if use_all else result.get("ltvLoss"),
+            }
+        )
+    )
+    return _html_response("lending", result, body.generalInputs.model_dump(), ltv_calc)
+
+
+@app.post("/api/export/html/rental")
+def export_html_rental(body: RentalAnalyseBody) -> Response:
+    return _html_response("rental", analyse_rental(body), body.generalInputs.model_dump())
+
+
+@app.post("/api/export/html/revolving")
+def export_html_revolving(body: RevolvingAnalyseBody, ltv: LtvCalcBody | None = None) -> Response:
+    result = analyse_revolving(body)
+    perf = result.get("performance") or {}
+    avg_term = perf.get("avgTerm")
+    ltv_calc = _ltv_calculator_payload(
+        (ltv or LtvCalcBody()).model_copy(
+            update={
+                "averageInterest": result.get("ltvInterest"),
+                "termDays": avg_term * 30.4375 if avg_term is not None else None,
+                "lossRate": perf.get("lossRate95"),
+            }
+        )
+    )
+    return _html_response("revolving", result, body.generalInputs.model_dump(), ltv_calc)
+
+
+@app.post("/api/export/html/baas")
+def export_html_baas(body: BaasAnalyseBody) -> Response:
+    return _html_response("baas", analyse_baas(body), body.generalInputs.model_dump())
+
+
 class SuggestMappingBody(BaseModel):
     modelKey: str = Field(..., description="'lending' or 'rental'.")
     columns: list[str] = Field(..., description="Raw uploaded file's column headers.")
@@ -3153,6 +3221,13 @@ class LendingChatBody(LendingAnalyseBody):
 
 
 class RentalChatBody(RentalAnalyseBody):
+    question: str
+    history: list[ChatMessage] = Field(default_factory=list)
+    userContext: str = ""
+    documents: list[ContextDocument] = Field(default_factory=list)
+
+
+class RevolvingChatBody(RevolvingAnalyseBody):
     question: str
     history: list[ChatMessage] = Field(default_factory=list)
     userContext: str = ""
@@ -3474,6 +3549,53 @@ def ai_chat_rental(body: RentalChatBody) -> dict[str, Any]:
     )
     try:
         answer = _ask_data_chatbot(body.question, context, [m.model_dump() for m in body.history])
+    except (RuntimeError, requests.RequestException) as exc:
+        raise _ai_error(exc) from exc
+    return {"answer": answer}
+
+
+@app.post("/api/ai/chat/revolving")
+def ai_chat_revolving(body: RevolvingChatBody) -> dict[str, Any]:
+    """Ask AI, Revolving Lending model. The context is the monthly aggregates
+    and every figure the Revolving tabs show - the tape is already one row
+    per month, so no loan-level data exists to leak."""
+    _, _, c = _revolving_pipeline(body)
+    perf = c["performance"]
+    s = c["eclSummary"]
+    user_context = document_text.combine_context_text(
+        body.userContext, [d.model_dump() for d in body.documents], max_chars=60000, per_doc=15000
+    )
+    lines = [
+        "# Revolving Lending portfolio",
+        f"As-of month {s['asOfMonth']}; roll-rate model {s['method']}; LGD {c['lgdUsed']}.",
+        "",
+        "## Summary tab - UE / LTV ratios",
+        *[f"- {r['label']}: {_chat_value(r['value'])}" for r in c["ratios"]],
+        "",
+        "## Performance tab - one key per month (YYYY-MM)",
+        json.dumps(perf["table"], default=str),
+        "",
+        "## LTV Calculator / Unit Economics inputs",
+        f"- Avg term (mean of 1 / net collection ratio, months): {_chat_value(perf['avgTerm'])}",
+        f"- Estimated loss rate at as-of: {_chat_value(perf['lossRateNow'])}",
+        f"- 95th %ile estimated loss rate: {_chat_value(perf['lossRate95'])} "
+        "(the LTV Calculator stresses it by the credit stress factor)",
+        f"- Product interest rate (interest rate (m) x avg term): {_chat_value(c['ltvInterest'])}",
+        *[f"- UE {u['item']}: monthly {_chat_value(u['monthly'])}" for u in c["unitEconomics"]],
+        "",
+        "## ECL at as-of",
+        *_chat_items(s),
+        "",
+        "## Data Checks tab",
+        *[f"- ({q['level']}) {q['message']}" for q in c["qualityChecks"]],
+        *[f"- (warning) {w}" for w in c["warnings"]],
+    ]
+    if user_context.strip():
+        lines += ["", "## User-provided context about this dataset", user_context.strip()]
+    try:
+        answer = _ask_data_chatbot(
+            body.question, "\n".join(lines), [m.model_dump() for m in body.history]
+        )
     except (RuntimeError, requests.RequestException) as exc:
         raise _ai_error(exc) from exc
     return {"answer": answer}

@@ -6,9 +6,10 @@ import { LendingLtvTab, RentalLtvTab, inLtvCohortRange } from './LtvTabs';
 import {
   RevolvingBacktestStressTab,
   RevolvingFacilityTab,
-  RevolvingOutputsTab,
+  RevolvingLtvTab,
+  RevolvingPerformanceTab,
   RevolvingSummaryTab,
-  RevolvingTransitionTab,
+  RevolvingUnitEconomicsTab,
 } from './RevolvingTabs';
 import { BaasCashFlowsTab, BaasResultsTab } from './BaasTabs';
 import {
@@ -438,7 +439,12 @@ function DataInputGridTab() {
 function ChecksList() {
   const { state, analyse } = useAppStore();
   const isRental = state.modelKey === 'rental';
-  const checks: QualityCheck[] = (isRental ? state.rentalResponse?.checks : state.analysisResponse?.checks) ?? [];
+  const checks: QualityCheck[] =
+    (state.modelKey === 'revolving'
+      ? state.revolvingResponse?.qualityChecks
+      : isRental
+        ? state.rentalResponse?.checks
+        : state.analysisResponse?.checks) ?? [];
   const [deduping, setDeduping] = useState(false);
   const [escalating, setEscalating] = useState<string | null>(null);
   const [escalateResults, setEscalateResults] = useState<Record<string, EscalateResult>>({});
@@ -1728,7 +1734,7 @@ export function AnalysisSession({
   onNewSession: () => void;
   onEditMapping: () => void;
 }) {
-  const { state, exportWorkbook, saveSession, createShareLink } = useAppStore();
+  const { state, exportWorkbook, saveSession, shareHtml } = useAppStore();
   const isRental = state.modelKey === 'rental';
   const isRevolving = state.modelKey === 'revolving';
   const [exporting, setExporting] = useState(false);
@@ -1766,10 +1772,14 @@ export function AnalysisSession({
   ];
   const revolvingTabs = [
     { id: 'revSummary', label: 'Summary' },
-    { id: 'outputs', label: 'Outputs' },
-    { id: 'transition', label: 'Transition Matrices' },
+    { id: 'checks', label: 'Data Checks' },
+    { id: 'revPerformance', label: 'Performance' },
+    { id: 'revLtv', label: 'LTV Calculator' },
+    { id: 'revUe', label: 'Unit Economics' },
     { id: 'backtest', label: 'Backtest & Stress' },
-    { id: 'facility', label: 'Facility' },
+    { id: 'facility', label: 'Facility & Covenants' },
+    { id: 'viz', label: 'Custom Viz' },
+    { id: 'ai', label: 'Ask AI' },
   ];
   const baasTabs = [
     { id: 'baasResults', label: 'Results' },
@@ -1806,8 +1816,9 @@ export function AnalysisSession({
       {tab === 'viz' && <VizTab />}
       {tab === 'ai' && <AiTab />}
       {tab === 'revSummary' && <RevolvingSummaryTab />}
-      {tab === 'outputs' && <RevolvingOutputsTab />}
-      {tab === 'transition' && <RevolvingTransitionTab />}
+      {tab === 'revPerformance' && <RevolvingPerformanceTab />}
+      {tab === 'revLtv' && <RevolvingLtvTab />}
+      {tab === 'revUe' && <RevolvingUnitEconomicsTab />}
       {tab === 'backtest' && <RevolvingBacktestStressTab />}
       {tab === 'facility' && <RevolvingFacilityTab />}
       {tab === 'baasResults' && <BaasResultsTab />}
@@ -1837,7 +1848,7 @@ export function AnalysisSession({
         >
           {state.saveRunning ? 'Saving…' : 'Save'}
         </Button>
-        <Button variant="secondary" onClick={() => void createShareLink()} disabled={state.shareRunning}>
+        <Button variant="secondary" onClick={() => void shareHtml()} disabled={state.shareRunning} title="Download a read-only HTML report anyone can open in a browser">
           {state.shareRunning ? 'Sharing…' : 'Share'}
         </Button>
         {state.savedAt ? <span className="sd-muted">Saved.</span> : null}

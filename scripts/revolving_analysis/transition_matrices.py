@@ -80,7 +80,7 @@ COARSE_SPEC = Spec(
         ("Active (New + Current)", "principal_outstanding-active"),
         ("PAR 1-60", "principal_outstanding-par30-60"),
         ("PAR 61-90", "principal_outstanding-par60-90"),
-        ("91+ and defaulted stock (G − H − I − J)", REMAINDER),
+        ("91+ and defaulted stock", REMAINDER),
     ],
     edges=[
         (
@@ -110,7 +110,7 @@ COARSE_SPEC = Spec(
         ("principal_outstanding-par30-60", "PAR 1-60"),
         ("principal_outstanding-par60-90", "PAR 61-90"),
     ],
-    absorbed=("91+ and defaulted stock (G − H − I − J)", REMAINDER),
+    absorbed=("91+ and defaulted stock", REMAINDER),
 )
 
 # Averaging windows ('Roll Rate ECL' AN28:AQ28) are config.toml's

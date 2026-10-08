@@ -20,13 +20,18 @@ def forecast_window(spec: Spec) -> tuple[int, int]:
     return spec.edges[-1][4], sum(e[4] for e in spec.edges)
 
 
+def _window(lo: int, hi: int) -> str:
+    """The outcome window in words, e.g. "2 to 4 months later"."""
+    return f"{lo} to {hi} months later"
+
+
 def backtest(
     frame: pd.DataFrame, spec: Spec, window: str, tolerance: float, min_history: int
 ) -> tuple[pd.DataFrame, dict]:
     lo, hi = forecast_window(spec)
     labels = month_labels(frame)
     wo = frame["principal_written-off"].to_numpy(dtype=float)
-    actual_col = f"Actual write-offs (t+{lo}..t+{hi})"
+    actual_col = f"Actual write-offs ({_window(lo, hi)})"
     rows = []
     for t in range(min_history, len(frame)):
         tm = build_transition_matrices(frame.iloc[: t + 1], spec, window, 1.0, tolerance)
@@ -43,7 +48,7 @@ def backtest(
                 "As-of": labels[t],
                 "Forecast write-offs": forecast,
                 actual_col: actual,
-                "Actual ÷ forecast": actual / forecast if complete and forecast else np.nan,
+                "Actual vs forecast": actual / forecast if complete and forecast else np.nan,
                 "Coverage (performing)": s["coveragePerforming"],
                 "Outcome observed": complete,
             }
@@ -54,15 +59,15 @@ def backtest(
             "As-of",
             "Forecast write-offs",
             actual_col,
-            "Actual ÷ forecast",
+            "Actual vs forecast",
             "Coverage (performing)",
             "Outcome observed",
         ],
     )
-    done = table[table["Outcome observed"] & table["Actual ÷ forecast"].notna()]
-    ratios = done["Actual ÷ forecast"]
+    done = table[table["Outcome observed"] & table["Actual vs forecast"].notna()]
+    ratios = done["Actual vs forecast"]
     summary = {
-        "window": f"t+{lo}..t+{hi}",
+        "window": _window(lo, hi),
         "months": int(len(ratios)),
         "pooledRatio": _div(done[actual_col].sum(), done["Forecast write-offs"].sum()),
         "medianRatio": float(ratios.median()) if len(ratios) else None,

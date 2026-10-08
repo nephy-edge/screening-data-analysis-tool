@@ -5,6 +5,7 @@ reference workbook is available locally."""
 
 import io
 import os
+import re
 import sys
 
 import numpy as np
@@ -167,7 +168,7 @@ def test_coarse_model_runs_on_the_outputs_columns_alone():
     assert np.isnan(wo["2025-03"])
     ecl = res["ecl"].set_index("Bucket")
     # The remainder (G - H - I - J = 14) is carried at loss factor 1.
-    assert ecl.loc["91+ and defaulted stock (G − H − I − J)", "ECL"] == pytest.approx(14.0)
+    assert ecl.loc["91+ and defaulted stock", "ECL"] == pytest.approx(14.0)
     assert any("Approximate roll rates" in w for w in res["warnings"])
 
 
@@ -380,10 +381,10 @@ def test_roll_forward_reproduces_the_source_unexplained_column():
 def test_backtest_matches_the_out_of_sample_check():
     """Same figures as the hand backtest: forecast write-offs vs actual."""
     full = run(_reference_frame(), RevolvingInputs())["backtestSummary"]
-    assert (full["window"], full["months"]) == ("t+1..t+5", 19)
+    assert (full["window"], full["months"]) == ("1 to 5 months later", 19)
     assert full["pooledRatio"] == pytest.approx(0.913, abs=5e-4)
     coarse = run(_reference_frame(with_buckets=False), RevolvingInputs())["backtestSummary"]
-    assert (coarse["window"], coarse["months"]) == ("t+2..t+4", 20)
+    assert (coarse["window"], coarse["months"]) == ("2 to 4 months later", 20)
     assert coarse["pooledRatio"] == pytest.approx(0.904, abs=5e-4)
 
 
@@ -490,10 +491,11 @@ def test_api_rejects_an_unknown_covenant_metric():
     assert res.status_code == 422 and "no_such_metric" in res.json()["detail"]
 
 
-def test_defaults_endpoint_carries_scenarios_and_covenants():
+def test_defaults_endpoint_carries_scenarios_and_no_default_covenants():
+    """Covenant limits are deal-specific, so a new run starts with none."""
     d = _client().get("/api/revolving/defaults").json()
     assert [s["name"] for s in d["scenarios"]] == ["Base", "Stress", "Severe"]
-    assert d["covenants"][0]["metric"] == "par91_total"
+    assert d["covenants"] == []
     assert d["costOfFundsPct"] == pytest.approx(0.13)
 
 
@@ -528,3 +530,179 @@ def test_api_rejects_a_window_not_in_config():
         "/api/analyse/revolving", json={"rows": _rows(), "generalInputs": {"rollRateWindow": "T24"}}
     )
     assert res.status_code == 422 and "T3, T6, T12, ALL" in res.json()["detail"]
+
+
+def _clean_book(**over):
+    """Three months that roll forward exactly (opening + issued - collected -
+    written off = closing) and tie to principal_outstanding."""
+    cols = {
+        "number_of_customers": [10.0, 11.0, 12.0],
+        "total_credit_line": [1000.0, 1000.0, 1000.0],
+        "principal_issued": [100.0, 30.0, 30.0],
+        "principal_collected": [0.0, 10.0, 10.0],
+        "principal_outstanding-active": [100.0, 120.0, 140.0],
+    }
+    cols.update(over)
+    return _monthly(**cols)
+
+
+def _quality(df):
+    return {c["check_id"]: c for c in run(df, RevolvingInputs())["qualityChecks"]}
+
+
+def test_clean_book_raises_no_quality_checks():
+    assert _quality(_clean_book()) == {}
+
+
+def test_unexplained_movement_above_threshold_is_flagged_by_month():
+    # Month 3 closes 20 above its roll-forward (120 + 30 - 10 = 140 expected, 160 reported).
+    checks = _quality(_clean_book(**{"principal_outstanding-active": [100.0, 120.0, 160.0]}))
+    c = checks["unexplained_movement"]
+    assert c["level"] == "warning"
+    assert [d["Month"] for d in c["detail"]] == ["2025-03"]
+    assert c["detail"][0]["Unexplained"] == pytest.approx(20.0)
+    assert c["detail"][0]["% of outstanding"] == f"{20 / 160:.2%}"
+
+
+def test_buckets_over_total_outstanding_are_flagged():
+    df = _clean_book()
+    df.loc[1, "principal_outstanding"] = 110.0  # active alone is 120
+    c = _quality(df)["balance_tie"]
+    assert [d["Month"] for d in c["detail"]] == ["2025-02"]
+
+
+def test_negative_required_values_are_flagged():
+    c = _quality(_clean_book(principal_collected=[0.0, -10.0, 10.0]))["negative_values"]
+    assert c["detail"] == [{"Month": "2025-02", "Field": "principal_collected", "Value": -10.0}]
+
+
+def test_missing_months_are_flagged():
+    df = _clean_book()
+    df.loc[2, "report_month"] = pd.Timestamp("2025-05-01")
+    c = _quality(df)["missing_months"]
+    assert [d["Month"] for d in c["detail"]] == ["2025-03", "2025-04"]
+
+
+def test_default_run_tests_no_covenants():
+    assert RevolvingInputs().covenants == []
+    body = _client().post("/api/analyse/revolving", json={"rows": _rows()}).json()
+    assert body["covenants"] == []
+
+
+def test_api_returns_quality_checks():
+    body = _client().post("/api/analyse/revolving", json={"rows": _rows()}).json()
+    ids = [c["check_id"] for c in body["qualityChecks"]]
+    assert "unexplained_movement" in ids
+
+
+# Formula notation the app must not show: division / multiplication / sum
+# signs, MAX(), the template's column letters as operands, t+n windows.
+_FORMULA = re.compile(r"[÷×Σ|]|MAX\(|[A-K]\s*[−+/]|[−+/]\s*[A-K]|t\+\d")
+
+
+def test_display_text_is_plain_language():
+    """Every label and 'How calculated' text the app shows is plain words."""
+    res = run(_clean_book(), RevolvingInputs())
+    texts = [r["label"] for r in res["ratios"]] + [r["formula"] for r in res["ratios"]]
+    texts += [m["label"] for m in res["standardMetrics"]] + [
+        m["formula"] for m in res["standardMetrics"]
+    ]
+    texts += [e["label"] for e in res["earlyWarnings"]] + list(res["balances"].index)
+    texts += list(res["backtest"].columns) + [res["backtestSummary"]["window"]]
+    texts += [
+        c["message"]
+        for c in _quality(
+            _clean_book(**{"principal_outstanding-active": [100.0, 120.0, 160.0]})
+        ).values()
+    ]
+    bad = [t for t in texts if isinstance(t, str) and _FORMULA.search(t)]
+    assert bad == []
+
+
+def test_writeoff_window_smooths_the_write_off_rate():
+    book = _small_book()
+    one = run(book, RevolvingInputs(min_outstanding_in_sample=0))
+    three = run(book, RevolvingInputs(min_outstanding_in_sample=0, writeoff_window_months=3))
+    std = lambda r: {m["key"]: m["value"] for m in r["standardMetrics"]}  # noqa: E731
+    # Default (1): the as-of month's 4 over average outstanding 100 - the template figure.
+    assert std(one)["writeoff_m"] == pytest.approx(4 / 100)
+    # Window 3: (1 + 2 + 4) written off over (100 + 100 + 100) outstanding.
+    assert std(three)["writeoff_m"] == pytest.approx(7 / 300)
+    ue = {r["item"]: r["monthly"] for r in three["unitEconomics"]}
+    assert ue["Write-offs"] == pytest.approx(-7 / 300)
+    # The template's own Outputs row stays as the template defines it.
+    assert _ratios(three)[19] == pytest.approx(_ratios(one)[19])
+
+
+def test_tenor_inputs_explain_the_principal_tenor():
+    t = run(_small_book(), RevolvingInputs(min_outstanding_in_sample=0))["tenorInputs"]
+    assert t["principalCollected"] == 35.0
+    assert t["averageOutstanding"] == 100.0 and t["windowMonths"] == 2
+    assert t["paymentRate"] == pytest.approx(0.35)
+    assert t["principalTenor"] == pytest.approx(1 / 0.35)
+
+
+def test_ageing_mix_sums_to_100_percent():
+    res = run(_full_by_hand(), RevolvingInputs(min_outstanding_in_sample=0))
+    mix = {r["bucket"]: r["share"] for r in res["ageingMix"]}
+    assert sum(mix.values()) == pytest.approx(1.0)
+    assert mix["Current (incl. new)"] == pytest.approx(150 / 182)
+    assert run(_small_book(), RevolvingInputs(min_outstanding_in_sample=0))["ageingMix"] == []
+
+
+def test_backtest_shows_gap_and_tenor():
+    table = run(_reference_frame(), RevolvingInputs())["backtest"]
+    done = table[table["Outcome observed"]]
+    assert (done["Gap"] == done["Actual vs forecast"] - 1).all()
+    assert "Principal tenor (m)" in table.columns
+
+
+def test_performance_table_by_hand():
+    res = run(_small_book(), RevolvingInputs(min_outstanding_in_sample=0, lgd=0.5))
+    perf = res["performance"]
+    rows = {r["key"]: r for r in perf["table"]}
+    # NCR = (principal + interest collected) / last month's outstanding.
+    assert rows["ncr"]["2025-01"] is None
+    assert rows["ncr"]["2025-02"] == pytest.approx((25 + 6) / 100)
+    assert rows["term"]["2025-05"] == pytest.approx(100 / (35 + 9))
+    terms = [100 / 31, 100 / 38, 100 / 39, 100 / 44]
+    assert perf["avgTerm"] == pytest.approx(sum(terms) / 4)
+    assert rows["cum_write_off"]["2025-05"] == pytest.approx(7.0)
+    assert rows["write_off"]["2025-05"] == pytest.approx(4.0)
+    assert rows["avg_credit_line"]["2025-05"] is None  # no customers
+    # Loss rate = (cum write-off + ECL x LGD) / cumulative issued.
+    pit = res["pit"].iloc[-1]
+    ecl = pit["ECL on performing book (before LGD)"] * 0.5
+    assert rows["ecl"]["2025-05"] == pytest.approx(ecl)
+    assert perf["lossRateNow"] == pytest.approx((7 + ecl) / 220)
+    # Coarse buckets plus the remainder add up to Total Balance.
+    breakdown = [r["2025-05"] for r in perf["table"] if r["group"] == "breakdown"]
+    assert sum(breakdown) == pytest.approx(100.0)
+    assert rows["new_balance"]["2025-05"] is None  # needs BAL_NEW
+
+
+def test_customers_drive_per_customer_rows():
+    df = _small_book()
+    df["number_of_customers"] = 10.0
+    rows = {r["key"]: r for r in run(df, RevolvingInputs())["performance"]["table"]}
+    assert rows["avg_credit_line"]["2025-03"] == pytest.approx(40.0)
+    assert rows["issued_per_customer"]["2025-01"] == pytest.approx(10.0)
+
+
+def test_analyse_endpoint_returns_performance_and_chat_uses_it(monkeypatch):
+    client = _client()
+    body = client.post("/api/analyse/revolving", json={"rows": _rows()}).json()
+    rows = {r["key"]: r for r in body["performance"]["table"]}
+    assert rows["ncr"]["2025-02"] == pytest.approx((60 + 6) / 100)
+    assert rows["avg_credit_line"]["2025-03"] == pytest.approx(1200 / 13)
+    seen = {}
+
+    def fake(question, context, history):
+        seen["context"] = context
+        return "ok"
+
+    monkeypatch.setattr(m, "_ask_data_chatbot", fake)
+    res = client.post("/api/ai/chat/revolving", json={"rows": _rows(), "question": "term?"})
+    assert res.status_code == 200, res.text
+    assert res.json() == {"answer": "ok"}
+    assert "Net Collection Ratio" in seen["context"]

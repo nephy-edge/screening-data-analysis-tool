@@ -122,12 +122,7 @@ Everything else, such as the template's column names and formulas, the full mode
 ### Stress scenarios and covenants
 
 - **Scenarios:** an editable table of name, roll-rate multiplier and LGD multiplier. Defaults: Base 1.0 / 1.0, Stress 1.25 / 1.1, Severe 1.5 / 1.25.
-- **Covenants:** an editable table of metric, test (≤ or ≥) and limit. The defaults are **example limits only**:
-  - PAR 91+ ≤ 15%
-  - write-off rate ≤ 3% a month
-  - ECL coverage (performing) ≤ 25%
-
-  Set them to the deal's facility terms.
+- **Covenants:** an editable table of metric, test (≤ or ≥) and limit. **There are none by default**, because limits are deal-specific: add the deal's facility terms. To pre-fill some for every run, add `[[revolving_defaults.covenants]]` blocks to `config.toml`.
 
 ---
 
@@ -283,7 +278,7 @@ Unexplained movement = G − (G of the previous month + F − E − K). This rep
 - **Revenue mix.** `interest_collected` may include fees and penalties if the provider combines them.
 - **Written-off stock in G.** `principal_outstanding` includes written-off stock where the provider keeps it on book. The template's ratios use G as provided; the performing-book metrics exclude that stock.
 - **Out of scope.** There are no vintage curves or concentration views: both need loan-level data, which a monthly report doesn't have.
-- **Example settings.** The stress multipliers and covenant limits are examples. Set them per deal.
+- **Example settings.** The stress multipliers are examples, and there are no default covenants. Set both per deal.
 
 ---
 

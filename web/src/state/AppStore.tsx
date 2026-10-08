@@ -2,6 +2,7 @@ import { createContext, useContext, useMemo, useReducer, type ReactNode } from '
 import {
   askAi,
   createShare,
+  exportShareHtml,
   exportBaasWorkbook,
   exportLendingWorkbook,
   exportRentalWorkbook,
@@ -12,6 +13,7 @@ import {
   runLendingAnalysis,
   runRentalAnalysis,
   runRevolvingAnalysis,
+  askRevolvingAi,
   saveProfile,
   type AnalysisResponse,
   type BaasResponse,
@@ -146,7 +148,7 @@ type Action =
   | { type: 'saveDone' }
   | { type: 'saveFail'; error: string }
   | { type: 'shareStart' }
-  | { type: 'shareDone'; url: string }
+  | { type: 'shareDone'; url: string | null }
   | { type: 'shareFail'; error: string }
   | { type: 'setDedupe'; value: boolean }
   | { type: 'setSelectedCohorts'; cohorts: string[] | null }
@@ -262,7 +264,7 @@ function reducer(state: AppState, action: Action): AppState {
       // ingestId stays valid for any later export/chat/re-analysis; for runs
       // saved with their ingest info the server only downloads the data when
       // one of those first reads it (web_api/main.py _register_pending_ingest).
-      const cached = payload.analysisResult;
+      const cached = usableCachedResult(payload);
       const isRental = payload.modelKey === 'rental';
       const isRevolving = payload.modelKey === 'revolving';
       const analysisResponse =
@@ -466,6 +468,8 @@ interface AppStoreValue {
   resumeProfile: (sessionId: string) => Promise<boolean>;
   resumeShare: (token: string) => Promise<boolean>;
   createShareLink: () => Promise<void>;
+  /** Pre-deployment Share: download a read-only HTML report. */
+  shareHtml: () => Promise<void>;
 }
 
 const AppContext = createContext<AppStoreValue | null>(null);
@@ -477,6 +481,9 @@ const AppContext = createContext<AppStoreValue | null>(null);
  * and exportWorkbook (building the export payload) so a source name always
  * means the same rows in both places. */
 export function getChartDataSources(state: AppState): Record<string, Array<Record<string, unknown>>> {
+  if (state.modelKey === 'revolving') {
+    return { 'Monthly Data': state.revolvingResponse?.facts ?? [] };
+  }
   if (state.modelKey === 'rental') {
     return {
       Cohorts: state.rentalResponse?.cohortRows ?? [],
@@ -487,6 +494,16 @@ export function getChartDataSources(state: AppState): Record<string, Array<Recor
     Cohorts: state.analysisResponse?.cohorts ?? [],
     'Chart Data': state.analysisResponse?.chart ?? [],
   };
+}
+
+/** A saved run's cached result, or null when it must be re-run: Revolving
+ * runs saved before the Performance tab existed lack `performance`, which
+ * the Performance / LTV / Unit Economics tabs need. */
+function usableCachedResult<T extends { modelKey: string; analysisResult?: unknown }>(payload: T) {
+  const cached = payload.analysisResult as Record<string, unknown> | null | undefined;
+  if (!cached) return null;
+  if (payload.modelKey === 'revolving' && !cached.performance) return null;
+  return payload.analysisResult as T['analysisResult'];
 }
 
 /** Trigger a browser "Save as" for a fetched Blob - no library needed, just
@@ -704,12 +721,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
         dispatch({ type: 'chatFail', error: 'No file loaded — go back and upload one.' });
         return;
       }
-      // The revolving and BaaS models have no Ask AI tab or chat endpoint.
-      if (state.modelKey === 'revolving' || state.modelKey === 'baas') return;
+      // The BaaS model has no Ask AI tab or chat endpoint.
+      if (state.modelKey === 'baas') return;
       const history = state.chatHistory;
       dispatch({ type: 'chatStart', question });
       try {
-        const { answer } = await askAi(state.modelKey, {
+        const { answer } = state.modelKey === 'revolving'
+          ? await askRevolvingAi({
+              ingest,
+              generalInputs: state.generalInputs.revolving ?? null,
+              question,
+              history,
+              userContext: state.analysisContext,
+              documents: state.contextDocuments,
+            })
+          : await askAi(state.modelKey, {
           ingest,
           generalInputs:
             state.modelKey === 'rental' ? buildRentalGeneralInputs() : buildLendingGeneralInputs(),
@@ -776,7 +802,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (!state.auth.user) throw new Error('Not signed in.');
       const payload = await loadProfile(sessionId);
       dispatch({ type: 'restoreProfile', payload, sessionId });
-      return payload.analysisResult != null;
+      return usableCachedResult(payload) != null;
     };
 
     // A shared link is someone else's deal: resuming it gets a fresh
@@ -786,7 +812,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const resumeShare = async (token: string) => {
       const payload = await loadShare(token);
       dispatch({ type: 'restoreProfile', payload, sessionId: crypto.randomUUID() });
-      return payload.analysisResult != null;
+      return usableCachedResult(payload) != null;
     };
 
     const createShareLink = async () => {
@@ -813,6 +839,48 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     };
 
+    // Until the app is deployed a share link can't be opened by anyone else,
+    // so Share downloads a standalone read-only HTML report instead (built
+    // server-side from the same analyse request as the workbook export).
+    const shareHtml = async () => {
+      const ingest = buildIngest();
+      if (!ingest) {
+        dispatch({ type: 'shareFail', error: 'No file loaded — go back and upload one.' });
+        return;
+      }
+      const ltv = {
+        dataSource: state.ltvInputs.dataSource,
+        country: state.ltvInputs.country,
+        macroFxRisk: state.ltvInputs.macroFx,
+        segmentation: state.ltvInputs.segmentation,
+        hedgeRate: parseFloat(state.ltvInputs.hedgeRate) || 0,
+        rolledHedge: state.ltvInputs.rolledHedge,
+        includeUnfinishedLoans: state.ltvInputs.includeUnfinished,
+      };
+      const model = state.modelKey;
+      const body =
+        model === 'baas'
+          ? { ingest, ...(state.generalInputs.baas ? { generalInputs: state.generalInputs.baas } : {}) }
+          : model === 'revolving'
+            ? { ingest, ...(state.generalInputs.revolving ? { generalInputs: state.generalInputs.revolving } : {}) }
+            : model === 'rental'
+              ? { ingest, generalInputs: buildRentalGeneralInputs(), dedupeById: state.dedupeActive }
+              : {
+                  ingest,
+                  generalInputs: buildLendingGeneralInputs(),
+                  dedupeById: state.dedupeActive,
+                  selectedCohorts: state.selectedCohorts ?? undefined,
+                };
+      dispatch({ type: 'shareStart' });
+      try {
+        const blob = await exportShareHtml(model, body, model === 'lending' || model === 'revolving' ? ltv : undefined);
+        downloadBlob(blob, `SC_Analysis_${model}.html`);
+        dispatch({ type: 'shareDone', url: null });
+      } catch (err) {
+        dispatch({ type: 'shareFail', error: err instanceof Error ? err.message : 'Share failed' });
+      }
+    };
+
     return {
       state,
       dispatch,
@@ -823,6 +891,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       resumeProfile,
       resumeShare,
       createShareLink,
+      shareHtml,
     };
   }, [state]);
 

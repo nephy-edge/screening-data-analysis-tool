@@ -393,7 +393,7 @@ export function LendingLtvTab() {
   );
 }
 
-function LtvMatrix({ result }: { result: NonNullable<LtvCalculatorResponse['result']> }) {
+export function LtvMatrix({ result }: { result: NonNullable<LtvCalculatorResponse['result']> }) {
   const cols: TableColumn<{ label: string; principal: string; gbv: string; big?: boolean }>[] = [
     { key: 'label', header: '', render: (r) => (r.big ? <strong>{r.label}</strong> : r.label) },
     { key: 'principal', header: 'Advance on Principal', align: 'right', render: (r) => (r.big ? <strong>{r.principal}</strong> : r.principal) },

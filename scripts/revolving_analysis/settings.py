@@ -31,4 +31,5 @@ def default_scenarios() -> list[dict]:
 
 
 def default_covenants() -> list[dict]:
-    return [dict(c) for c in DEFAULTS["covenants"]]
+    # None by default: config.toml may omit [[revolving_defaults.covenants]].
+    return [dict(c) for c in DEFAULTS.get("covenants", [])]

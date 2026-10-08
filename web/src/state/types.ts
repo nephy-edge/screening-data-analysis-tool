@@ -41,6 +41,7 @@ export interface RevolvingGeneralInputs {
   /** A window name from config.toml [revolving_defaults.roll_rate_windows]. */
   rollRateWindow: string;
   ratioWindowMonths: number;
+  writeoffWindowMonths: number;
   minOutstandingInSample: number;
   stressPercentile: number;
   denominatorLagMonths: number;

@@ -105,6 +105,41 @@ function StatusMappingSection() {
   );
 }
 
+// Allowed range per numeric Revolving input; the engine does not check these itself.
+const REVOLVING_RANGES: Partial<Record<keyof RevolvingGeneralInputs, { min: number; max?: number; whole?: boolean }>> = {
+  lgd: { min: 0, max: 1 },
+  stressPercentile: { min: 0, max: 1 },
+  laggedBlendWeight: { min: 0, max: 1 },
+  costOfFundsPct: { min: 0, max: 1 },
+  opexPct: { min: 0, max: 1 },
+  advanceHaircut: { min: 0, max: 1 },
+  earlyWarningThreshold: { min: 0, max: 1 },
+  minOutstandingInSample: { min: 0 },
+  ratioWindowMonths: { min: 1, whole: true },
+  writeoffWindowMonths: { min: 1, whole: true },
+  denominatorLagMonths: { min: 0, whole: true },
+  backtestMinHistoryMonths: { min: 1, whole: true },
+  earlyWarningLookbackMonths: { min: 1, whole: true },
+};
+
+function revolvingFieldError(key: keyof RevolvingGeneralInputs, value: unknown): string | null {
+  const range = REVOLVING_RANGES[key];
+  if (!range) return null;
+  const v = Number(value);
+  if (!Number.isFinite(v)) return 'Enter a number.';
+  if (range.whole && !Number.isInteger(v)) return 'Enter a whole number of months.';
+  if (v < range.min || (range.max !== undefined && v > range.max))
+    return range.max !== undefined ? `Must be between ${range.min} and ${range.max}.` : `Must be at least ${range.min}.`;
+  return null;
+}
+
+/** Number of Revolving inputs currently out of range - Run is blocked while any are. */
+function revolvingInvalidCount(ri: RevolvingGeneralInputs): number {
+  const fields = (Object.keys(REVOLVING_RANGES) as (keyof RevolvingGeneralInputs)[]).filter((k) => revolvingFieldError(k, ri[k]));
+  const scenarios = ri.scenarios.filter((sc) => !(sc.rollRateMultiplier >= 0) || !(sc.lgdMultiplier >= 0));
+  return fields.length + scenarios.length;
+}
+
 /** Revolving model inputs ('Roll Rate ECL' B5:B8, 'Loss Rate LTV' B9:B12 and
  * the Outputs ratio window). Starts from the server's config.toml defaults. */
 function RevolvingInputsSection() {
@@ -144,17 +179,22 @@ function RevolvingInputsSection() {
       <HelpTip text={help} />
     </span>
   );
-  const numberField = (text: string, help: string, key: keyof RevolvingGeneralInputs, step = 'any') => (
-    <div className="sd-field">
-      {label(text, help)}
-      <Input
-        type="number"
-        step={step}
-        value={String(ri[key] ?? '')}
-        onChange={(e) => set({ [key]: Number(e.target.value) } as Partial<RevolvingGeneralInputs>)}
-      />
-    </div>
-  );
+  const numberField = (text: string, help: string, key: keyof RevolvingGeneralInputs, step = 'any') => {
+    const fieldError = revolvingFieldError(key, ri[key]);
+    return (
+      <div className="sd-field">
+        {label(text, help)}
+        <Input
+          type="number"
+          step={step}
+          value={String(ri[key] ?? '')}
+          aria-invalid={fieldError ? true : undefined}
+          onChange={(e) => set({ [key]: Number(e.target.value) } as Partial<RevolvingGeneralInputs>)}
+        />
+        {fieldError ? <span className="sd-field__error">{fieldError}</span> : null}
+      </div>
+    );
+  };
 
   return (
     <>
@@ -178,7 +218,8 @@ function RevolvingInputsSection() {
           </Select>
         </div>
         {numberField('LGD (loss given default)', 'Share of a defaulted balance that is lost (0-1). Multiplies the roll-rate loss factor into ECL and the loss rate. 1 = no recoveries.', 'lgd')}
-        {numberField('Outputs ratio window (months, ending at as-of)', 'How many months, ending at the as-of month, the Outputs ratios average over (e.g. Interest Rate (m) = Σ interest ÷ Σ outstanding over the window).', 'ratioWindowMonths', '1')}
+        {numberField('Outputs ratio window (months, ending at as-of)', 'How many months, ending at the as-of month, the Outputs ratios average over (for example, Interest Rate (m) is interest collected divided by outstanding, both totalled over the window).', 'ratioWindowMonths', '1')}
+        {numberField('Write-off averaging window (months)', 'How many months the write-off rate is averaged over, ending at the as-of month: total written off divided by total outstanding over those months. 1 uses the as-of month only, as the template does. 6 or 12 smooths out bumpy months. Feeds unit economics, early warnings and covenants.', 'writeoffWindowMonths', '1')}
       </Card>
       <h2 className="sd-h2">Loss rate (feeds Outputs Loss Rate / 95th %ile)</h2>
       <Card className="sd-grid sd-grid--2">
@@ -204,7 +245,7 @@ function RevolvingInputsSection() {
       <h2 className="sd-h2">LGD &amp; unit economics</h2>
       <Card className="sd-grid sd-grid--2">
         <div className="sd-field">
-          {label('LGD basis', 'Where LGD comes from. Input uses the LGD value above. Recoveries derives it as 1 − recoveries ÷ principal written off to date, which needs the recoveries column mapped.')}
+          {label('LGD basis', 'Where LGD comes from. Input uses the LGD value above. Recoveries derives it as 100% less recoveries as a share of principal written off to date, which needs the recoveries column mapped.')}
           <Select
             value={ri.lgdBasis}
             onChange={(e) => set({ lgdBasis: e.target.value as RevolvingGeneralInputs['lgdBasis'] })}
@@ -215,7 +256,7 @@ function RevolvingInputsSection() {
         </div>
         {numberField('Cost of funds (% p.a., 0-1)', 'Annual funding cost as a share of outstanding (0.13 = 13%). Deducted in unit economics to get net yield.', 'costOfFundsPct')}
         {numberField('Operating costs (% p.a., 0-1)', 'Annual operating cost as a share of outstanding (0.02 = 2%). Deducted in unit economics to get net yield.', 'opexPct')}
-        {numberField('Advance-rate haircut (0-1)', 'Extra cushion taken off the advance rate: max advance rate = 1 − stress loss rate − haircut.', 'advanceHaircut')}
+        {numberField('Advance-rate haircut (0-1)', 'Extra cushion taken off the advance rate: the maximum advance rate is 100% less the stress loss rate, less this haircut.', 'advanceHaircut')}
       </Card>
 
       <h2 className="sd-h2">Backtest &amp; early warning</h2>
@@ -231,7 +272,7 @@ function RevolvingInputsSection() {
         columns={[
           {
             key: 'name',
-            header: <>Scenario<HelpTip text="Name shown on the Backtest & Stress and Summary tabs." /></>,
+            header: <>Scenario<HelpTip text="Name shown on the Backtest & Stress and Portfolio Summary tabs." /></>,
             render: (r) => <Input value={r.name} onChange={(e) => setScenario(r.i, { name: e.target.value })} />,
           },
           {
@@ -279,7 +320,7 @@ function RevolvingInputsSection() {
       </Button>
 
       <h2 className="sd-h2">Covenant tests</h2>
-      <Alert tone="info">Example limits from config — set them to this deal&apos;s facility terms.</Alert>
+      <Alert tone="info">No covenants by default — add this deal&apos;s facility terms with + Add covenant.</Alert>
       <Table<RevolvingCovenant & { i: number }>
         rows={ri.covenants.map((cv, i) => ({ ...cv, i }))}
         columns={[
@@ -298,20 +339,20 @@ function RevolvingInputsSection() {
           },
           {
             key: 'op',
-            header: <>Test<HelpTip text="Whether the metric must stay at or below (≤) or at or above (≥) the limit." /></>,
+            header: <>Test<HelpTip text="Whether the metric must stay at or below the limit (at most) or at or above it (at least)." /></>,
             render: (r) => (
               <Select
                 value={r.operator}
                 onChange={(e) => setCovenant(r.i, { operator: e.target.value as RevolvingCovenant['operator'] })}
               >
-                <option value="<=">≤ (at most)</option>
-                <option value=">=">≥ (at least)</option>
+                <option value="<=">at most</option>
+                <option value=">=">at least</option>
               </Select>
             ),
           },
           {
             key: 'limit',
-            header: <>Limit (0-1 for %)<HelpTip text="The facility limit. Enter percentages as decimals (0.15 = 15%). A breach shows on the Facility and Summary tabs." /></>,
+            header: <>Limit (0-1 for %)<HelpTip text="The facility limit. Enter percentages as decimals (0.15 = 15%). A breach shows on the Facility & Covenants and Portfolio Summary tabs." /></>,
             render: (r) => (
               <Input
                 type="number"
@@ -390,6 +431,8 @@ export function GeneralInputsScreen({ onNext, modelKey }: Props) {
         .filter(([, v]) => !v)
         .map(([k]) => k)
     : [];
+
+  const revolvingInvalid = isRevolving && gi.revolving?.scenarios ? revolvingInvalidCount(gi.revolving) : 0;
 
   const run = async () => {
     // Stay here on failure - the error Alert below shows why.
@@ -518,6 +561,12 @@ export function GeneralInputsScreen({ onNext, modelKey }: Props) {
         </Alert>
       ) : null}
 
+      {revolvingInvalid ? (
+        <Alert tone="warning">
+          {revolvingInvalid} input(s) are out of range - fix the fields marked in red before running.
+        </Alert>
+      ) : null}
+
       <div className="sd-actions" style={{ marginTop: 16 }}>
         <Button variant="ghost" onClick={onNext}>
           ← Back to mapping
@@ -527,6 +576,7 @@ export function GeneralInputsScreen({ onNext, modelKey }: Props) {
           loading={state.analysisRunning}
           disabled={
             unmappedStatuses.length > 0 ||
+            revolvingInvalid > 0 ||
             (isRevolving && !state.generalInputs.revolving) ||
             (isBaas && !state.generalInputs.baas)
           }

@@ -273,6 +273,7 @@ _DEFAULTS = {
         "lgd": 1.0,
         "roll_rate_window": "T12",
         "ratio_window_months": 2,
+        "writeoff_window_months": 1,
         "min_outstanding_in_sample": 1_000_000_000.0,
         "stress_percentile": 0.95,
         "denominator_lag_months": 5,
@@ -295,11 +296,8 @@ _DEFAULTS = {
             {"name": "Stress", "roll_rate_multiplier": 1.25, "lgd_multiplier": 1.1},
             {"name": "Severe", "roll_rate_multiplier": 1.5, "lgd_multiplier": 1.25},
         ],
-        "covenants": [
-            {"metric": "par91_total", "operator": "<=", "limit": 0.15},
-            {"metric": "writeoff_m", "operator": "<=", "limit": 0.03},
-            {"metric": "coverage_perf", "operator": "<=", "limit": 0.25},
-        ],
+        # Deal-specific, so none by default (see config.toml).
+        "covenants": [],
     },
     "field_aliases": {
         "lending": {

@@ -35,35 +35,110 @@ class Metric:
 CATALOGUE = [
     # Template ratios (Outputs B9:B24), over time.
     Metric(
-        "tenor", "Expected Tenor (m) - template", "1 / ((E + D − F) ÷ average G)", "months", None
-    ),
-    Metric("rate_m", "Interest Rate (m)", "Σ D ÷ Σ G over the window", "pct", False),
-    Metric("active", "Active - template", "H ÷ G", "pct", False),
-    Metric("par30_t", "PAR30 - template (1-60 DPD)", "I ÷ G", "pct", True),
-    Metric("par60_t", "PAR60 - template (61-90 ÷ active)", "J ÷ H", "pct", True),
-    Metric("par90_t", "PAR90 - template (61-90 DPD)", "J ÷ G", "pct", True),
-    Metric("writeoff_m", "Write-off rate (m)", "K ÷ average G", "pct", True),
-    Metric("utilisation", "% of credit line utilised", "G ÷ C", "pct", None),
-    # Standard definitions from the Outputs columns.
-    Metric("par61_total", "PAR 61+ incl. defaulted stock", "(G − H − I) ÷ G", "pct", True),
-    Metric("par91_total", "PAR 91+ incl. defaulted stock", "(G − H − I − J) ÷ G", "pct", True),
-    Metric("payment_rate", "Principal payment rate (m)", "E ÷ average G", "pct", False),
-    Metric(
-        "principal_tenor",
-        "Tenor from principal turnover (m)",
-        "1 ÷ principal payment rate",
+        "tenor",
+        "Expected Tenor (m) - template",
+        "One divided by collections plus interest, less new drawings, over average outstanding",
         "months",
         None,
     ),
     Metric(
-        "writeoff_annual", "Write-off rate (annualised)", "Write-off rate (m) × 12", "pct", True
+        "rate_m",
+        "Interest Rate (m)",
+        "Interest collected over the window divided by principal outstanding over the window",
+        "pct",
+        False,
+    ),
+    Metric(
+        "active",
+        "Active - template",
+        "Active balance divided by principal outstanding",
+        "pct",
+        False,
+    ),
+    Metric(
+        "par30_t",
+        "PAR30 - template (1-60 DPD)",
+        "Balance 1-60 days past due divided by principal outstanding",
+        "pct",
+        True,
+    ),
+    Metric(
+        "par60_t",
+        "PAR60 - template (61-90 as a share of active)",
+        "Balance 61-90 days past due divided by the active balance",
+        "pct",
+        True,
+    ),
+    Metric(
+        "par90_t",
+        "PAR90 - template (61-90 DPD)",
+        "Balance 61-90 days past due divided by principal outstanding",
+        "pct",
+        True,
+    ),
+    Metric(
+        "writeoff_m",
+        "Write-off rate (m)",
+        "Principal written off in the month divided by average outstanding",
+        "pct",
+        True,
+    ),
+    Metric(
+        "utilisation",
+        "% of credit line utilised",
+        "Principal outstanding divided by the total of approved credit lines",
+        "pct",
+        None,
+    ),
+    # Standard definitions from the Outputs columns.
+    Metric(
+        "par61_total",
+        "PAR 61+ incl. defaulted stock",
+        "Balance 61 or more days past due, plus defaulted stock, divided by principal outstanding",
+        "pct",
+        True,
+    ),
+    Metric(
+        "par91_total",
+        "PAR 91+ incl. defaulted stock",
+        "Balance 91 or more days past due, plus defaulted stock, divided by principal outstanding",
+        "pct",
+        True,
+    ),
+    Metric(
+        "payment_rate",
+        "Principal payment rate (m)",
+        "Principal collected in the month divided by average outstanding",
+        "pct",
+        False,
+    ),
+    Metric(
+        "principal_tenor",
+        "Tenor from principal turnover (m)",
+        "One divided by the principal payment rate",
+        "months",
+        None,
+    ),
+    Metric(
+        "writeoff_annual",
+        "Write-off rate (annualised)",
+        "The monthly write-off rate multiplied by 12",
+        "pct",
+        True,
     ),
     # Standard definitions that need the bucket balances.
-    Metric("defaulted_share", "Defaulted stock share", "BAL_DEFAULT ÷ G", "pct", True, True),
+    Metric(
+        "defaulted_share",
+        "Defaulted stock share",
+        "Defaulted balance divided by principal outstanding",
+        "pct",
+        True,
+        True,
+    ),
     Metric(
         "par31_total",
         "PAR 31+ incl. defaulted stock",
-        "(31-60 … 180+ + defaulted) ÷ G",
+        "Balance 31 or more days past due, plus defaulted stock, divided by principal outstanding",
         "pct",
         True,
         True,
@@ -71,7 +146,7 @@ CATALOGUE = [
     Metric(
         "par31_perf",
         "PAR 31+ of performing book",
-        "(31-60 … 180+) ÷ (G − defaulted)",
+        "Balance 31 or more days past due divided by the performing book (less defaulted)",
         "pct",
         True,
         True,
@@ -79,18 +154,23 @@ CATALOGUE = [
     Metric(
         "par91_perf",
         "PAR 91+ of performing book",
-        "(91-120 … 180+) ÷ (G − defaulted)",
+        "Balance 91 or more days past due divided by the performing book (less defaulted)",
         "pct",
         True,
         True,
     ),
     Metric(
-        "active_perf", "Active share of performing book", "H ÷ (G − defaulted)", "pct", False, True
+        "active_perf",
+        "Active share of performing book",
+        "Active balance divided by the performing book",
+        "pct",
+        False,
+        True,
     ),
     Metric(
         "yield_perf_m",
         "Interest yield on performing book (m)",
-        "Σ D ÷ Σ (G − defaulted) over the window",
+        "Interest collected over the window divided by the performing book over the window",
         "pct",
         False,
         True,
@@ -98,7 +178,7 @@ CATALOGUE = [
     Metric(
         "utilisation_perf",
         "Credit line utilised by performing book",
-        "(G − defaulted) ÷ C",
+        "Performing book divided by the total of approved credit lines",
         "pct",
         None,
         True,
@@ -113,9 +193,13 @@ def _div(num, den):
     return float(num) / float(den)
 
 
-def metrics_at(monthly: pd.DataFrame, idx: int, window: int, full_buckets: bool) -> dict:
+def metrics_at(
+    monthly: pd.DataFrame, idx: int, window: int, full_buckets: bool, writeoff_window: int = 1
+) -> dict:
     """Every catalogue metric at month index `idx`, using months up to it only.
-    Windowed averages cover the `window` months ending at `idx`."""
+    Windowed averages cover the `window` months ending at `idx`. With
+    `writeoff_window` > 1 the write-off rate is total written off over that
+    many months divided by total outstanding over them (a smoothed rate)."""
     win = monthly.iloc[max(0, idx - window + 1) : idx + 1]
     now = monthly.iloc[idx]
     avg_g = win[G].mean()
@@ -125,6 +209,9 @@ def metrics_at(monthly: pd.DataFrame, idx: int, window: int, full_buckets: bool)
     )
     payment = _div(now["principal_collected"], avg_g)
     writeoff = _div(now[K], avg_g)
+    if writeoff_window > 1:
+        wo_win = monthly.iloc[max(0, idx - writeoff_window + 1) : idx + 1]
+        writeoff = _div(wo_win[K].sum(), wo_win[G].sum())
     out = {
         "tenor": 1 / turnover if turnover else None,
         "rate_m": _div(win["interest_collected"].sum(), win[G].sum()),
@@ -160,10 +247,14 @@ def metrics_at(monthly: pd.DataFrame, idx: int, window: int, full_buckets: bool)
     return out
 
 
-def metrics_over_time(monthly: pd.DataFrame, window: int, full_buckets: bool) -> pd.DataFrame:
+def metrics_over_time(
+    monthly: pd.DataFrame, window: int, full_buckets: bool, writeoff_window: int = 1
+) -> pd.DataFrame:
     """One row per month (months as columns), every catalogue metric."""
     labels = monthly[MONTH].dt.strftime("%Y-%m").tolist()
-    rows = [metrics_at(monthly, t, window, full_buckets) for t in range(len(monthly))]
+    rows = [
+        metrics_at(monthly, t, window, full_buckets, writeoff_window) for t in range(len(monthly))
+    ]
     return pd.DataFrame(rows, index=labels).T
 
 
@@ -186,11 +277,13 @@ def standard_metrics(values: dict) -> list[dict]:
     ]
 
 
-def unit_economics(values: dict, cost_of_funds: float, opex: float) -> list[dict]:
+def unit_economics(
+    values: dict, cost_of_funds: float, opex: float, tenor: float | None
+) -> list[dict]:
     """Net yield per dollar outstanding: interest yield − write-offs − costs.
     Costs are annual rates on outstanding; everything is shown monthly and
-    annualised, plus over the principal-turnover tenor."""
-    rate, wo, tenor = values.get("rate_m"), values.get("writeoff_m"), values.get("principal_tenor")
+    annualised, plus over `tenor` (the average of 1 / net collection ratio)."""
+    rate, wo = values.get("rate_m"), values.get("writeoff_m")
     cost_m = (cost_of_funds + opex) / 12
     net = rate - wo - cost_m if rate is not None and wo is not None else None
     rows = [
