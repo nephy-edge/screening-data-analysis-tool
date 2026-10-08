@@ -2,12 +2,16 @@ import { createContext, useContext, useMemo, useReducer, type ReactNode } from '
 import {
   askAi,
   createShare,
+  exportShareHtml,
   exportLendingWorkbook,
   exportRentalWorkbook,
+  exportRevolvingWorkbook,
   loadProfile,
   loadShare,
   runLendingAnalysis,
   runRentalAnalysis,
+  runRevolvingAnalysis,
+  askRevolvingAi,
   saveProfile,
   type AnalysisResponse,
   type ChatMessage,
@@ -15,7 +19,9 @@ import {
   type DerivedColumn,
   type ExportChartSpec,
   type RentalResponse,
+  type RevolvingResponse,
   type RestorePayload,
+  type UeModelAssumptions,
 } from '../api/engine';
 import { aggregateChartData } from '../lib/chartAggregate';
 import { friendlyError } from '../lib/friendlyError';
@@ -55,6 +61,8 @@ export interface LtvCalcInputs {
   segmentation: string;
   hedgeRate: string;
   rolledHedge: string;
+  /** Count every loan in a cohort for the LTV loss, finished or not (Salmon-sheet basis). */
+  includeUnfinished: boolean;
 }
 
 export interface AppState {
@@ -80,6 +88,7 @@ export interface AppState {
   analysis: AnalysisResult;
   analysisResponse: AnalysisResponse | null;
   rentalResponse: RentalResponse | null;
+  revolvingResponse: RevolvingResponse | null;
   analysisError: string | null;
   analysisRunning: boolean;
   chatHistory: ChatMessage[];
@@ -102,6 +111,10 @@ export interface AppState {
    * matching today's behaviour before this existed). */
   selectedCohorts: string[] | null;
   ltvInputs: LtvCalcInputs;
+  /** Lending UE Model sub-tab assumptions, in the store for the same reason
+   * as ltvInputs and so Ask AI can quote the figures on screen. null means
+   * untouched: the defaults the analysis response carries. */
+  ueModelInputs: UeModelAssumptions | null;
 }
 
 type Action =
@@ -116,6 +129,7 @@ type Action =
   | { type: 'analysisStart' }
   | { type: 'analysisDone'; payload: AnalysisResponse }
   | { type: 'rentalDone'; payload: RentalResponse }
+  | { type: 'revolvingDone'; payload: RevolvingResponse }
   | { type: 'analysisFail'; error: string }
   | { type: 'toggleModel'; modelKey: ModelKey }
   | { type: 'chatStart'; question: string }
@@ -129,11 +143,12 @@ type Action =
   | { type: 'saveDone' }
   | { type: 'saveFail'; error: string }
   | { type: 'shareStart' }
-  | { type: 'shareDone'; url: string }
+  | { type: 'shareDone'; url: string | null }
   | { type: 'shareFail'; error: string }
   | { type: 'setDedupe'; value: boolean }
   | { type: 'setSelectedCohorts'; cohorts: string[] | null }
-  | { type: 'setLtvInputs'; inputs: Partial<LtvCalcInputs> };
+  | { type: 'setLtvInputs'; inputs: Partial<LtvCalcInputs> }
+  | { type: 'setUeModelInputs'; inputs: UeModelAssumptions | null };
 
 const today = new Date().toISOString().slice(0, 10);
 
@@ -156,6 +171,7 @@ const initialState: AppState = {
   analysis: { rows: 0, cohorts: 0, lossRate: 0, ltv: 0, status: 'idle' },
   analysisResponse: null,
   rentalResponse: null,
+  revolvingResponse: null,
   analysisError: null,
   analysisRunning: false,
   chatHistory: [],
@@ -179,7 +195,9 @@ const initialState: AppState = {
     segmentation: 'Asset Lending',
     hedgeRate: '0',
     rolledHedge: 'Roll',
+    includeUnfinished: false,
   },
+  ueModelInputs: null,
 };
 
 function reducer(state: AppState, action: Action): AppState {
@@ -214,11 +232,13 @@ function reducer(state: AppState, action: Action): AppState {
         analysis: initialState.analysis,
         analysisResponse: null,
         rentalResponse: null,
+        revolvingResponse: null,
         analysisError: null,
         chatHistory: [],
         chatError: null,
         customCharts: [],
         ltvInputs: initialState.ltvInputs,
+        ueModelInputs: null,
       };
     case 'setAnalysisContext':
       return { ...state, analysisContext: action.value };
@@ -233,14 +253,17 @@ function reducer(state: AppState, action: Action): AppState {
       );
       // A profile saved with its computed result attached can render
       // straight away instead of re-running the engine (see saveSession) -
-      // this is the fix for "why does loading a saved run take long": the
-      // upload still gets re-ingested above (ingestId needs to stay valid
-      // for any later export/chat/re-analysis), but the expensive engine
-      // run itself is skipped when a cached result is available.
-      const cached = payload.analysisResult;
+      // this is the fix for "why does loading a saved run take long". The
+      // ingestId stays valid for any later export/chat/re-analysis; for runs
+      // saved with their ingest info the server only downloads the data when
+      // one of those first reads it (web_api/main.py _register_pending_ingest).
+      const cached = usableCachedResult(payload);
       const isRental = payload.modelKey === 'rental';
-      const analysisResponse = cached && !isRental ? (cached as AnalysisResponse) : null;
+      const isRevolving = payload.modelKey === 'revolving';
+      const analysisResponse =
+        cached && payload.modelKey === 'lending' ? (cached as AnalysisResponse) : null;
       const rentalResponse = cached && isRental ? (cached as RentalResponse) : null;
+      const revolvingResponse = cached && isRevolving ? (cached as RevolvingResponse) : null;
       const summary = cached?.summary as
         | { rows?: number; cohorts?: number; lossRate?: number }
         | undefined;
@@ -264,12 +287,13 @@ function reducer(state: AppState, action: Action): AppState {
         chatHistory: payload.chatHistory,
         analysisResponse,
         rentalResponse,
+        revolvingResponse,
         analysis: cached
           ? {
               rows: summary?.rows ?? 0,
               cohorts: summary?.cohorts ?? 0,
               lossRate: summary?.lossRate ?? 0,
-              ltv: !isRental
+              ltv: analysisResponse
                 ? Number((analysisResponse as AnalysisResponse | null)?.ltv?.['Average Total Revenue %'] ?? 0) || 0
                 : 0,
               status: 'done',
@@ -285,6 +309,7 @@ function reducer(state: AppState, action: Action): AppState {
         dedupeActive: false,
         selectedCohorts: null,
         ltvInputs: initialState.ltvInputs,
+        ueModelInputs: null,
       };
     }
     case 'saveStart':
@@ -305,6 +330,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, selectedCohorts: action.cohorts };
     case 'setLtvInputs':
       return { ...state, ltvInputs: { ...state.ltvInputs, ...action.inputs } };
+    case 'setUeModelInputs':
+      return { ...state, ueModelInputs: action.inputs };
     case 'setMapping':
       return {
         ...state,
@@ -350,6 +377,14 @@ function reducer(state: AppState, action: Action): AppState {
         },
       };
     }
+    case 'revolvingDone':
+      return {
+        ...state,
+        analysisRunning: false,
+        analysisError: null,
+        revolvingResponse: action.payload,
+        analysis: { rows: action.payload.summary.rows, cohorts: 0, lossRate: 0, ltv: 0, status: 'done' },
+      };
     case 'analysisFail':
       return { ...state, analysisRunning: false, analysisError: action.error };
     case 'toggleModel':
@@ -359,6 +394,7 @@ function reducer(state: AppState, action: Action): AppState {
         modelKey: action.modelKey,
         analysisResponse: null,
         rentalResponse: null,
+        revolvingResponse: null,
         analysis: { rows: 0, cohorts: 0, lossRate: 0, ltv: 0, status: 'idle' },
         generalInputs: {
           ...state.generalInputs,
@@ -414,6 +450,8 @@ interface AppStoreValue {
   resumeProfile: (sessionId: string) => Promise<boolean>;
   resumeShare: (token: string) => Promise<boolean>;
   createShareLink: () => Promise<void>;
+  /** Pre-deployment Share: download a read-only HTML report. */
+  shareHtml: () => Promise<void>;
 }
 
 const AppContext = createContext<AppStoreValue | null>(null);
@@ -425,6 +463,9 @@ const AppContext = createContext<AppStoreValue | null>(null);
  * and exportWorkbook (building the export payload) so a source name always
  * means the same rows in both places. */
 export function getChartDataSources(state: AppState): Record<string, Array<Record<string, unknown>>> {
+  if (state.modelKey === 'revolving') {
+    return { 'Monthly Data': state.revolvingResponse?.facts ?? [] };
+  }
   if (state.modelKey === 'rental') {
     return {
       Cohorts: state.rentalResponse?.cohortRows ?? [],
@@ -435,6 +476,16 @@ export function getChartDataSources(state: AppState): Record<string, Array<Recor
     Cohorts: state.analysisResponse?.cohorts ?? [],
     'Chart Data': state.analysisResponse?.chart ?? [],
   };
+}
+
+/** A saved run's cached result, or null when it must be re-run: Revolving
+ * runs saved before the Performance tab existed lack `performance`, which
+ * the Performance / LTV / Unit Economics tabs need. */
+function usableCachedResult<T extends { modelKey: string; analysisResult?: unknown }>(payload: T) {
+  const cached = payload.analysisResult as Record<string, unknown> | null | undefined;
+  if (!cached) return null;
+  if (payload.modelKey === 'revolving' && !cached.performance) return null;
+  return payload.analysisResult as T['analysisResult'];
 }
 
 /** Trigger a browser "Save as" for a fetched Blob - no library needed, just
@@ -488,6 +539,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         fxDiscount50pct: true,
         debtService180d: null,
         currency: gi.currency,
+        statusMap: gi.statusMap ?? null,
       };
     };
 
@@ -506,8 +558,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // Model-aware version of the two builders above, so callers that don't
     // care which model is active (export/save/AI/share) don't each repeat
     // the `modelKey === 'rental' ? ... : ...` ternary.
+    // Revolving saves its inputs under `revolving`, the key restoreProfile
+    // merges back into generalInputs; runs send them flat (see analyse()).
     const buildGeneralInputs = () =>
-      state.modelKey === 'rental' ? buildRentalGeneralInputs() : buildLendingGeneralInputs();
+      state.modelKey === 'revolving'
+        ? { revolving: state.generalInputs.revolving ?? null }
+        : state.modelKey === 'rental'
+          ? buildRentalGeneralInputs()
+          : buildLendingGeneralInputs();
+
+    // The result object for whichever model is active (save/share attach it).
+    const activeResult = () =>
+      state.modelKey === 'revolving'
+        ? state.revolvingResponse
+        : state.modelKey === 'rental'
+          ? state.rentalResponse
+          : state.analysisResponse;
 
     // selectedCohortsOverride, not state.selectedCohorts: a caller that just
     // dispatched 'setSelectedCohorts' and immediately awaits analyse() (the
@@ -530,7 +596,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'analysisStart' });
       dispatch({ type: 'setDedupe', value: dedupeById });
       try {
-        if (state.modelKey === 'rental') {
+        if (state.modelKey === 'revolving') {
+          const payload = await runRevolvingAnalysis({
+            ingest,
+            generalInputs: state.generalInputs.revolving ?? null,
+          });
+          dispatch({ type: 'revolvingDone', payload });
+        } else if (state.modelKey === 'rental') {
           const payload = await runRentalAnalysis({
             ingest,
             generalInputs: buildRentalGeneralInputs(),
@@ -583,7 +655,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const exportCharts = buildExportCharts();
         const dedupeById = state.dedupeActive;
-        if (state.modelKey === 'rental') {
+        if (state.modelKey === 'revolving') {
+          const blob = await exportRevolvingWorkbook({
+            ingest,
+            generalInputs: state.generalInputs.revolving ?? null,
+          });
+          downloadBlob(blob, 'SC_Analysis_Revolving.xlsx');
+        } else if (state.modelKey === 'rental') {
           const blob = await exportRentalWorkbook({
             ingest,
             generalInputs: buildRentalGeneralInputs(),
@@ -618,9 +696,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const history = state.chatHistory;
       dispatch({ type: 'chatStart', question });
       try {
-        const { answer } = await askAi(state.modelKey, {
+        const { answer } = state.modelKey === 'revolving'
+          ? await askRevolvingAi({
+              ingest,
+              generalInputs: state.generalInputs.revolving ?? null,
+              question,
+              history,
+              userContext: state.analysisContext,
+              documents: state.contextDocuments,
+            })
+          : await askAi(state.modelKey, {
           ingest,
-          generalInputs: buildGeneralInputs(),
+          generalInputs:
+            state.modelKey === 'rental' ? buildRentalGeneralInputs() : buildLendingGeneralInputs(),
           dedupeById: state.dedupeActive,
           selectedCohorts:
             state.modelKey === 'lending' ? (state.selectedCohorts ?? undefined) : undefined,
@@ -628,6 +716,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
           history,
           userContext: state.analysisContext,
           documents: state.contextDocuments,
+          ...(state.modelKey === 'lending'
+            ? {
+                ltvCalculator: {
+                  dataSource: state.ltvInputs.dataSource,
+                  country: state.ltvInputs.country,
+                  macroFxRisk: state.ltvInputs.macroFx,
+                  segmentation: state.ltvInputs.segmentation,
+                  hedgeRate: parseFloat(state.ltvInputs.hedgeRate) || 0,
+                  rolledHedge: state.ltvInputs.rolledHedge,
+                  includeUnfinishedLoans: state.ltvInputs.includeUnfinished,
+                },
+                ueModelInputs: state.ueModelInputs,
+              }
+            : {}),
         });
         dispatch({ type: 'chatDone', answer });
       } catch (err) {
@@ -655,7 +757,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             buildGeneralInputs(),
           chatHistory: state.chatHistory,
           analysisContext: state.analysisContext,
-          analysisResult: state.modelKey === 'rental' ? state.rentalResponse : state.analysisResponse,
+          analysisResult: activeResult(),
         });
         dispatch({ type: 'saveDone' });
       } catch (err) {
@@ -670,7 +772,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (!state.auth.user) throw new Error('Not signed in.');
       const payload = await loadProfile(sessionId);
       dispatch({ type: 'restoreProfile', payload, sessionId });
-      return payload.analysisResult != null;
+      return usableCachedResult(payload) != null;
     };
 
     // A shared link is someone else's deal: resuming it gets a fresh
@@ -680,7 +782,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const resumeShare = async (token: string) => {
       const payload = await loadShare(token);
       dispatch({ type: 'restoreProfile', payload, sessionId: crypto.randomUUID() });
-      return payload.analysisResult != null;
+      return usableCachedResult(payload) != null;
     };
 
     const createShareLink = async () => {
@@ -698,10 +800,50 @@ export function AppProvider({ children }: { children: ReactNode }) {
             buildGeneralInputs(),
           chatHistory: state.chatHistory,
           analysisContext: state.analysisContext,
-          analysisResult: state.modelKey === 'rental' ? state.rentalResponse : state.analysisResponse,
+          analysisResult: activeResult(),
         });
         const url = `${window.location.origin}${window.location.pathname}?share=${token}`;
         dispatch({ type: 'shareDone', url });
+      } catch (err) {
+        dispatch({ type: 'shareFail', error: err instanceof Error ? err.message : 'Share failed' });
+      }
+    };
+
+    // Until the app is deployed a share link can't be opened by anyone else,
+    // so Share downloads a standalone read-only HTML report instead (built
+    // server-side from the same analyse request as the workbook export).
+    const shareHtml = async () => {
+      const ingest = buildIngest();
+      if (!ingest) {
+        dispatch({ type: 'shareFail', error: 'No file loaded — go back and upload one.' });
+        return;
+      }
+      const ltv = {
+        dataSource: state.ltvInputs.dataSource,
+        country: state.ltvInputs.country,
+        macroFxRisk: state.ltvInputs.macroFx,
+        segmentation: state.ltvInputs.segmentation,
+        hedgeRate: parseFloat(state.ltvInputs.hedgeRate) || 0,
+        rolledHedge: state.ltvInputs.rolledHedge,
+        includeUnfinishedLoans: state.ltvInputs.includeUnfinished,
+      };
+      const model = state.modelKey;
+      const body =
+        model === 'revolving'
+          ? { ingest, ...(state.generalInputs.revolving ? { generalInputs: state.generalInputs.revolving } : {}) }
+          : model === 'rental'
+            ? { ingest, generalInputs: buildRentalGeneralInputs(), dedupeById: state.dedupeActive }
+            : {
+                ingest,
+                generalInputs: buildLendingGeneralInputs(),
+                dedupeById: state.dedupeActive,
+                selectedCohorts: state.selectedCohorts ?? undefined,
+              };
+      dispatch({ type: 'shareStart' });
+      try {
+        const blob = await exportShareHtml(model, body, model === 'lending' || model === 'revolving' ? ltv : undefined);
+        downloadBlob(blob, `SC_Analysis_${model}.html`);
+        dispatch({ type: 'shareDone', url: null });
       } catch (err) {
         dispatch({ type: 'shareFail', error: err instanceof Error ? err.message : 'Share failed' });
       }
@@ -717,6 +859,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       resumeProfile,
       resumeShare,
       createShareLink,
+      shareHtml,
     };
   }, [state]);
 

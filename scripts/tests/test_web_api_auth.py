@@ -34,7 +34,9 @@ def seen(monkeypatch):
     """Record the identity s3_store is actually called with."""
     calls = []
     monkeypatch.setattr(m.s3_store, "list_profiles", lambda ident: calls.append(ident) or [])
-    monkeypatch.setattr(m.s3_store, "load_profile", lambda ident, sid: calls.append(ident) or None)
+    monkeypatch.setattr(
+        m.s3_store, "load_profile", lambda ident, sid, **kw: calls.append(ident) or None
+    )
     m._PROFILES_CACHE.clear()
     return calls
 
@@ -255,7 +257,9 @@ def test_rental_blank_extraction_date_falls_back_to_latest_start():
 def test_loading_a_share_requires_a_session(client, monkeypatch):
     """Each share load registers an ingest; anonymous loads could otherwise
     evict every signed-in user's working upload."""
-    monkeypatch.setattr(m.s3_store, "load_share", lambda token: pytest.fail("reached storage"))
+    monkeypatch.setattr(
+        m.s3_store, "load_share", lambda token, **kw: pytest.fail("reached storage")
+    )
     assert client.get("/api/share/sometoken").status_code == 401
 
 

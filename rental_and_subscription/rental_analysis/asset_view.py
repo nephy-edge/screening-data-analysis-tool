@@ -34,7 +34,10 @@ def build_asset_view(df, gi):
             "max_closed_date": g["closed_date"].max(),
         }
     )
-    av["mob"] = ((extraction_date - av["start_first_contract"]).dt.days / 30).round()
+    # Excel ROUND rounds halves away from zero; pandas .round() rounds them to
+    # even, which put ~2% of assets (age exactly x.5 months) one MOB bucket low.
+    months = (extraction_date - av["start_first_contract"]).dt.days / 30
+    av["mob"] = np.sign(months) * np.floor(months.abs() + 0.5)
     av["paid_over_cost"] = av["total_paid"] / av["asset_cost"].replace(0, np.nan)
     av["pvd"] = av["total_paid"] / av["total_expected"].replace(0, np.nan)
     av.loc[av["closed_count"] == 0, "max_closed_date"] = pd.NaT

@@ -1,6 +1,6 @@
 # Screening Tool — Outstanding Work Checklist
 
-Source: `GOALS_CHECKLIST.md` (full goal-achievement matrix) + spec
+Source: `docs/GOALS_CHECKLIST.md` (full goal-achievement matrix) + spec
 `..\Screening Stage Data Analysis_Workflow_Spec_v1.docx`. This file lists
 **only what is not yet done**, as of 2026-09-22.
 

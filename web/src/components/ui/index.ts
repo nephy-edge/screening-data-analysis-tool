@@ -8,3 +8,4 @@ export { Table } from './Table';
 export type { TableColumn } from './Table';
 export { Tabs } from './Tabs';
 export { Alert } from './Alert';
+export { HelpTip } from './HelpTip';

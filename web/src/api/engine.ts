@@ -10,6 +10,8 @@
  * canonical rows directly; the UI drives the ingest path end to end.
  */
 
+import type { ModelKey, RevolvingGeneralInputs } from '../state/types';
+
 export interface AnalysisSummary {
   rows: number;
   cohorts: number;
@@ -59,8 +61,14 @@ export interface AnalysisResponse {
   /** The LTV Calculator's interest input: Average Interest % limited to the
    * General Inputs LTV cohort range (equals it when no range is set). */
   ltvInterest?: number | null;
-  /** The "YYYY-MM" range ltvInterest was computed over (nulls = open end). */
-  ltvInterestRange?: { from: string | null; to: string | null };
+  /** 95th %ile loss limited to the same range (null = no matured cohorts in it). */
+  ltvLoss?: number | null;
+  /** The same 95th %ile counting every loan in each cohort, finished or not
+   * (the LTV tab's checkbox), and the per-cohort losses behind it. */
+  ltvLossAllLoans?: number | null;
+  cohortLossesAllLoans?: Array<Record<string, unknown>>;
+  /** The "YYYY-MM" range ltvInterest/ltvLoss were computed over (nulls = open end). */
+  ltvCohortRange?: { from: string | null; to: string | null };
   /** Set when a non-USD portfolio currency had no live FX rate, so the figures
    * stayed in the original currency - the Summary tab surfaces it. */
   fxWarning: string | null;
@@ -322,7 +330,7 @@ export interface LendingAnalyseInput {
     extractionDate: string | null;
     daysAfterTerm: number;
     minLoansPerCohort: number;
-    /** Optional "YYYY-MM" cohort range for the LTV Calculator's interest only. */
+    /** Optional "YYYY-MM" cohort range for the LTV Calculator's interest and 95th %ile loss. */
     ltvCohortFrom?: string | null;
     ltvCohortTo?: string | null;
     /** ISO 4217 code the mapped monetary columns are denominated in; the
@@ -357,6 +365,13 @@ function postForBlob(path: string, body: unknown): Promise<Blob> {
  * export_workbook.py builder, not a client-side stub. */
 export function exportLendingWorkbook(input: LendingAnalyseInput): Promise<Blob> {
   return postForBlob('/export/lending', input);
+}
+
+/** Standalone read-only HTML report of the current analysis (what Share
+ * downloads until the app is deployed). `body` is the model's analyse
+ * request; `ltv` the LTV tab's dropdown choices (lending/revolving only). */
+export function exportShareHtml(model: string, body: unknown, ltv?: unknown): Promise<Blob> {
+  return postForBlob(`/export/html/${model}`, ltv === undefined ? body : { body, ltv });
 }
 
 export interface RentalResponse {
@@ -403,6 +418,9 @@ export interface RentalAnalyseInput {
     /** ISO 4217 code the mapped monetary columns are denominated in; the
      * backend rescales them to USD when this isn't "USD". */
     currency: string;
+    /** Client status value -> Lendable status. The backend refuses a run
+     * while any status in the data is unmapped. */
+    statusMap: Record<string, string> | null;
   };
   exportCharts?: ExportChartSpec[];
   /** Data-Checks "Deduplicate" action: drop to the first row per duplicated
@@ -417,11 +435,170 @@ export function runRentalAnalysis(input: RentalAnalyseInput): Promise<RentalResp
   return post<RentalResponse>('/analyse/rental', input);
 }
 
+export interface StatusValuesResponse {
+  /** `suggested` is the engine's default Lendable status for the value
+   * (matched ignoring case), or '' when the user has to pick one. */
+  values: Array<{ value: string; count: number; suggested: string }>;
+  truncated: boolean;
+}
+
+/** Every distinct value of the column mapped to `status` - the rental status
+ * table needs all raw statuses, not just the preview rows. */
+export function getStatusValues(ingest: RentalIngest): Promise<StatusValuesResponse> {
+  return post<StatusValuesResponse>('/ingest/status-values', { ingest });
+}
+
 /** Download the real Excel workbook for the current rental analysis (same
  * request shape as runRentalAnalysis) - a genuine .xlsx from the verified
  * export_workbook.py builder, not a client-side stub. */
 export function exportRentalWorkbook(input: RentalAnalyseInput): Promise<Blob> {
   return postForBlob('/export/rental', input);
+}
+
+/** One row of the Outputs ratio block (template rows 9-24). */
+export interface RevolvingRatio {
+  row: number;
+  label: string;
+  value: number | null;
+  annotation: string | null;
+  formula: string;
+}
+
+export interface RevolvingResponse {
+  summary: { rows: number; cohorts: number };
+  availableMonths: string[];
+  /** Outputs A:K - one record per month, keyed by the template's header names. */
+  facts: Array<Record<string, unknown>>;
+  ratios: RevolvingRatio[];
+  warnings: string[];
+  /** Data Checks tab - same shape as the Lending/Rental checks. */
+  qualityChecks: QualityCheck[];
+  /** The tables below are months-across: a label column plus one key per "YYYY-MM". */
+  balances: Array<Record<string, unknown>>;
+  rollRates: Array<Record<string, unknown>>;
+  lossFactors: Array<Record<string, unknown>>;
+  ecl: Array<Record<string, unknown>>;
+  eclSummary: {
+    /** 'full' = every bucket balance mapped; 'coarse' = 3-link approximation from the Outputs columns. */
+    method: 'full' | 'coarse';
+    asOfMonth: string;
+    window: string;
+    lgd: number;
+    eclValid: boolean;
+    performingBalance: number;
+    performingEcl: number | null;
+    totalBalance: number;
+    totalEcl: number | null;
+    coveragePerforming: number | null;
+    coverageTotal: number | null;
+  };
+  checks: Array<Record<string, unknown>>;
+  lossRates: Array<Record<string, unknown>>;
+  lossRateDistribution: Array<Record<string, unknown>>;
+  lgdUsed: number;
+  lgdBasis: 'Input' | 'Recoveries';
+  standardMetrics: Array<{ key: string; label: string; value: number | null; kind: MetricKind; formula: string; note: string }>;
+  /** One row per metric: key, Metric, kind, then one key per "YYYY-MM". */
+  overTime: Array<Record<string, unknown>>;
+  unitEconomics: Array<{ item: string; monthly: number | null; annualised: number | null; overTenor: number | null }>;
+  /** Performance tab: one row per figure, one key per "YYYY-MM", plus the
+   * term and loss rate the LTV Calculator and Unit Economics tabs use. */
+  performance: {
+    table: Array<{ key: string; Metric: string; kind: 'money' | 'pct' | 'months' | 'count'; group: 'balance' | 'breakdown' | 'metric' } & Record<string, unknown>>;
+    avgTerm: number | null;
+    termMonths: number;
+    lossRateNow: number | null;
+    lossRate95: number | null;
+    lossRateMonths: number;
+  };
+  /** Product interest rate for the LTV Calculator: interest rate (m) x avg term. */
+  ltvInterest: number | null;
+  /** The inputs behind the principal tenor used in unit economics. */
+  tenorInputs: {
+    principalCollected: number;
+    averageOutstanding: number;
+    windowMonths: number;
+    paymentRate: number | null;
+    principalTenor: number | null;
+  };
+  /** Standard ageing split at the as-of month; empty without the bucket columns. */
+  ageingMix: Array<{ bucket: string; balance: number; share: number | null }>;
+  earlyWarnings: Array<{ key: string; label: string; kind: MetricKind; now: number; prior: number; change: number; flag: boolean }>;
+  backtest: Array<Record<string, unknown>>;
+  backtestSummary: {
+    window: string;
+    months: number;
+    pooledRatio: number | null;
+    medianRatio: number | null;
+    minRatio: number | null;
+    maxRatio: number | null;
+    meanAbsError: number | null;
+  };
+  stress: Array<{
+    name: string;
+    valid: boolean;
+    rollRateMultiplier?: number;
+    lgdMultiplier?: number;
+    lgd?: number;
+    lossFactorCurrent?: number;
+    performingEcl?: number;
+    totalEcl?: number;
+    coveragePerforming?: number | null;
+    coverageTotal?: number | null;
+    lossRate?: number | null;
+    advanceRate?: number | null;
+  }>;
+  advance: { stressLossRate: number | null; haircut: number; advanceRate: number | null };
+  covenants: Array<{
+    metric: string;
+    label: string;
+    kind: MetricKind;
+    operator: '<=' | '>=';
+    limit: number;
+    value: number | null;
+    headroom: number | null;
+    status: 'PASS' | 'BREACH' | 'N/A';
+  }>;
+  generalInputs: Record<string, unknown>;
+}
+
+export type MetricKind = 'pct' | 'months' | 'money';
+
+export interface RevolvingAnalyseInput {
+  ingest: LendingIngest;
+  generalInputs: RevolvingGeneralInputs | null;
+}
+
+/** Run the Revolving Lending model (Outputs + Transition Matrices). A null
+ * generalInputs lets the server apply its config.toml defaults. */
+export function runRevolvingAnalysis(input: RevolvingAnalyseInput): Promise<RevolvingResponse> {
+  return post<RevolvingResponse>('/analyse/revolving', {
+    ingest: input.ingest,
+    ...(input.generalInputs ? { generalInputs: input.generalInputs } : {}),
+  });
+}
+
+export function exportRevolvingWorkbook(input: RevolvingAnalyseInput): Promise<Blob> {
+  return postForBlob('/export/revolving', {
+    ingest: input.ingest,
+    ...(input.generalInputs ? { generalInputs: input.generalInputs } : {}),
+  });
+}
+
+/** The revolving General Inputs pickers' choices (from config.toml and the
+ * metric catalogue): roll-rate window names, and the metrics a covenant can test. */
+export interface RevolvingOptions {
+  rollRateWindows: string[];
+  covenantMetrics: Array<{ key: string; label: string }>;
+}
+
+export function getRevolvingOptions(): Promise<RevolvingOptions> {
+  return get<RevolvingOptions>('/revolving/options');
+}
+
+/** The revolving General Inputs defaults from the server's config.toml. */
+export function getRevolvingDefaults(): Promise<RevolvingGeneralInputs> {
+  return get<RevolvingGeneralInputs>('/revolving/defaults');
 }
 
 export interface SuggestMappingResult {
@@ -460,7 +637,7 @@ export async function extractContextDocs(files: File[]): Promise<ContextDocument
  * DEEPINFRA_API_KEY is configured server-side - callers should fall back to
  * a local heuristic in that case rather than treating it as a failure. */
 export function suggestMapping(input: {
-  modelKey: 'lending' | 'rental';
+  modelKey: ModelKey;
   columns: string[];
   context?: string;
   documents?: ContextDocument[];
@@ -476,7 +653,7 @@ export function suggestMapping(input: {
  * is present at all, so the caller can tell "AI is switched off" apart from
  * "AI is on but could not answer that" - they used to look identical. */
 export function deriveColumn(input: {
-  modelKey: 'lending' | 'rental';
+  modelKey: ModelKey;
   columns: string[];
   request: string;
 }): Promise<{ name: string | null; formula: string | null; configured?: boolean }> {
@@ -496,6 +673,19 @@ export interface ChatMessage {
  * ai_chat_lending/ai_chat_rental. Rejects with a message from the backend
  * (e.g. "No DEEPINFRA_API_KEY found...") when the AI service isn't
  * configured or the request fails. */
+/** The Lending UE Model sub-tab's manual assumptions (costs as decimals),
+ * mirroring web_api/main.py's UeModelInputsBody. */
+export interface UeModelAssumptions {
+  upfrontCostPct: number;
+  ongoingCostPct: number;
+  financingCostPct: number;
+  facilityFeePct: number;
+  hedgeCostPct: number;
+  lossChoice: 'Actual' | 'Proxy' | 'Input';
+  /** Loss Rate (%) typed in for 'Input'; null means the Actual loss rate. */
+  lossInputPct: number | null;
+}
+
 export function askAi(
   modelKey: 'lending' | 'rental',
   input: (LendingAnalyseInput | RentalAnalyseInput) & {
@@ -503,9 +693,34 @@ export function askAi(
     history: ChatMessage[];
     userContext?: string;
     documents?: ContextDocument[];
+    /** Lending only: the on-screen LTV Calculator dropdowns and UE Model
+     * assumptions, so the answer can quote those tabs' figures. */
+    ltvCalculator?: {
+      dataSource: string;
+      country: string;
+      macroFxRisk: string;
+      segmentation: string;
+      hedgeRate: number;
+      rolledHedge: string;
+      includeUnfinishedLoans: boolean;
+    };
+    ueModelInputs?: UeModelAssumptions | null;
   },
 ): Promise<{ answer: string }> {
   return post<{ answer: string }>(`/ai/chat/${modelKey}`, input);
+}
+
+/** Ask AI, Revolving Lending model: the same run inputs as runRevolvingAnalysis. */
+export function askRevolvingAi(
+  input: RevolvingAnalyseInput & {
+    question: string;
+    history: ChatMessage[];
+    userContext?: string;
+    documents?: ContextDocument[];
+  },
+): Promise<{ answer: string }> {
+  const { generalInputs, ...rest } = input;
+  return post<{ answer: string }>('/ai/chat/revolving', { ...rest, ...(generalInputs ? { generalInputs } : {}) });
 }
 
 /** Result of the Data-Checks "Escalate flagged cohorts to analytics" action -
@@ -524,7 +739,7 @@ export interface EscalateResult {
  * webhook. `detail` is the check's detail rows: Cohort, <metricLabel>,
  * "Swing vs Prior Cohort (pp)", "Likely Contributing Factor(s)". */
 export function escalateVariance(input: {
-  modelKey: 'lending' | 'rental';
+  modelKey: ModelKey;
   modelName: string;
   metricLabel: string;
   filename: string;
@@ -625,7 +840,7 @@ export function saveProfile(input: {
    * AnalysisResponse/RentalResponse matches the current model), so
    * resuming later can render it straight away instead of re-running the
    * engine - see AppStore's saveSession. */
-  analysisResult?: AnalysisResponse | RentalResponse | null;
+  analysisResult?: AnalysisResponse | RentalResponse | RevolvingResponse | null;
 }): Promise<{ ok: boolean }> {
   return post<{ ok: boolean }>('/profiles/save', input);
 }
@@ -644,7 +859,7 @@ export interface RestorePayload {
   preview: string[][];
   sheets: string[];
   sheet: string | null;
-  modelKey: 'lending' | 'rental';
+  modelKey: ModelKey;
   mapping: Record<string, string>;
   generalInputs: Record<string, unknown>;
   chatHistory: ChatMessage[];
@@ -653,7 +868,7 @@ export interface RestorePayload {
   /** Present when this deal was saved with its computed result attached -
    * lets the caller skip straight to the results screen instead of
    * re-running the engine (see AppStore's restoreProfile). */
-  analysisResult: (AnalysisResponse | RentalResponse) | null;
+  analysisResult: (AnalysisResponse | RentalResponse | RevolvingResponse) | null;
 }
 
 export function loadProfile(sessionId: string): Promise<RestorePayload> {
@@ -666,7 +881,7 @@ export function createShare(input: {
   generalInputs: Record<string, unknown>;
   chatHistory: ChatMessage[];
   analysisContext?: string;
-  analysisResult?: AnalysisResponse | RentalResponse | null;
+  analysisResult?: AnalysisResponse | RentalResponse | RevolvingResponse | null;
 }): Promise<{ token: string }> {
   return post<{ token: string }>('/share', input);
 }

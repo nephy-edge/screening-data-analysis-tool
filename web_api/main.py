@@ -48,7 +48,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from config import FX, UE_MODEL_COST_DEFAULTS
+from config import FX, REVOLVING_DEFAULTS, UE_MODEL_COST_DEFAULTS
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -75,7 +75,9 @@ from export_workbook import (
     _add_chat_history_sheet,
     _build_lending_export_workbook,
     _build_rental_export_workbook,
+    _build_revolving_export_workbook,
 )
+from share_html import build_share_html
 import warehouse
 from integrations import (
     _redshift_job_status,
@@ -451,6 +453,7 @@ def _download_drive_file(access_token: str, drive_file: dict[str, Any]) -> tuple
 from template_analysis.cohorts import build_cohorts
 from template_analysis.cohorts_for_x_or_more_loans import filter_cohorts
 from template_analysis.data_input import process_data_input
+from template_analysis.date_detection import detect_date
 from template_analysis.general_inputs import GeneralInputs
 from template_analysis.ltv_analysis import LtvAnalysis
 from template_analysis.ltv_calculator import (
@@ -478,12 +481,28 @@ from rental_analysis.data_input import (
 )
 from rental_analysis.data_input import process_data_input as rental_process_data_input
 from rental_analysis.general_analysis import describe as rental_general_analysis
+from rental_analysis.general_inputs import DEFAULT_STATUS_MAP as RENTAL_DEFAULT_STATUS_MAP
 from rental_analysis.general_inputs import GeneralInputs as RentalGeneralInputs
 from rental_analysis.lease_cohorts import build_cohorts as rental_build_cohorts
 from rental_analysis.ltv_analysis import LtvAnalysis as RentalLtvAnalysis
 from rental_analysis.repayment_curve import build_repayment_curve
 from rental_analysis.ue_analysis import UeAnalysis as RentalUeAnalysis
 from rental_analysis.ts_covenants import build_ts_covenants
+
+# Revolving Lending (RCL) engine
+from revolving_analysis.engine import RevolvingInputs
+from revolving_analysis.engine import run as run_revolving
+from revolving_analysis.monthly_input import OPTIONAL_COLUMNS as REVOLVING_OPTIONAL_COLUMNS
+from revolving_analysis.monthly_input import REQUIRED_COLUMNS as REVOLVING_REQUIRED_COLUMNS
+from revolving_analysis.metrics import BY_KEY as REVOLVING_METRICS
+from revolving_analysis.facility import EXTRA_METRICS as _REVOLVING_EXTRA_METRICS
+from revolving_analysis.settings import WINDOW_LENGTHS as REVOLVING_WINDOWS
+
+# Every metric a covenant can test: the catalogue plus the ECL / net-yield figures.
+REVOLVING_COVENANT_METRICS = {
+    **{k: (m.label, m.kind) for k, m in REVOLVING_METRICS.items()},
+    **_REVOLVING_EXTRA_METRICS,
+}
 
 app = FastAPI(
     title="SC Analysis Engine API",
@@ -547,9 +566,10 @@ class GeneralInputsBody(BaseModel):
     extractionDate: str | None = None
     daysAfterTerm: int = 90
     minLoansPerCohort: int = 10
-    # Optional "YYYY-MM" cohort range for the LTV Calculator's interest input
-    # only (UeAnalysis.avg_interest_pct) - loss, cohorts and every other tab
-    # still use the whole book. Blank = no limit on that end.
+    # Optional "YYYY-MM" cohort range for the LTV Calculator's interest and
+    # 95th %ile loss inputs only (UeAnalysis.avg_interest_pct,
+    # LtvAnalysis.percentile_95_losses) - the cohorts table and every other
+    # tab still use the whole book. Blank = no limit on that end.
     ltvCohortFrom: str | None = None
     ltvCohortTo: str | None = None
     # ISO 4217 code the mapped monetary columns are denominated in. Non-USD
@@ -635,6 +655,10 @@ class RentalGeneralInputsBody(BaseModel):
     # Portfolio currency for the mapped monetary columns - see
     # GeneralInputsBody.currency. Rescaled to USD before the engine runs.
     currency: str | None = None
+    # Client status value -> Lendable status (Open / Closed / Paid-off), from
+    # the General Inputs status table (app.py's "Status mapping" editor).
+    # None falls back to the engine's DEFAULT_STATUS_MAP.
+    statusMap: dict[str, str] | None = None
 
 
 class RentalAnalyseIngest(BaseModel):
@@ -656,6 +680,69 @@ class RentalAnalyseBody(BaseModel):
     dedupeById: bool = False
     # Optional Ask AI transcript for /api/export/rental - see LendingAnalyseBody.
     chatHistory: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RevolvingScenarioBody(BaseModel):
+    name: str
+    rollRateMultiplier: float = Field(..., gt=0)
+    lgdMultiplier: float = Field(..., gt=0)
+
+
+class RevolvingCovenantBody(BaseModel):
+    metric: str = Field(..., description="A revolving metric key, e.g. 'par91_total'.")
+    operator: Literal["<=", ">="]
+    limit: float
+
+
+class RevolvingGeneralInputsBody(BaseModel):
+    """Revolving model tunables; defaults from config.toml [revolving_defaults]."""
+
+    asOfMonth: str | None = Field(None, description="'YYYY-MM'; None = last month in the data.")
+    lgd: float = REVOLVING_DEFAULTS["lgd"]
+    rollRateWindow: str = Field(
+        REVOLVING_DEFAULTS["roll_rate_window"],
+        description="A window name from config.toml [revolving_defaults.roll_rate_windows].",
+    )
+    ratioWindowMonths: int = Field(REVOLVING_DEFAULTS["ratio_window_months"], ge=1)
+    writeoffWindowMonths: int = Field(REVOLVING_DEFAULTS["writeoff_window_months"], ge=1)
+    minOutstandingInSample: float = REVOLVING_DEFAULTS["min_outstanding_in_sample"]
+    stressPercentile: float = Field(REVOLVING_DEFAULTS["stress_percentile"], ge=0, le=1)
+    denominatorLagMonths: int = Field(REVOLVING_DEFAULTS["denominator_lag_months"], ge=0)
+    laggedBlendWeight: float = Field(REVOLVING_DEFAULTS["lagged_blend_weight"], ge=0, le=1)
+    lossRateBasis: Literal["Naive", "Blended", "Lagged"] = REVOLVING_DEFAULTS["loss_rate_basis"]
+    lgdBasis: Literal["Input", "Recoveries"] = REVOLVING_DEFAULTS["lgd_basis"]
+    costOfFundsPct: float = Field(REVOLVING_DEFAULTS["cost_of_funds_pct"], ge=0)
+    opexPct: float = Field(REVOLVING_DEFAULTS["opex_pct"], ge=0)
+    advanceHaircut: float = Field(REVOLVING_DEFAULTS["advance_haircut"], ge=0, le=1)
+    backtestMinHistoryMonths: int = Field(REVOLVING_DEFAULTS["backtest_min_history_months"], ge=1)
+    earlyWarningLookbackMonths: int = Field(
+        REVOLVING_DEFAULTS["early_warning_lookback_months"], ge=1
+    )
+    earlyWarningThreshold: float = Field(REVOLVING_DEFAULTS["early_warning_threshold"], ge=0)
+    scenarios: list[RevolvingScenarioBody] = Field(
+        default_factory=lambda: [
+            RevolvingScenarioBody(
+                name=s["name"],
+                rollRateMultiplier=s["roll_rate_multiplier"],
+                lgdMultiplier=s["lgd_multiplier"],
+            )
+            for s in REVOLVING_DEFAULTS["scenarios"]
+        ]
+    )
+    covenants: list[RevolvingCovenantBody] = Field(
+        default_factory=lambda: [
+            RevolvingCovenantBody(**c) for c in REVOLVING_DEFAULTS.get("covenants", [])
+        ]
+    )
+
+
+class RevolvingAnalyseBody(BaseModel):
+    rows: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Monthly rows keyed by the Outputs field names (report_month, ...).",
+    )
+    generalInputs: RevolvingGeneralInputsBody = Field(default_factory=RevolvingGeneralInputsBody)
+    ingest: LendingAnalyseIngest | None = None
 
 
 RENTAL_REQUIRED_COLUMNS = [
@@ -698,6 +785,11 @@ RENTAL_DQ_CONFIG = {
     + [(c, False) for c in RENTAL_OPTIONAL_COLUMNS],
     "primary_date_field": "start_date",
 }
+# Only input_columns is read for the revolving model (by /api/ai/suggest-mapping).
+REVOLVING_DQ_CONFIG = {
+    "input_columns": [(c, True) for c in REVOLVING_REQUIRED_COLUMNS]
+    + [(c, False) for c in REVOLVING_OPTIONAL_COLUMNS],
+}
 
 # In-memory registry of ingested uploads. A real file upload stores its parsed
 # DataFrame here keyed by a short-lived id; the analyse endpoints then look it
@@ -711,6 +803,13 @@ INGESTS: dict[str, pd.DataFrame] = {}
 # for an ingest with no original file (a merge or warehouse-fetch result) -
 # see _ingest_raw_bytes, which fills it in lazily on first actual need.
 INGEST_RAW: dict[str, tuple[bytes | None, str]] = {}
+# Each ingest's _register_ingest payload (columns/rowCount/preview/sheet),
+# stored with a save/share so restoring it needn't download the data.
+INGEST_INFO: dict[str, dict[str, Any]] = {}
+# Restored saved runs whose data hasn't been downloaded yet:
+# ingestId -> (load_bytes, info, lock). _get_ingest moves one into INGESTS on
+# first read; the lock stops two concurrent first reads loading it twice.
+_PENDING_INGESTS: dict[str, tuple[Any, dict[str, Any], threading.Lock]] = {}
 
 # Both registries are bounded, because nothing else ever removes from them:
 # an ingest has no "session ended" signal (the browser can close mid-deal, and
@@ -763,7 +862,7 @@ def _cached_pipeline(model: str, body: BaseModel, run) -> tuple[Any, ...]:
     key = model + json.dumps(
         body.model_dump(include=_ENGINE_KEY_FIELDS, mode="json"), sort_keys=True, default=str
     )
-    raw = INGESTS.get(ingest.ingestId)
+    raw = _get_ingest(ingest.ingestId)
     hit = _ENGINE_CACHE.get(ingest.ingestId)
     # Identity check on the raw frame: a sheet re-parse re-registers the same id.
     if hit is not None and hit[0] == key and raw is not None and hit[1] is raw:
@@ -790,7 +889,7 @@ def _evict_ingests() -> None:
         now = time.time()
         for key in [k for k, t in _INGEST_LAST_USED.items() if now - t > _INGEST_TTL_SECONDS]:
             _drop_ingest(key)
-        while len(INGESTS) > _INGEST_MAX:
+        while len(INGESTS.keys() | _PENDING_INGESTS.keys()) > _INGEST_MAX:
             oldest = min(_INGEST_USE_SEQ, key=_INGEST_USE_SEQ.get, default=None)
             if oldest is None:
                 break
@@ -801,6 +900,8 @@ def _drop_ingest(ingest_id: str) -> None:
     with _INGEST_LOCK:
         INGESTS.pop(ingest_id, None)
         INGEST_RAW.pop(ingest_id, None)
+        INGEST_INFO.pop(ingest_id, None)
+        _PENDING_INGESTS.pop(ingest_id, None)
         _ENGINE_CACHE.pop(ingest_id, None)
         _INGEST_LAST_USED.pop(ingest_id, None)
         _INGEST_USE_SEQ.pop(ingest_id, None)
@@ -808,7 +909,28 @@ def _drop_ingest(ingest_id: str) -> None:
 
 def _get_ingest(ingest_id: str) -> pd.DataFrame | None:
     """INGESTS.get + keep-alive, so an ingest being actively analysed is not
-    evicted out from under the user by other uploads."""
+    evicted out from under the user by other uploads. Downloads and parses a
+    restored run's data here on first read (see _register_pending_ingest)."""
+    pending = _PENDING_INGESTS.get(ingest_id)
+    if pending is not None:
+        load_bytes, info, lock = pending
+        with lock:
+            if ingest_id in _PENDING_INGESTS:
+                try:
+                    file_bytes = load_bytes()
+                except Exception as exc:
+                    # Stays pending, so a retry can succeed after a blip.
+                    raise HTTPException(
+                        status_code=502, detail=f"Could not download this saved run's data: {exc}"
+                    ) from exc
+                _register_ingest(
+                    file_bytes,
+                    info["name"],
+                    sheet=info.get("sheet"),
+                    ingest_id=ingest_id,
+                    enforce_size_cap=False,
+                )
+                _PENDING_INGESTS.pop(ingest_id, None)
     df = INGESTS.get(ingest_id)
     if df is not None:
         _touch_ingest(ingest_id)
@@ -885,7 +1007,9 @@ def _frame_to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
         cleaned: dict[str, Any] = {}
         for k, v in rec.items():
             col = str(k)
-            if v is None:
+            # A datetime column can't hold None, so the .where above leaves NaT,
+            # which the response serializer rejects (500).
+            if v is None or v is pd.NaT:
                 cleaned[col] = None
             elif isinstance(v, pd.Timestamp):
                 cleaned[col] = v.isoformat()
@@ -996,23 +1120,41 @@ def _register_ingest(
         raise HTTPException(status_code=422, detail="File parsed with no rows.")
     df.columns = [str(c) for c in df.columns]
     ingest_id = ingest_id or uuid.uuid4().hex[:12]
+    info = _json_safe(
+        {
+            "ingestId": ingest_id,
+            "name": name,
+            "columns": list(df.columns),
+            "rowCount": int(len(df)),
+            "preview": _frame_preview(df),
+            # Which sheets the user may switch between, and which one produced
+            # the columns/preview above. Both empty/None for a CSV.
+            "sheets": sheets,
+            "sheet": sheet if (sheet and sheet in sheets) else _default_sheet(sheets),
+        }
+    )
     with _INGEST_LOCK:
         INGESTS[ingest_id] = df
         INGEST_RAW[ingest_id] = (file_bytes, name)
+        INGEST_INFO[ingest_id] = info
         _ENGINE_CACHE.pop(ingest_id, None)
         _touch_ingest(ingest_id)
         _evict_ingests()
-    return {
-        "ingestId": ingest_id,
-        "name": name,
-        "columns": list(df.columns),
-        "rowCount": int(len(df)),
-        "preview": _frame_preview(df),
-        # Which sheets the user may switch between, and which one produced
-        # the columns/preview above. Both empty/None for a CSV.
-        "sheets": sheets,
-        "sheet": sheet if (sheet and sheet in sheets) else _default_sheet(sheets),
-    }
+    return info
+
+
+def _register_pending_ingest(info: dict[str, Any], load_bytes: Any) -> dict[str, Any]:
+    """Register a saved run's ingest without its data: `info` (saved at save
+    time) is enough to show the mapping/analysis screens, and `load_bytes`
+    is only called by _get_ingest the first time something reads the data."""
+    ingest_id = uuid.uuid4().hex[:12]
+    info = {**info, "ingestId": ingest_id}
+    with _INGEST_LOCK:
+        _PENDING_INGESTS[ingest_id] = (load_bytes, info, threading.Lock())
+        INGEST_INFO[ingest_id] = info
+        _touch_ingest(ingest_id)
+        _evict_ingests()
+    return info
 
 
 def _ingest_raw_bytes(ingest_id: str) -> tuple[bytes, str]:
@@ -1023,6 +1165,8 @@ def _ingest_raw_bytes(ingest_id: str) -> tuple[bytes, str]:
     computes and caches its CSV serialization here, the first time it's
     actually needed, rather than eagerly for every such ingest regardless of
     whether anyone ever saves or shares it."""
+    if ingest_id in _PENDING_INGESTS:
+        _get_ingest(ingest_id)
     raw = INGEST_RAW.get(ingest_id)
     if raw is None:
         raise HTTPException(status_code=404, detail="ingestId not found (upload may have expired).")
@@ -1695,9 +1839,12 @@ def _compute_lending(
         filtered = filter_cohorts(cohorts, gi.min_loans_per_cohort)
         ue = UeAnalysis(processed)
         ltv = LtvAnalysis(processed, filtered)
-        ltv_interest = ue.avg_interest_pct(
-            gi_body.ltvCohortFrom or None, gi_body.ltvCohortTo or None
-        )
+        ltv_range = (gi_body.ltvCohortFrom or None, gi_body.ltvCohortTo or None)
+        ltv_interest = ue.avg_interest_pct(*ltv_range)
+        ltv_loss = ltv.percentile_95_losses(*ltv_range)
+        # The LTV tab's "include unfinished loans" option (Salmon-sheet basis).
+        all_loans_losses = ltv.all_loans_cohort_losses(gi.min_loans_per_cohort)
+        ltv_loss_all_loans = ltv.percentile_95_losses_all_loans(gi.min_loans_per_cohort, *ltv_range)
     except Exception as exc:  # engine failures -> 422 so the UI can surface them
         raise HTTPException(status_code=422, detail=f"Analysis failed: {exc}") from exc
 
@@ -1722,6 +1869,9 @@ def _compute_lending(
         "ue": ue,
         "ltv": ltv,
         "ltv_interest": ltv_interest,
+        "ltv_loss": ltv_loss,
+        "ltv_loss_all_loans": ltv_loss_all_loans,
+        "all_loans_losses": all_loans_losses,
         "gi_body": gi_body,
         "chart_data": chart_data,
         "summary_cohorts": summary_cohorts,
@@ -1818,7 +1968,24 @@ def _irr(cashflows: list[float]) -> float | None:
     return None
 
 
-def _ue_model_metrics(ue_model: dict[str, Any]) -> dict[str, Any]:
+class UeModelInputsBody(BaseModel):
+    """The UE Model sub-tab's manual assumptions as the tab holds them (costs
+    as decimals), so Ask AI quotes the figures on screen, not the defaults."""
+
+    upfrontCostPct: float = Field(..., ge=0)
+    ongoingCostPct: float = Field(..., ge=0)
+    financingCostPct: float = Field(..., ge=0)
+    facilityFeePct: float = Field(..., ge=0)
+    hedgeCostPct: float = Field(..., ge=0)
+    lossChoice: Literal["Actual", "Proxy", "Input"] = "Actual"
+    lossInputPct: float | None = Field(
+        None, ge=0, description="Loss Rate (%) typed in when lossChoice is 'Input'."
+    )
+
+
+def _ue_model_metrics(
+    ue_model: dict[str, Any], inputs: UeModelInputsBody | None = None
+) -> dict[str, Any]:
     """The lending UE Model sub-tab's derived figures (Gross/Net IRR, Estimated
     APR, Implied Monthly Interest %, Loss %, Income/cost breakdown), ported 1:1
     from AnalysisSession.tsx's LendingUeModelTab so the export's UE Model sheet
@@ -1827,16 +1994,33 @@ def _ue_model_metrics(ue_model: dict[str, Any]) -> dict[str, Any]:
     Mirrors the client: loss rate = Actual, costs = the engine's UE_MODEL_COST_
     DEFAULTS. The app lets the user override these interactively; the export
     records the defaults the analysis ran with (same values the sheet's own
-    input cells carry, so a reader can see the basis)."""
+    input cells carry, so a reader can see the basis). `inputs` carries the
+    user's overrides instead (Ask AI), with the same Actual/Proxy/Input loss
+    choice the tab offers."""
     m = ue_model
-    defaults = m.get("costDefaults") or {}
-    upfront = defaults.get("upfront_cost_pct", 0) / 100
-    ongoing = defaults.get("ongoing_cost_pct", 0) / 100
-    financing = defaults.get("financing_cost_pct", 0) / 100
-    facility = defaults.get("facility_fee_pct", 0) / 100
-    hedge = defaults.get("hedge_cost_pct", 0) / 100
+    loss_choice = "Actual"
+    if inputs is None:
+        defaults = m.get("costDefaults") or {}
+        upfront = defaults.get("upfront_cost_pct", 0) / 100
+        ongoing = defaults.get("ongoing_cost_pct", 0) / 100
+        financing = defaults.get("financing_cost_pct", 0) / 100
+        facility = defaults.get("facility_fee_pct", 0) / 100
+        hedge = defaults.get("hedge_cost_pct", 0) / 100
+    else:
+        upfront, ongoing = inputs.upfrontCostPct, inputs.ongoingCostPct
+        financing, facility, hedge = (
+            inputs.financingCostPct,
+            inputs.facilityFeePct,
+            inputs.hedgeCostPct,
+        )
+        loss_choice = inputs.lossChoice
 
-    loss_rate = m.get("actualLossRate")
+    if loss_choice == "Proxy":
+        loss_rate = m.get("lossRateProxy")
+    elif loss_choice == "Input" and inputs.lossInputPct is not None:
+        loss_rate = inputs.lossInputPct / 100
+    else:
+        loss_rate = m.get("actualLossRate")
     principal = m.get("principal")
     matured_owed = m.get("maturedOwed")
     matured_principal = m.get("maturedPrincipal")
@@ -1923,7 +2107,7 @@ def _ue_model_metrics(ue_model: dict[str, Any]) -> dict[str, Any]:
     )
 
     return {
-        "Loss Rate used (Actual)": loss_rate,
+        f"Loss Rate used ({loss_choice})": loss_rate,
         "Loss % of GBV": losses_pct_of_gbv,
         "Estimated APR": implied_interest,
         "Implied Monthly Interest %": implied_monthly,
@@ -1992,12 +2176,18 @@ def _run_lending_engine(
                 ]
             ),
             "generalInputs": c["gi"].as_dict(),
-            # The LTV Calculator's interest input: Average Interest % limited
-            # to the General Inputs cohort range (equal to it when unset).
+            # The LTV Calculator's interest and loss inputs: Average Interest %
+            # and 95th %ile loss limited to the General Inputs cohort range
+            # (equal to the whole-book figures when unset).
             "ltvInterest": c["ltv_interest"],
-            # The range that figure was computed over, echoed back so the UI
-            # labels it with what was run, not whatever is in the inputs now.
-            "ltvInterestRange": {
+            "ltvLoss": c["ltv_loss"],
+            # The same 95th %ile with every loan counted, finished or not, and
+            # the per-cohort losses behind it - the LTV tab's checkbox.
+            "ltvLossAllLoans": c["ltv_loss_all_loans"],
+            "cohortLossesAllLoans": _frame_to_records(c["all_loans_losses"]),
+            # The range those figures were computed over, echoed back so the UI
+            # labels them with what was run, not whatever is in the inputs now.
+            "ltvCohortRange": {
                 "from": c["gi_body"].ltvCohortFrom or None,
                 "to": c["gi_body"].ltvCohortTo or None,
             },
@@ -2054,7 +2244,7 @@ def export_lending(body: LendingAnalyseBody) -> Response:
         LtvCalcBody(
             averageInterest=c["ltv_interest"],
             termDays=ltv_data.get("Average Term"),
-            lossRate=ltv_data.get("95th Percentile Losses"),
+            lossRate=c["ltv_loss"],
         )
     )
     xlsx_bytes = _build_lending_export_workbook(
@@ -2135,7 +2325,10 @@ def _resolve_rental_df(body: RentalAnalyseBody) -> tuple[pd.DataFrame, str | Non
     # The rental engine expects date columns as datetime (the Streamlit app
     # normalises them during ingestion); coerce here the same way, and ensure
     # absent optional date columns are real datetime64 (NaT) so the engine's
-    # date arithmetic and .fillna paths work under pandas 3.0.
+    # date arithmetic and .fillna paths work under pandas 3.0. detect_date
+    # (shared with app.py) handles a column mixing formats, e.g. "11/28/2024"
+    # beside "2024-08-11 00:00:00" - a bare to_datetime locks onto one format
+    # and turns the rest into NaT.
     for c in df.columns:
         if c in {
             "start_date",
@@ -2145,7 +2338,7 @@ def _resolve_rental_df(body: RentalAnalyseBody) -> tuple[pd.DataFrame, str | Non
             "recovery_date",
             "last_payment_date",
         }:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
+            df[c] = pd.to_datetime(detect_date(df[c]), errors="coerce")
     for c in {
         "expected_end_date",
         "closed_date",
@@ -2159,14 +2352,37 @@ def _resolve_rental_df(body: RentalAnalyseBody) -> tuple[pd.DataFrame, str | Non
     return df, fx_warning
 
 
+def _status_text(series: pd.Series) -> pd.Series:
+    """Status values as text (blanks stay NaN), so they match the string keys
+    of a JSON statusMap - a numeric status column (1/0) would otherwise never
+    match. Shared by the status gate and /api/ingest/status-values."""
+    return series.map(lambda v: v if pd.isna(v) else str(v).strip()).replace("", np.nan)
+
+
 def _compute_rental(df: pd.DataFrame, gi_body: RentalGeneralInputsBody) -> dict[str, Any]:
     """Run the rental engine pipeline once and return every raw intermediate
     object - shared by /api/analyse/rental (serializes to JSON) and
     /api/export/rental (feeds export_workbook.py's real Excel builder), so
     the pipeline itself runs in exactly one place (same pattern as
     _compute_lending)."""
+    status_map = gi_body.statusMap or RENTAL_DEFAULT_STATUS_MAP
+    # Same gate as app.py's status editor: an unmapped status would reach the
+    # engine as NaN and silently zero MRR / utilisation / loss, not fail.
+    if "status" in df.columns:
+        df = df.assign(status=_status_text(df["status"]))
+        present = df["status"].dropna().unique().tolist()
+        unmapped = sorted(s for s in present if not status_map.get(s))
+        if unmapped:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{len(unmapped)} status value(s) aren't mapped to a Lendable status yet. "
+                    "Map them in General Inputs, then run again. Unmapped: " + ", ".join(unmapped)
+                ),
+            )
     gi = RentalGeneralInputs(
         df,
+        status_map=status_map,
         extraction_date=(pd.Timestamp(gi_body.extractionDate) if gi_body.extractionDate else None),
         days_after_term=gi_body.daysAfterTerm,
         months_since_default=gi_body.monthsSinceDefault,
@@ -2222,6 +2438,42 @@ def _rental_pipeline(body: RentalAnalyseBody) -> tuple[pd.DataFrame, str | None,
         return df, fx_warning, _compute_rental(df, body.generalInputs)
 
     return _cached_pipeline("rental", body, run)
+
+
+class StatusValuesBody(BaseModel):
+    ingest: RentalAnalyseIngest
+
+
+# A status column with more distinct values than this is almost certainly the
+# wrong column (e.g. a free-text note), not something to map row by row.
+_STATUS_VALUES_CAP = 200
+
+
+@app.post("/api/ingest/status-values")
+def ingest_status_values(body: StatusValuesBody) -> dict[str, Any]:
+    """Every distinct value (with count) of the column mapped to ``status``,
+    for the rental General Inputs status table - it needs all raw statuses,
+    not the few preview rows the ingest response carries. ``suggested`` is
+    DEFAULT_STATUS_MAP matched ignoring case (as the workbook's MATCH does),
+    or "" when the value has no default and the user must pick."""
+    raw = _get_ingest(body.ingest.ingestId)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="ingestId not found (upload may have expired).")
+    src = body.ingest.mapping.get("status")
+    if not src:
+        raise HTTPException(status_code=422, detail="No column is mapped to status.")
+    mapped = _canonical_rows_from_mapping(
+        raw, {"status": src}, _derived_dicts(body.ingest.derivedColumns)
+    )
+    counts = _status_text(mapped["status"]).value_counts()
+    defaults = {k.casefold(): v for k, v in RENTAL_DEFAULT_STATUS_MAP.items()}
+    return {
+        "values": [
+            {"value": v, "count": int(n), "suggested": defaults.get(v.casefold(), "")}
+            for v, n in counts.head(_STATUS_VALUES_CAP).items()
+        ],
+        "truncated": len(counts) > _STATUS_VALUES_CAP,
+    }
 
 
 @app.post("/api/analyse/rental")
@@ -2369,6 +2621,11 @@ class LtvCalcBody(BaseModel):
     lossRate: float | None = Field(
         None, description="95th %ile loss rate (decimal) at T+3, from the analysis."
     )
+    includeUnfinishedLoans: bool = Field(
+        False,
+        description="The LTV tab's checkbox: count every loan in a cohort for the loss, "
+        "finished or not. Only read by Ask AI, which recomputes the loss from the analysis.",
+    )
 
 
 def _ltv_calculator_payload(body: LtvCalcBody) -> dict[str, Any]:
@@ -2505,6 +2762,223 @@ def export_rental(body: RentalAnalyseBody) -> Response:
     )
 
 
+def _resolve_revolving_df(body: RevolvingAnalyseBody) -> pd.DataFrame:
+    """The canonical monthly DataFrame from ``ingest`` (upload + mapping) or
+    direct ``rows``. No FX rescale: the loss-rate sample threshold is in the
+    source currency, and every Outputs ratio is currency-free."""
+    if body.ingest:
+        raw = _get_ingest(body.ingest.ingestId)
+        if raw is None:
+            raise HTTPException(
+                status_code=404, detail="ingestId not found (upload may have expired)."
+            )
+        df = _canonical_rows_from_mapping(
+            raw, body.ingest.mapping, _derived_dicts(body.ingest.derivedColumns)
+        )
+    elif body.rows:
+        df = pd.DataFrame(body.rows)
+    else:
+        raise HTTPException(status_code=400, detail="No rows provided.")
+    missing = [c for c in REVOLVING_REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Missing required revolving fields in your mapping: {', '.join(missing)}",
+        )
+    # Drop rows blank in every mapped field (trailing summary rows) before the
+    # text cleaning below turns their blanks into "nan" strings.
+    df = df.replace(r"^\s*$", np.nan, regex=True).dropna(how="all").reset_index(drop=True)
+    df["report_month"] = pd.to_datetime(detect_date(df["report_month"]), errors="coerce")
+    for c in df.columns:
+        if c != "report_month":
+            df[c] = _clean_numeric(df[c])
+    return df
+
+
+def _revolving_pipeline(body: RevolvingAnalyseBody) -> tuple[pd.DataFrame, None, dict]:
+    def run():
+        df = _resolve_revolving_df(body)
+        gi = body.generalInputs
+        if gi.rollRateWindow not in REVOLVING_WINDOWS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Roll-rate window must be one of {', '.join(REVOLVING_WINDOWS)}",
+            )
+        unknown = [c.metric for c in gi.covenants if c.metric not in REVOLVING_COVENANT_METRICS]
+        if unknown:
+            raise HTTPException(
+                status_code=422, detail=f"Unknown covenant metric(s): {', '.join(unknown)}"
+            )
+        inputs = RevolvingInputs(
+            as_of_month=gi.asOfMonth or None,
+            lgd=gi.lgd,
+            roll_rate_window=gi.rollRateWindow,
+            ratio_window_months=gi.ratioWindowMonths,
+            writeoff_window_months=gi.writeoffWindowMonths,
+            min_outstanding_in_sample=gi.minOutstandingInSample,
+            stress_percentile=gi.stressPercentile,
+            denominator_lag_months=gi.denominatorLagMonths,
+            lagged_blend_weight=gi.laggedBlendWeight,
+            loss_rate_basis=gi.lossRateBasis,
+            balance_tolerance=REVOLVING_DEFAULTS["balance_tolerance"],
+            unexplained_warning_pct=REVOLVING_DEFAULTS["unexplained_warning_pct"],
+            lgd_basis=gi.lgdBasis,
+            cost_of_funds_pct=gi.costOfFundsPct,
+            opex_pct=gi.opexPct,
+            advance_haircut=gi.advanceHaircut,
+            backtest_min_history_months=gi.backtestMinHistoryMonths,
+            early_warning_lookback_months=gi.earlyWarningLookbackMonths,
+            early_warning_threshold=gi.earlyWarningThreshold,
+            scenarios=[sc.model_dump() for sc in gi.scenarios],
+            covenants=[cv.model_dump() for cv in gi.covenants],
+            stress_roll_rate_cap=REVOLVING_DEFAULTS["stress_roll_rate_cap"],
+        )
+        try:
+            return df, None, run_revolving(df, inputs)
+        except ValueError as exc:  # bad input shape -> 422 so the UI can surface it
+            raise HTTPException(status_code=422, detail=f"Analysis failed: {exc}") from exc
+
+    return _cached_pipeline("revolving", body, run)
+
+
+@app.get("/api/revolving/defaults")
+def revolving_defaults() -> dict[str, Any]:
+    """The revolving General Inputs defaults (config.toml), so the UI shows the
+    values a run will use without keeping its own copy of them."""
+    return RevolvingGeneralInputsBody().model_dump()
+
+
+@app.get("/api/revolving/options")
+def revolving_options() -> dict[str, Any]:
+    """The General Inputs pickers' choices, from config / the metric
+    catalogue: roll-rate window names and the metrics a covenant can test."""
+    return {
+        "rollRateWindows": list(REVOLVING_WINDOWS),
+        "covenantMetrics": [
+            {"key": k, "label": label} for k, (label, _) in REVOLVING_COVENANT_METRICS.items()
+        ],
+    }
+
+
+@app.post("/api/analyse/revolving")
+def analyse_revolving(body: RevolvingAnalyseBody) -> dict[str, Any]:
+    _, _, c = _revolving_pipeline(body)
+
+    def records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+        return _frame_to_records(frame.reset_index())
+
+    return _json_safe(
+        {
+            "summary": {"rows": int(len(c["monthly"])), "cohorts": 0},
+            "availableMonths": c["availableMonths"],
+            "facts": _frame_to_records(c["facts"]),
+            "ratios": c["ratios"],
+            "warnings": c["warnings"],
+            "qualityChecks": c["qualityChecks"],
+            "balances": records(c["balances"]),
+            "rollRates": records(c["rollRates"]),
+            "lossFactors": records(c["lossFactors"]),
+            "ecl": _frame_to_records(c["ecl"]),
+            "eclSummary": c["eclSummary"],
+            "checks": records(c["checks"]),
+            "lossRates": _frame_to_records(c["pit"]),
+            "lossRateDistribution": records(c["distribution"]),
+            "lgdUsed": c["lgdUsed"],
+            "lgdBasis": c["lgdBasis"],
+            "standardMetrics": c["standardMetrics"],
+            "overTime": _revolving_over_time_records(c["overTime"]),
+            "unitEconomics": c["unitEconomics"],
+            "performance": c["performance"],
+            "ltvInterest": c["ltvInterest"],
+            "tenorInputs": c["tenorInputs"],
+            "ageingMix": c["ageingMix"],
+            "earlyWarnings": c["earlyWarnings"],
+            "backtest": _frame_to_records(c["backtest"]),
+            "backtestSummary": c["backtestSummary"],
+            "stress": c["stress"],
+            "advance": c["advance"],
+            "covenants": c["covenants"],
+            "generalInputs": body.generalInputs.model_dump(),
+        }
+    )
+
+
+def _revolving_over_time_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    """Metrics-by-month rows, each labelled and typed for display."""
+    labelled = frame.copy()
+    labelled.insert(0, "kind", [REVOLVING_METRICS[k].kind for k in labelled.index])
+    labelled.insert(0, "Metric", [REVOLVING_METRICS[k].label for k in labelled.index])
+    return _frame_to_records(labelled.reset_index(names="key"))
+
+
+@app.post("/api/export/revolving")
+def export_revolving(body: RevolvingAnalyseBody) -> Response:
+    """Same request shape as /api/analyse/revolving; returns the .xlsx with the
+    Outputs and Transition Matrices sheets."""
+    _, _, c = _revolving_pipeline(body)
+    xlsx_bytes = _build_revolving_export_workbook(c, body.generalInputs.model_dump())
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="SC_Analysis_Revolving.xlsx"'},
+    )
+
+
+# Standalone read-only HTML report (what Share downloads until the app is
+# deployed). Each route reruns the model's own (cached) analyse endpoint and
+# hands that exact JSON to scripts/share_html.py - no figures recomputed. The
+# LTV choices are the user's LTV-tab dropdowns; the green inputs are filled in
+# here from the analysis, the same way each LTV tab does.
+def _html_response(
+    model: str, result: dict, inputs: dict | None, ltv_calc: dict | None = None
+) -> Response:
+    ltv_calc = _json_safe(ltv_calc) if ltv_calc else None
+    return Response(
+        content=build_share_html(model, _json_safe(result), inputs, ltv_calc),
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="SC_Analysis_{model}.html"'},
+    )
+
+
+@app.post("/api/export/html/lending")
+def export_html_lending(body: LendingAnalyseBody, ltv: LtvCalcBody | None = None) -> Response:
+    result = analyse_lending(body)
+    ue, ltv_data = result.get("ue") or {}, result.get("ltv") or {}
+    use_all = bool(ltv and ltv.includeUnfinishedLoans)
+    ltv_calc = _ltv_calculator_payload(
+        (ltv or LtvCalcBody()).model_copy(
+            update={
+                "averageInterest": result.get("ltvInterest", ue.get("Average Interest %")),
+                "termDays": ltv_data.get("Average Term"),
+                "lossRate": result.get("ltvLossAllLoans") if use_all else result.get("ltvLoss"),
+            }
+        )
+    )
+    return _html_response("lending", result, body.generalInputs.model_dump(), ltv_calc)
+
+
+@app.post("/api/export/html/rental")
+def export_html_rental(body: RentalAnalyseBody) -> Response:
+    return _html_response("rental", analyse_rental(body), body.generalInputs.model_dump())
+
+
+@app.post("/api/export/html/revolving")
+def export_html_revolving(body: RevolvingAnalyseBody, ltv: LtvCalcBody | None = None) -> Response:
+    result = analyse_revolving(body)
+    perf = result.get("performance") or {}
+    avg_term = perf.get("avgTerm")
+    ltv_calc = _ltv_calculator_payload(
+        (ltv or LtvCalcBody()).model_copy(
+            update={
+                "averageInterest": result.get("ltvInterest"),
+                "termDays": avg_term * 30.4375 if avg_term is not None else None,
+                "lossRate": perf.get("lossRate95"),
+            }
+        )
+    )
+    return _html_response("revolving", result, body.generalInputs.model_dump(), ltv_calc)
+
+
 class SuggestMappingBody(BaseModel):
     modelKey: str = Field(..., description="'lending' or 'rental'.")
     columns: list[str] = Field(..., description="Raw uploaded file's column headers.")
@@ -2521,7 +2995,10 @@ def suggest_mapping(body: SuggestMappingBody) -> dict[str, Any]:
     error) when no DEEPINFRA_API_KEY is configured, exactly like the
     Streamlit app; the frontend falls back to its own name-matching
     heuristic in that case."""
-    config = LENDING_DQ_CONFIG if body.modelKey == "lending" else RENTAL_DQ_CONFIG
+    config = {
+        "lending": LENDING_DQ_CONFIG,
+        "revolving": REVOLVING_DQ_CONFIG,
+    }.get(body.modelKey, RENTAL_DQ_CONFIG)
     # Same 20000/6000 truncation app.py's mapping-suggestion call uses
     # (_ai_context_text(max_chars=20000, per_doc=6000)) - keeps this cheaper,
     # more frequent call's tokens bounded tighter than the chat endpoints below.
@@ -2590,9 +3067,22 @@ class LendingChatBody(LendingAnalyseBody):
     history: list[ChatMessage] = Field(default_factory=list)
     userContext: str = ""
     documents: list[ContextDocument] = Field(default_factory=list)
+    # The LTV Calculator dropdowns and UE Model assumptions currently on
+    # screen. Both are user choices the analysis itself doesn't carry, so
+    # without them the chat can't quote those tabs' figures. The green inputs
+    # in ltvCalculator are ignored and recomputed from the analysis.
+    ltvCalculator: LtvCalcBody | None = None
+    ueModelInputs: UeModelInputsBody | None = None
 
 
 class RentalChatBody(RentalAnalyseBody):
+    question: str
+    history: list[ChatMessage] = Field(default_factory=list)
+    userContext: str = ""
+    documents: list[ContextDocument] = Field(default_factory=list)
+
+
+class RevolvingChatBody(RevolvingAnalyseBody):
     question: str
     history: list[ChatMessage] = Field(default_factory=list)
     userContext: str = ""
@@ -2605,60 +3095,261 @@ def _ai_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail=f"AI request failed: {exc}")
 
 
+# How each Lending figure is calculated, written from the engine code
+# (template_analysis/*, summary_metrics.py, _ue_model_metrics,
+# ltv_calculator.compute_ltv). The chat prompt tells the model to explain
+# "why"/"how" questions from these notes only, so keep them in step with the
+# code they describe.
+_LENDING_CHAT_METHODOLOGY = """\
+All rates below are decimals (0.1986 = 19.86%). Sums run over loans; "pooled" means the
+figure is computed once over the summed loans, not averaged across cohorts.
+- Cohort: the Disbursement Date's calendar month.
+- Matured ("Reached T+3?"): maturity date <= extraction date - Days after term. Maturity date
+  is Disbursement Date + Term (days) when a Term column is mapped, else Expected Completion
+  Date. A loan with no maturity date is never matured.
+- Term (days): the mapped Term column, else Expected Completion Date - Disbursement Date.
+- Loss Rate (Summary tab) = Average Loss (Unit Economics tab) = 1 - sum(Total Paid) /
+  sum(Principal Value + Expected Interest + Expected Fee), matured loans only, pooled. This is
+  a GBV basis (unpaid principal AND unpaid interest/fees count as loss), not principal-only.
+  Penalties count only if they are included in the column mapped to Expected Fee.
+- Cohort Loss Rate: the same formula over one cohort's matured loans; blank when that cohort
+  has fewer matured loans than Minimum loans per cohort.
+- 95th %ile Loss Rate (95th Percentile Losses): 95th percentile, linearly interpolated (as
+  Excel PERCENTILE), of the cohort Loss Rates of cohorts with at least Minimum loans per
+  cohort matured loans.
+- Loss Rate Proxy (1-PvD): 1 - sum(Total Paid) / sum(Total Due) over ALL loans.
+- PvD (Summary tab): sum(Total Paid) / sum(Total Due), matured loans only. Cohort PvD Ratio:
+  the same per cohort.
+- Outstanding GBV: over loans NOT yet matured, sum(Principal + Expected Interest + Expected
+  Fee) - sum(Total Paid).
+- Expected Interest % = Average Interest % = Product Interest Rate: sum(Expected Interest) /
+  sum(Principal Value), all loans. Expected Fee % = Average Fee %: sum(Expected Fee) /
+  sum(Principal Value), all loans. Average Total Revenue %: (sum(Expected Interest) +
+  sum(Expected Fee)) / sum(Principal Value), all loans.
+- Average Term (LTV) = Average Expected Term (UE), days: sum(Term (days) x Principal) /
+  sum(Principal), ALL loans. Weighted Avg Term (matured), Summary tab: the same, matured loans
+  only. Cohort Weighted Avg Term: the same per cohort.
+- APR Proxy: Average Interest % / (Weighted Avg Term (matured) / 30.4375) x 12.
+- Avg Loan Value = Average Principal Amount: mean Principal Value per loan.
+- Sense-check Margin: (Interest % + Fee %) - Average Loss x (1 + Interest % + Fee %).
+- Cohort columns: Avg Loan Principal Size = Total Principal / Loan Count; Avg Loan Fee % per
+  cohort = Total Fee / Total Principal; Avg Annualized Flat Interest Rate = (Total Interest /
+  Total Principal) / (Weighted Avg Term / 30.4375) x 12.
+- The matured-only cohort table is the Excel "Cohorts" pivot (Loan Count = matured loans).
+  The all-loans cohort table aggregates every loan; its Loss Rate is still matured-only.
+- UE Model sub-tab (matured loans): Losses = Loss Rate used x matured owed; Loss % of GBV =
+  Losses / total principal; Estimated APR = (Average Interest % / (Average Expected Term /
+  30.4375)) x 12 x 2; Implied Monthly Interest % = Estimated APR / 12. Gross IRR: monthly IRR
+  of [-avg principal + avg fee - upfront cost x avg principal, then (matured term in months,
+  rounded, + 3) equal monthly flows of avg matured owed / periods x (1 - Loss Rate used) -
+  ongoing cost x avg principal / periods], annualised as (1 + r)^12 - 1. Cost of Finance
+  (% p.a.) = financing + facility fee + hedge; Net IRR = Gross IRR - Cost of Finance.
+  Income (net of losses) = matured interest + matured fees - Losses; Product contribution =
+  that - (upfront + ongoing cost) x matured principal; margins divide by matured principal.
+- LTV Calculator: term bucket = the tenor nearest Average Term / 30.4375 months. Stress Loss =
+  95th %ile Loss x credit stress factor (the Min Sector Loss Rate replaces the 95th %ile when
+  it is n/a). Selected Stress Loss = max(Stress Loss, Min Sector Loss Rate). Advance on GBV
+  (No FX) = 1 - Selected Stress Loss; Advance on GBV (FX High/Low) = No FX / (1 + Selected FX
+  Deval High/Low). Selected FX Deval = Base FX Deval + FX Slippage + roll risk (0 for a Term
+  hedge). Advance on Principal = Advance on GBV x (1 + Product Interest Rate).
+"""
+
+_SUMMARY_METRIC_LABELS = {
+    "dataUpTo": "Data up to (latest disbursement date)",
+    "outstandingGbv": "Outstanding GBV",
+    "lossRate": "Loss Rate",
+    "pctile95LossRate": "95th %ile Loss Rate",
+    "productInterestRate": "Product Interest Rate",
+    "dateRangeStart": "Date Range start",
+    "dateRangeEnd": "Date Range end (extraction date)",
+    "loans": "Loans",
+    "principalDisbursed": "Value of Principal Disbursed",
+    "totalCollected": "Total Collected",
+    "expectedInterestPct": "Expected Interest %",
+    "expectedFeePct": "Expected Fee %",
+    "avgLoanValue": "Avg Loan Value",
+    "avgTotalRevenuePct": "Avg Total Revenue",
+    "pvd": "PvD",
+    "weightedAvgTermMatured": "Weighted Avg Term (matured), days",
+    "aprProxy": "APR Proxy",
+}
+
+_LTV_RESULT_LABELS = {
+    "tenor_bucket": "Term bucket (months)",
+    "historical_fx_deval": "Historical Devaluation",
+    "utilized_fx_deval": "Utilized Historical FX Deval",
+    "stress_fx_factor": "FX stress factor",
+    "stress_fx_deval": "Stress FX Devaluation",
+    "base_fx_deval": "Base FX Deval",
+    "fx_slippage": "FX Slippage Stress",
+    "roll_risk_high": "Roll risk (High)",
+    "roll_risk_low": "Roll risk (Low)",
+    "selected_fx_deval_high": "Selected FX Deval (High)",
+    "selected_fx_deval_low": "Selected FX Deval (Low)",
+    "credit_stress_factor": "Credit stress factor",
+    "stress_loss_rate": "Stress Loss",
+    "minimum_stress_loss": "Min Sector Loss Rate",
+    "selected_stress_loss": "Selected Stress Loss",
+    "ltgbv_no_fx": "Advance on GBV - No FX",
+    "ltgbv_high": "Advance on GBV - FX High",
+    "ltgbv_low": "Advance on GBV - FX Low",
+    "ltv_no_fx": "Advance on Principal - No FX",
+    "ltv_high": "Advance on Principal - FX High",
+    "ltv_low": "Advance on Principal - FX Low",
+}
+
+
+def _chat_value(v: Any) -> str:
+    """One figure as chat-context text: n/a for missing, money with commas."""
+    if v is None or (isinstance(v, float) and not math.isfinite(v)):
+        return "n/a"
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return str(v)
+    return f"{v:,.2f}" if abs(v) >= 1000 else f"{v:.6g}"
+
+
+def _chat_items(values: dict[str, Any], labels: dict[str, str] | None = None) -> list[str]:
+    labels = labels or {}
+    return [f"- {labels.get(k, k)}: {_chat_value(v)}" for k, v in values.items()]
+
+
+def _lending_chat_ltv_lines(
+    c: dict[str, Any], ue_data: dict, ltv_data: dict, ltv_calc: LtvCalcBody | None
+) -> list[str]:
+    """The LTV Calculator exactly as the LTV Analysis tab runs it: the user's
+    dropdowns, with the green inputs taken from the analysis the same way
+    LtvTabs.tsx does (interest and loss limited to the General Inputs cohort
+    range; a range with no data gives n/a, which the calculator handles)."""
+    body = (ltv_calc or LtvCalcBody()).model_copy(
+        update={
+            "averageInterest": c["ltv_interest"],
+            "termDays": ltv_data.get("Average Term"),
+            "lossRate": c["ltv_loss_all_loans"]
+            if ltv_calc is not None and ltv_calc.includeUnfinishedLoans
+            else c["ltv_loss"],
+        }
+    )
+    p = _ltv_calculator_payload(body)
+    gi_body = c["gi_body"]
+    ltv_range = (
+        f" (cohorts {gi_body.ltvCohortFrom or 'first'} to {gi_body.ltvCohortTo or 'latest'} "
+        "only, per General Inputs)"
+        if gi_body.ltvCohortFrom or gi_body.ltvCohortTo
+        else ""
+    )
+    lines = [
+        "## LTV Analysis tab - LTV Calculator (at the dropdown choices currently on screen)",
+        f"Choices: Data source {body.dataSource}; Alt Lender Country {body.country}; "
+        f"Macro FX Risk {body.macroFxRisk}; Segmentation {body.segmentation}; "
+        f"Hedge rate {_chat_value(body.hedgeRate)}; Rolled/Term hedge {body.rolledHedge}.",
+        f"Green inputs: Product Interest Rate {_chat_value(p['greenInterest'])}{ltv_range}; "
+        f"Average Term {_chat_value(body.termDays)} days -> term bucket "
+        f"{_chat_value(p['greenTermBucket'])} months; 95th %ile Loss "
+        f"{_chat_value(p['greenLoss'])}{ltv_range}"
+        + (
+            " - counting every loan, finished or not (LTV tab checkbox)"
+            if body.includeUnfinishedLoans
+            else " - matured loans only (T+3)"
+        )
+        + ".",
+    ]
+    lines += [f"Note: {n}" for n in p["lossRateFallbackNotes"]]
+    if not p["ok"]:
+        return lines + [f"Not computed: {p['warning']}"]
+    result = dict(p["result"])
+    notes = result.pop("notes", [])
+    return lines + _chat_items(result, _LTV_RESULT_LABELS) + [f"Note: {n}" for n in notes]
+
+
 def _build_lending_chat_context_lite(
-    gi,
-    df: pd.DataFrame,
-    cohorts: pd.DataFrame,
+    c: dict[str, Any],
     ue_data: dict,
     ltv_data: dict,
     checks: list,
     user_context: str = "",
+    fx_warning: str | None = None,
+    ltv_calc: LtvCalcBody | None = None,
+    ue_model_inputs: UeModelInputsBody | None = None,
 ) -> str:
-    """A reduced version of scripts/chat_context.py's
-    _build_lending_chat_context: same portfolio/cohort/UE/LTV/checks
-    sections, minus the "UE Model (AI)" section, which app.py computes
-    inside a Streamlit-rendered tab (_render_ue_model_ai_tab) that isn't
-    exposed by this API yet - that tab isn't built in the React app either.
-    Chat answers here are correspondingly missing that section's figures
-    (matured-only income/margin, implied APR) until it is."""
+    """Every figure the React Lending screens compute, as text: Summary,
+    Cohorts (matured-only and all-loans tables), Unit Economics Overview and
+    UE Model, LTV Analysis and its Calculator, Data Checks - plus how each is
+    calculated, which the chat prompt requires for "why" questions.
+
+    Aggregates only, never loan rows: a check's detail table goes in only
+    when it is per cohort (the duplicate-ID and negative-fee checks list
+    individual loans and are left as their one-line message)."""
+    gi, df, cohorts = c["gi"], c["processed"], c["cohorts"]
+    ue_model = _ue_model_payload(df, ue_data)
+    ue_basis = (
+        "the assumptions currently entered on screen"
+        if ue_model_inputs
+        else "the default assumptions"
+    )
     lines = [
         "## Lending portfolio - summary statistics",
         f"Loans: {len(df):,}. Mapped/computed columns: {', '.join(map(str, df.columns))}.",
         f"Data extraction date: {gi.extraction_date.date()}. "
         f"Days after term (T+3 cutoff): {gi.days_after_term}.",
         f"Minimum loans per cohort (template threshold): {gi.min_loans_per_cohort}.",
-        f"Value of Principal Disbursed: ${df['Principal Value'].sum():,.0f}.",
-        f"Total Collected: ${df['Total Paid'].sum():,.0f}.",
+        f"Currency: {c['gi_body'].currency or 'as uploaded'}."
+        + (f" FX warning: {fx_warning}" if fx_warning else ""),
         "",
-        "## Overview metrics",
-        f"Average Loss (owed vs paid, matured loans): {ue_data.get('Average Loss')}.",
-        f"Average Principal Amount per loan: ${ue_data.get('Average Principal Amount', 0):,.0f}.",
-        f"Average Fee %: {ue_data.get('Average Fee %')}. "
-        f"Average Interest %: {ue_data.get('Average Interest %')}.",
-        f"95th Percentile Loss Rate across cohorts: {ltv_data.get('95th Percentile Losses')}.",
-        "Average Total Revenue % (interest+fees / principal): "
-        f"{ltv_data.get('Average Total Revenue %')}.",
+        "## Summary tab",
+        *_chat_items(lending_summary_metrics(df, gi, ue_data, ltv_data), _SUMMARY_METRIC_LABELS),
         "",
-        "## Cohorts",
+        "## Unit Economics tab - Overview",
+        *_chat_items(ue_data),
+        "",
+        "## LTV Analysis tab - LTV Inputs",
+        *_chat_items(ltv_data),
+        "",
+        *_lending_chat_ltv_lines(c, ue_data, ltv_data, ltv_calc),
+        "",
+        f"## Unit Economics tab - UE Model sub-tab (matured loans, at {ue_basis})",
+        *_chat_items({k: v for k, v in ue_model.items() if k != "costDefaults"}),
+        *_chat_items(_ue_model_metrics(ue_model, ue_model_inputs)),
+        "",
+        "## Cohorts tab - matured loans only (the Excel Cohorts pivot)",
         f"{len(cohorts)} monthly cohorts by Disbursement Date with at least one matured loan. "
         f"Columns: {', '.join(cohorts.columns)}.",
         cohorts.to_json(orient="records", date_format="iso"),
+        "",
+        "## Cohorts tab - all loans (shown when 'Matured loans only' is unticked)",
+        c["summary_cohorts"].to_json(orient="records", date_format="iso"),
     ]
+    chart = c["chart_data"]
+    if not chart.empty:
+        lines += [
+            "",
+            "## Unit Economics tab - per-cohort Interest % and Fee % (Overview charts)",
+            chart[["Cohort", "Interest %", "Fee %"]].to_json(orient="records", date_format="iso"),
+        ]
+    if checks:
+        lines += ["", "## Data Checks tab - checks flagged"]
+        for chk in checks:
+            lines.append(f"- ({chk.get('level', 'info')}) {chk.get('message', '')}")
+            detail = chk.get("detail")
+            if (
+                isinstance(detail, pd.DataFrame)
+                and not detail.empty
+                and "Cohort" in detail.columns
+                and LENDING_DQ_CONFIG["id_field"] not in detail.columns
+            ):
+                lines.append("  Detail: " + detail.to_json(orient="records", date_format="iso"))
+    lines += ["", "## How each figure is calculated", _LENDING_CHAT_METHODOLOGY]
     if user_context.strip():
         lines += ["", "## User-provided context about this dataset", user_context.strip()]
-    if checks:
-        lines += ["", "## Data quality checks flagged"]
-        lines += [f"- ({c.get('level', 'info')}) {c.get('message', '')}" for c in checks]
     return "\n".join(lines)
 
 
 @app.post("/api/ai/chat/lending")
 def ai_chat_lending(body: LendingChatBody) -> dict[str, Any]:
-    """Ask AI, Lending model. Builds the same kind of aggregate-only text
-    context app.py's chat tab sends (never raw loan rows - see
-    _build_lending_chat_context_lite's docstring for the one section it's
-    still missing) and forwards the question to ai_client._ask_data_chatbot."""
-    df, _, c = _lending_pipeline(body)
+    """Ask AI, Lending model. Builds an aggregate-only text context of every
+    figure the Lending screens show (never raw loan rows - see
+    _build_lending_chat_context_lite) and forwards the question to
+    ai_client._ask_data_chatbot."""
+    df, fx_warning, c = _lending_pipeline(body)
     ue_data, ltv_data = c["ue"].as_dict(), c["ltv"].as_dict()
     checks = _lending_data_quality_checks(
         df, c["cohorts"], LENDING_DQ_CONFIG, c["gi"], c["filtered"]
@@ -2669,7 +3360,14 @@ def ai_chat_lending(body: LendingChatBody) -> dict[str, Any]:
         body.userContext, [d.model_dump() for d in body.documents], max_chars=60000, per_doc=15000
     )
     context = _build_lending_chat_context_lite(
-        c["gi"], c["processed"], c["cohorts"], ue_data, ltv_data, checks, user_context
+        c,
+        ue_data,
+        ltv_data,
+        checks,
+        user_context,
+        fx_warning=fx_warning,
+        ltv_calc=body.ltvCalculator,
+        ue_model_inputs=body.ueModelInputs,
     )
     try:
         answer = _ask_data_chatbot(body.question, context, [m.model_dump() for m in body.history])
@@ -2711,6 +3409,53 @@ def ai_chat_rental(body: RentalChatBody) -> dict[str, Any]:
     return {"answer": answer}
 
 
+@app.post("/api/ai/chat/revolving")
+def ai_chat_revolving(body: RevolvingChatBody) -> dict[str, Any]:
+    """Ask AI, Revolving Lending model. The context is the monthly aggregates
+    and every figure the Revolving tabs show - the tape is already one row
+    per month, so no loan-level data exists to leak."""
+    _, _, c = _revolving_pipeline(body)
+    perf = c["performance"]
+    s = c["eclSummary"]
+    user_context = document_text.combine_context_text(
+        body.userContext, [d.model_dump() for d in body.documents], max_chars=60000, per_doc=15000
+    )
+    lines = [
+        "# Revolving Lending portfolio",
+        f"As-of month {s['asOfMonth']}; roll-rate model {s['method']}; LGD {c['lgdUsed']}.",
+        "",
+        "## Summary tab - UE / LTV ratios",
+        *[f"- {r['label']}: {_chat_value(r['value'])}" for r in c["ratios"]],
+        "",
+        "## Performance tab - one key per month (YYYY-MM)",
+        json.dumps(perf["table"], default=str),
+        "",
+        "## LTV Calculator / Unit Economics inputs",
+        f"- Avg term (mean of 1 / net collection ratio, months): {_chat_value(perf['avgTerm'])}",
+        f"- Estimated loss rate at as-of: {_chat_value(perf['lossRateNow'])}",
+        f"- 95th %ile estimated loss rate: {_chat_value(perf['lossRate95'])} "
+        "(the LTV Calculator stresses it by the credit stress factor)",
+        f"- Product interest rate (interest rate (m) x avg term): {_chat_value(c['ltvInterest'])}",
+        *[f"- UE {u['item']}: monthly {_chat_value(u['monthly'])}" for u in c["unitEconomics"]],
+        "",
+        "## ECL at as-of",
+        *_chat_items(s),
+        "",
+        "## Data Checks tab",
+        *[f"- ({q['level']}) {q['message']}" for q in c["qualityChecks"]],
+        *[f"- (warning) {w}" for w in c["warnings"]],
+    ]
+    if user_context.strip():
+        lines += ["", "## User-provided context about this dataset", user_context.strip()]
+    try:
+        answer = _ask_data_chatbot(
+            body.question, "\n".join(lines), [m.model_dump() for m in body.history]
+        )
+    except (RuntimeError, requests.RequestException) as exc:
+        raise _ai_error(exc) from exc
+    return {"answer": answer}
+
+
 def _infer_model_key(mapping: dict[str, Any]) -> str:
     """A saved profile/share doesn't record which model it was mapped for -
     infer it from which template fields the mapping uses (Rental fields are
@@ -2718,6 +3463,8 @@ def _infer_model_key(mapping: dict[str, Any]) -> str:
     rather than adding a new field to s3_store.py's shared schema."""
     if any(f in mapping for f in RENTAL_REQUIRED_COLUMNS):
         return "rental"
+    if "principal_outstanding-active" in mapping:  # revolving fields are disjoint too
+        return "revolving"
     return "lending"
 
 
@@ -2725,9 +3472,23 @@ def _restore_payload(profile: dict[str, Any]) -> dict[str, Any]:
     """Re-ingest a saved/shared upload and build the payload the frontend
     needs to jump straight back into the mapping/analysis screens with the
     same file, mapping, general inputs and chat history."""
-    ingest = _register_ingest(
-        profile["upload_bytes"], profile.get("upload_name") or "upload", enforce_size_cap=False
-    )
+    info = profile.get("ingest_info")
+    if info and "load_upload_bytes" in profile:
+        # Saved with its ingest info: skip the data until something reads it.
+        ingest = _register_pending_ingest(info, profile["load_upload_bytes"])
+    else:
+        # Older saves have no ingest info, so the data is loaded up front.
+        upload_bytes = profile.get("upload_bytes")
+        if upload_bytes is None:
+            try:
+                upload_bytes = profile["load_upload_bytes"]()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=404, detail="This saved run's data could not be found."
+                ) from exc
+        ingest = _register_ingest(
+            upload_bytes, profile.get("upload_name") or "upload", enforce_size_cap=False
+        )
     mapping = profile.get("mapping") or {}
     return _json_safe(
         {
@@ -2778,6 +3539,7 @@ def save_profile(
         chat_history=[m.model_dump() for m in body.chatHistory],
         analysis_context=body.analysisContext,
         analysis_result=body.analysisResult,
+        ingest_info=INGEST_INFO.get(body.ingestId),
     )
     _PROFILES_CACHE.pop(identity, None)
     return {"ok": True}
@@ -2806,7 +3568,7 @@ def list_profiles(identity: str = Depends(_require_identity)) -> list[dict[str, 
 
 @app.get("/api/profiles/{session_id}")
 def load_profile(session_id: str, identity: str = Depends(_require_identity)) -> dict[str, Any]:
-    profile = s3_store.load_profile(identity, session_id)
+    profile = s3_store.load_profile(identity, session_id, lazy_data=True)
     if profile is None:
         raise HTTPException(status_code=404, detail="No saved session found under that id.")
     return _restore_payload(profile)
@@ -2839,13 +3601,14 @@ def create_share(
         chat_history=[m.model_dump() for m in body.chatHistory],
         analysis_context=body.analysisContext,
         analysis_result=body.analysisResult,
+        ingest_info=INGEST_INFO.get(body.ingestId),
     )
     return {"token": token}
 
 
 @app.get("/api/share/{token}")
 def load_share(token: str) -> dict[str, Any]:
-    profile = s3_store.load_share(token)
+    profile = s3_store.load_share(token, lazy_data=True)
     if profile is None:
         raise HTTPException(status_code=404, detail="This share link is invalid or has expired.")
     return _restore_payload(profile)

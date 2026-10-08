@@ -2,7 +2,15 @@ import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppStore, getChartDataSources, type ChartCardSpec } from '../state/AppStore';
 import { Button, Input, Metric, Table, Tabs, Alert, Select, type TableColumn } from '../components/ui';
-import { LendingLtvTab, RentalLtvTab } from './LtvTabs';
+import { LendingLtvTab, RentalLtvTab, inLtvCohortRange } from './LtvTabs';
+import {
+  RevolvingBacktestStressTab,
+  RevolvingFacilityTab,
+  RevolvingLtvTab,
+  RevolvingPerformanceTab,
+  RevolvingSummaryTab,
+  RevolvingUnitEconomicsTab,
+} from './RevolvingTabs';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -21,7 +29,7 @@ import {
   Legend,
   ReferenceLine,
 } from 'recharts';
-import type { EscalateResult, IngestData, QualityCheck, SummaryChartRow } from '../api/engine';
+import type { EscalateResult, IngestData, QualityCheck, SummaryChartRow, UeModelAssumptions } from '../api/engine';
 import { escalateVariance, fetchIngestData } from '../api/engine';
 import {
   aggregateChartData,
@@ -165,16 +173,21 @@ function SnapshotTable({ rows }: { rows: Array<[string, string, string?]> }) {
  * orange line = cohort loss rate (matured only), with the average and 95th
  * percentile loss rates as reference lines - the same layered Altair chart
  * app.py's Summary tab draws. */
-function CohortLossRateChart({ rows, avgLoss, pctile95 }: {
+function CohortLossRateChart({ rows, avgLoss, pctile95, range }: {
   rows: SummaryChartRow[];
   avgLoss: number | null;
   pctile95: number | null;
+  /** LTV cohort range: when set, only those cohorts are plotted. */
+  range?: { from: string | null; to: string | null };
 }) {
-  const data = rows.map((r) => ({
-    cohort: str(r.Cohort).slice(0, 7),
-    principal: num(r['Total Principal']),
-    lossRate: num(r['Loss Rate']),
-  }));
+  const ranged = !!(range?.from || range?.to);
+  const data = rows
+    .map((r) => ({
+      cohort: str(r.Cohort).slice(0, 7),
+      principal: num(r['Total Principal']),
+      lossRate: num(r['Loss Rate']),
+    }))
+    .filter((r) => inLtvCohortRange(r.cohort, range));
   return (
     <div className="sd-card">
       <h2 className="sd-h2">Cohort Loss Rates</h2>
@@ -206,7 +219,7 @@ function CohortLossRateChart({ rows, avgLoss, pctile95 }: {
               y={avgLoss}
               stroke="#6B7280"
               strokeDasharray="6 6"
-              label={{ value: `Avg: ${pct(avgLoss, 2)}`, position: 'insideTopLeft', fill: '#6B7280', fontSize: 11 }}
+              label={{ value: `${ranged ? 'Avg (all cohorts)' : 'Avg'}: ${pct(avgLoss, 2)}`, position: 'insideTopLeft', fill: '#6B7280', fontSize: 11 }}
             />
           )}
           {pctile95 !== null && (
@@ -243,18 +256,21 @@ function LendingSummaryTab() {
   if (!m) return <Alert tone="info">Run analysis to see the portfolio summary.</Alert>;
   const chart = state.analysisResponse?.summaryChart ?? [];
   const fxWarning = state.analysisResponse?.fxWarning;
-  // The LTV Calculator can use a cohort-limited interest rate (General
-  // Inputs); say so here, since this card always shows the whole book.
-  // With a General Inputs LTV cohort range, this card shows the same
-  // cohort-limited rate the LTV Calculator uses; otherwise the whole book.
-  const ltvInterest = state.analysisResponse?.ltvInterest;
-  const range = state.analysisResponse?.ltvInterestRange;
-  const ranged = ltvInterest != null && !!range && !!(range.from || range.to);
+  // With a General Inputs LTV cohort range, the 95th %ile and interest cards
+  // show the same cohort-limited figures the LTV Calculator uses; otherwise
+  // the whole book.
+  const resp = state.analysisResponse;
+  const range = resp?.ltvCohortRange;
+  const ranged = !!range && !!(range.from || range.to);
   const rangeText = ranged ? `${range!.from || 'first'} to ${range!.to || 'latest'}` : '';
-  const productInterest = ranged ? ltvInterest : m.productInterestRate;
+  const productInterest = ranged ? resp?.ltvInterest : m.productInterestRate;
+  const pctile95 = ranged ? resp?.ltvLoss : m.pctile95LossRate;
   const productInterestHint = ranged
     ? `Expected Interest as a share of Principal, for cohorts ${rangeText} only (set in General Inputs) - the same rate the LTV Calculator uses. Across the whole book it is ${fpct(m.productInterestRate)}. Not annualized.`
     : 'Expected Interest as a share of Principal, across all loans (not annualized).';
+  const pctile95Hint = ranged
+    ? `The loss-rate level that only 5% of matured cohorts in ${rangeText} exceed (set in General Inputs) - the same figure the LTV Calculator uses. Across all matured cohorts it is ${fpct(m.pctile95LossRate)}.`
+    : 'The loss-rate level that only 5% of matured cohorts exceed.';
   return (
     <>
       {fxWarning ? <Alert tone="warning">{fxWarning}</Alert> : null}
@@ -262,7 +278,7 @@ function LendingSummaryTab() {
         <Metric label="Data up to" value={String(m.dataUpTo ?? '—')} hint="The most recent loan disbursement date in the tape (as-of point for the snapshot)." />
         <Metric label="Outstanding GBV" value={fmoney(m.outstandingGbv, '')} hint="Gross book value of loans still within term (not yet matured): Principal + Interest + Fee minus Total Paid for loans where Reached T+3? is False." />
         <Metric label="Loss Rate" value={fpct(m.lossRate)} hint="Portfolio average loss rate across matured cohorts (Reached T+3? = True)." />
-        <Metric label="95th %ile Loss Rate" value={fpct(m.pctile95LossRate)} hint="The loss-rate level that only 5% of matured cohorts exceed." />
+        <Metric label={ranged ? `95th %ile Loss Rate (${rangeText})` : '95th %ile Loss Rate'} value={fpct(pctile95)} hint={pctile95Hint} />
         <Metric label={ranged ? `Product Interest Rate (${rangeText})` : 'Product Interest Rate'} value={fpct(productInterest)} hint={productInterestHint} />
       </div>
       <div className="sd-grid sd-grid--2">
@@ -270,7 +286,9 @@ function LendingSummaryTab() {
           <h2 className="sd-h2">Portfolio Snapshot</h2>
           <SnapshotTable
             rows={[
-              ['Date Range', `${m.dateRangeStart} to ${m.dateRangeEnd}`, 'From the earliest disbursement date to the tape as-of date.'],
+              ranged
+                ? ['Date Range', `${range!.from || str(m.dateRangeStart).slice(0, 7)} to ${range!.to || str(m.dateRangeEnd).slice(0, 7)}`, `Cohorts ${rangeText} were selected (LTV cohort range, General Inputs) - only these feed the LTV interest and 95th %ile loss. The full tape runs ${m.dateRangeStart} to ${m.dateRangeEnd}, and the other figures in this table still cover all of it.`]
+                : ['Date Range', `${m.dateRangeStart} to ${m.dateRangeEnd}`, 'From the earliest disbursement date to the tape as-of date.'],
               ['Loans', fint(m.loans), 'Total number of loan records in the tape.'],
               ['Value of Principal Disbursed', fmoney(m.principalDisbursed), 'Total principal amount lent across all loans.'],
               ['Total Collected', fmoney(m.totalCollected), 'Total cash collected from borrowers to date.'],
@@ -288,7 +306,8 @@ function LendingSummaryTab() {
           <CohortLossRateChart
             rows={chart}
             avgLoss={num(m.lossRate)}
-            pctile95={num(m.pctile95LossRate)}
+            pctile95={num(pctile95)}
+            range={ranged ? range : undefined}
           />
         )}
       </div>
@@ -419,7 +438,12 @@ function DataInputGridTab() {
 function ChecksList() {
   const { state, analyse } = useAppStore();
   const isRental = state.modelKey === 'rental';
-  const checks: QualityCheck[] = (isRental ? state.rentalResponse?.checks : state.analysisResponse?.checks) ?? [];
+  const checks: QualityCheck[] =
+    (state.modelKey === 'revolving'
+      ? state.revolvingResponse?.qualityChecks
+      : isRental
+        ? state.rentalResponse?.checks
+        : state.analysisResponse?.checks) ?? [];
   const [deduping, setDeduping] = useState(false);
   const [escalating, setEscalating] = useState<string | null>(null);
   const [escalateResults, setEscalateResults] = useState<Record<string, EscalateResult>>({});
@@ -1159,18 +1183,32 @@ function LendingUeOverviewTab() {
  * backend serves in `ueModel`, matching the Streamlit recompute-on-change
  * behaviour exactly. */
 function LendingUeModelTab() {
-  const { state } = useAppStore();
+  const { state, dispatch } = useAppStore();
   const response = state.analysisResponse;
   const m = response?.ueModel;
   const defaults =
     m?.costDefaults ?? { upfront_cost_pct: 1, ongoing_cost_pct: 2, financing_cost_pct: 13, facility_fee_pct: 2, hedge_cost_pct: 3 };
-  const [upfrontCostPct, setUpfrontCostPct] = useState(defaults.upfront_cost_pct / 100);
-  const [ongoingCostPct, setOngoingCostPct] = useState(defaults.ongoing_cost_pct / 100);
-  const [financingCostPct, setFinancingCostPct] = useState(defaults.financing_cost_pct / 100);
-  const [facilityFeePct, setFacilityFeePct] = useState(defaults.facility_fee_pct / 100);
-  const [hedgeCostPct, setHedgeCostPct] = useState(defaults.hedge_cost_pct / 100);
-  const [lossChoice, setLossChoice] = useState<'Actual' | 'Proxy' | 'Input'>('Actual');
-  const [lossInput, setLossInput] = useState(() => (m?.actualLossRate ?? 0) * 100);
+  // In the store, not useState: Ask AI sends these so it can quote the
+  // figures on screen (see AppState.ueModelInputs). null = the defaults.
+  const inputs: UeModelAssumptions = state.ueModelInputs ?? {
+    upfrontCostPct: defaults.upfront_cost_pct / 100,
+    ongoingCostPct: defaults.ongoing_cost_pct / 100,
+    financingCostPct: defaults.financing_cost_pct / 100,
+    facilityFeePct: defaults.facility_fee_pct / 100,
+    hedgeCostPct: defaults.hedge_cost_pct / 100,
+    lossChoice: 'Actual',
+    lossInputPct: null,
+  };
+  const set = (patch: Partial<UeModelAssumptions>) => dispatch({ type: 'setUeModelInputs', inputs: { ...inputs, ...patch } });
+  const { upfrontCostPct, ongoingCostPct, financingCostPct, facilityFeePct, hedgeCostPct, lossChoice } = inputs;
+  const lossInput = inputs.lossInputPct ?? (m?.actualLossRate ?? 0) * 100;
+  const setUpfrontCostPct = (v: number) => set({ upfrontCostPct: v });
+  const setOngoingCostPct = (v: number) => set({ ongoingCostPct: v });
+  const setFinancingCostPct = (v: number) => set({ financingCostPct: v });
+  const setFacilityFeePct = (v: number) => set({ facilityFeePct: v });
+  const setHedgeCostPct = (v: number) => set({ hedgeCostPct: v });
+  const setLossChoice = (v: UeModelAssumptions['lossChoice']) => set({ lossChoice: v });
+  const setLossInput = (v: number) => set({ lossInputPct: v });
 
   if (!response || !m) return <Alert tone="info">Run analysis to see the UE Model.</Alert>;
   const ue = response.ue as Record<string, unknown>;
@@ -1695,8 +1733,9 @@ export function AnalysisSession({
   onNewSession: () => void;
   onEditMapping: () => void;
 }) {
-  const { state, exportWorkbook, saveSession, createShareLink } = useAppStore();
+  const { state, exportWorkbook, saveSession, shareHtml } = useAppStore();
   const isRental = state.modelKey === 'rental';
+  const isRevolving = state.modelKey === 'revolving';
   const [exporting, setExporting] = useState(false);
   const [label, setLabel] = useState(state.dealLabel ?? '');
 
@@ -1730,7 +1769,18 @@ export function AnalysisSession({
     { id: 'viz', label: 'Custom Visualizations' },
     { id: 'ai', label: 'Ask AI' },
   ];
-  const tabs = isRental ? rentalTabs : lendingTabs;
+  const revolvingTabs = [
+    { id: 'revSummary', label: 'Summary' },
+    { id: 'checks', label: 'Data Checks' },
+    { id: 'revPerformance', label: 'Performance' },
+    { id: 'revLtv', label: 'LTV Calculator' },
+    { id: 'revUe', label: 'Unit Economics' },
+    { id: 'backtest', label: 'Backtest & Stress' },
+    { id: 'facility', label: 'Facility & Covenants' },
+    { id: 'viz', label: 'Custom Viz' },
+    { id: 'ai', label: 'Ask AI' },
+  ];
+  const tabs = isRevolving ? revolvingTabs : isRental ? rentalTabs : lendingTabs;
   const [tab, setTab] = useState<string>(tabs[0].id);
 
   const error = state.analysisError;
@@ -1739,8 +1789,10 @@ export function AnalysisSession({
     <div>
       {error ? <Alert tone="error">{error}</Alert> : null}
 
-      {!state.analysisResponse && !state.rentalResponse ? (
-        <Alert tone="info">Run analysis to load live engine results for the {isRental ? 'rental' : 'lending'} model.</Alert>
+      {!state.analysisResponse && !state.rentalResponse && !state.revolvingResponse ? (
+        <Alert tone="info">
+          Run analysis to load live engine results for the {isRevolving ? 'revolving' : isRental ? 'rental' : 'lending'} model.
+        </Alert>
       ) : null}
 
       <Tabs items={tabs} value={tab} onChange={setTab} />
@@ -1756,6 +1808,12 @@ export function AnalysisSession({
       {tab === 'general' && <GeneralAnalysisTab />}
       {tab === 'viz' && <VizTab />}
       {tab === 'ai' && <AiTab />}
+      {tab === 'revSummary' && <RevolvingSummaryTab />}
+      {tab === 'revPerformance' && <RevolvingPerformanceTab />}
+      {tab === 'revLtv' && <RevolvingLtvTab />}
+      {tab === 'revUe' && <RevolvingUnitEconomicsTab />}
+      {tab === 'backtest' && <RevolvingBacktestStressTab />}
+      {tab === 'facility' && <RevolvingFacilityTab />}
 
       <div className="sd-actions" style={{ marginTop: 24, flexWrap: 'wrap' }}>
         <Button variant="ghost" onClick={onEditMapping}>
@@ -1781,7 +1839,7 @@ export function AnalysisSession({
         >
           {state.saveRunning ? 'Saving…' : 'Save'}
         </Button>
-        <Button variant="secondary" onClick={() => void createShareLink()} disabled={state.shareRunning}>
+        <Button variant="secondary" onClick={() => void shareHtml()} disabled={state.shareRunning} title="Download a read-only HTML report anyone can open in a browser">
           {state.shareRunning ? 'Sharing…' : 'Share'}
         </Button>
         {state.savedAt ? <span className="sd-muted">Saved.</span> : null}
