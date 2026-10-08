@@ -459,34 +459,15 @@ def revolving_tabs(r: dict, ltv_calc: dict | None) -> list[tuple[str, str]]:
     ]
 
 
-def baas_tabs(r: dict, ltv_calc: dict | None) -> list[tuple[str, str]]:
-    rows = [
-        {
-            "Market": m.get("market"),
-            **(m.get("metrics") or {}),
-            "Vehicles to break even": (m.get("breakEven") or {}).get("vehicles_to_break_even"),
-        }
-        for m in r.get("markets") or []
-    ]
-    issues = "".join(
-        f'<div class="chk warning"><b>{_esc(m.get("market"))}</b> {_esc("; ".join(m["issues"]))}</div>'
-        for m in r.get("markets") or []
-        if m.get("issues")
-    )
-    return [("Results", issues + table(rows)), ("Cash Flows", table(r.get("cashflows")))]
-
-
 TABS = {
     "lending": lending_tabs,
     "rental": rental_tabs,
     "revolving": revolving_tabs,
-    "baas": baas_tabs,
 }
 TITLES = {
     "lending": "Lending",
     "rental": "Rental & Subscription",
     "revolving": "Revolving Lending",
-    "baas": "Battery as a Service",
 }
 
 CSS = """

@@ -2,12 +2,7 @@ import { useState } from 'react';
 import { useAppStore } from '../state/AppStore';
 import { Button, Alert, Select, Table, type TableColumn } from '../components/ui';
 import { suggestMapping, deriveColumn, type DerivedColumn } from '../api/engine';
-import {
-  BAAS_TEMPLATE_FIELDS,
-  TEMPLATE_FIELDS,
-  RENTAL_TEMPLATE_FIELDS,
-  REVOLVING_TEMPLATE_FIELDS,
-} from '../data/template';
+import { TEMPLATE_FIELDS, RENTAL_TEMPLATE_FIELDS, REVOLVING_TEMPLATE_FIELDS } from '../data/template';
 import type { ModelKey } from '../state/types';
 
 interface MappingProps {
@@ -79,14 +74,7 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
 
   const isRental = modelKey === 'rental';
   const isRevolving = modelKey === 'revolving';
-  const fields =
-    modelKey === 'baas'
-      ? BAAS_TEMPLATE_FIELDS
-      : isRevolving
-        ? REVOLVING_TEMPLATE_FIELDS
-        : isRental
-          ? RENTAL_TEMPLATE_FIELDS
-          : TEMPLATE_FIELDS;
+  const fields = isRevolving ? REVOLVING_TEMPLATE_FIELDS : isRental ? RENTAL_TEMPLATE_FIELDS : TEMPLATE_FIELDS;
 
   // Instant, offline baseline: normalised-name matching against the real
   // file's columns (see suggestSource above). Always applied first so the
@@ -197,7 +185,6 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
     const current = mapped.find((m) => m.fieldKey === field.key)?.sourceColumn ?? '';
     return { ...field, current };
   });
-  const optionalRows = rows.filter((r) => !r.required);
 
   const cols: TableColumn<(typeof rows)[number]>[] = [
     {
@@ -370,26 +357,7 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
         {deriveNote ? <Alert tone="info">{deriveNote}</Alert> : null}
       </div>
 
-      <div style={{ padding: '12px', border: '1px solid #e5e7eb', borderRadius: 8 }}>
-        <h3 className="sd-h2" style={{ marginTop: 0 }}>
-          Required fields
-        </h3>
-        <Table columns={cols} rows={rows.filter((r) => r.required)} />
-      </div>
-      {optionalRows.length > 0 ? (
-        <details style={{ marginTop: 14, padding: '12px', border: '1px solid #e5e7eb', borderRadius: 8 }}>
-          <summary style={{ cursor: 'pointer' }}>
-            <strong>Optional fields</strong>{' '}
-            <span className="sd-muted">
-              ({optionalRows.filter((r) => r.current).length}/{optionalRows.length} mapped; blank fields use
-              their defaults)
-            </span>
-          </summary>
-          <div style={{ marginTop: 12 }}>
-            <Table columns={cols} rows={optionalRows} />
-          </div>
-        </details>
-      ) : null}
+      <Table columns={cols} rows={rows} />
       <div className="sd-actions" style={{ marginTop: 16 }}>
         <Button variant="ghost" onClick={() => dispatch({ type: 'setFile', file: null })}>
           ← Back

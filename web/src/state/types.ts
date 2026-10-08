@@ -1,4 +1,4 @@
-export type ModelKey = 'lending' | 'rental' | 'revolving' | 'baas';
+export type ModelKey = 'lending' | 'rental' | 'revolving';
 
 export interface MappingField {
   key: string;
@@ -25,13 +25,6 @@ export interface GeneralInputs {
   /** Revolving only - null/undefined until the server defaults load (see
    * getRevolvingDefaults); names match web_api's RevolvingGeneralInputsBody. */
   revolving?: RevolvingGeneralInputs | null;
-  /** BaaS only - null/undefined until the server defaults load (getBaasDefaults). */
-  baas?: BaasGeneralInputs | null;
-}
-
-export interface BaasGeneralInputs {
-  /** "YYYY-MM-DD" - month 0 of every market's cash flows. */
-  valuationDate: string;
 }
 
 export interface RevolvingGeneralInputs {

@@ -3,7 +3,6 @@ import { useAppStore } from '../state/AppStore';
 import { Button, Input, Select, Card, Alert, Table, HelpTip } from '../components/ui';
 import { CURRENCY_CODES, CURRENCY_NAMES } from '../data/currencies';
 import {
-  getBaasDefaults,
   getRevolvingOptions,
   getRevolvingDefaults,
   getStatusValues,
@@ -384,48 +383,11 @@ function RevolvingInputsSection() {
   );
 }
 
-/** BaaS: the valuation date (month 0 of the cash flows). Every other
- * assumption is per market, in the uploaded table. */
-function BaasInputsSection() {
-  const { state, dispatch } = useAppStore();
-  const bi = state.generalInputs.baas;
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (bi) return;
-    getBaasDefaults()
-      .then((d) => dispatch({ type: 'setGeneralInputs', inputs: { baas: d } }))
-      .catch((err) => setError(err instanceof Error ? err.message : 'Could not load the default inputs.'));
-  }, [bi, dispatch]);
-
-  if (error) return <Alert tone="error">{error}</Alert>;
-  if (!bi) return <p className="sd-muted">Loading default inputs…</p>;
-
-  return (
-    <>
-      <h2 className="sd-h2">Valuation</h2>
-      <Card className="sd-grid sd-grid--2">
-        <div className="sd-field">
-          <span>Valuation date (month 0 of the cash flows)</span>
-          <Input
-            type="date"
-            value={bi.valuationDate}
-            onChange={(e) =>
-              e.target.value && dispatch({ type: 'setGeneralInputs', inputs: { baas: { valuationDate: e.target.value } } })
-            }
-          />
-        </div>
-      </Card>
-    </>
-  );
-}
-
 export function GeneralInputsScreen({ onNext, modelKey }: Props) {
   const { state, dispatch, analyse } = useAppStore();
   const gi = state.generalInputs;
   const isRental = modelKey === 'rental';
   const isRevolving = modelKey === 'revolving';
-  const isBaas = modelKey === 'baas';
   const unmappedStatuses = isRental
     ? Object.entries(gi.statusMap ?? {})
         .filter(([, v]) => !v)
@@ -442,18 +404,14 @@ export function GeneralInputsScreen({ onNext, modelKey }: Props) {
   return (
     <div>
       <Alert tone="info">
-        {isBaas
-          ? 'Inputs for the Battery as a Service model. Market assumptions (including facility terms) come from the uploaded table; results are in USD.'
-          : isRevolving
+        {isRevolving
           ? 'Inputs for the Revolving Lending roll-rate / ECL model. Figures stay in the source currency.'
           : isRental
             ? 'Conventions used by the Rental & Subscription engine (useful asset life, churn stress, and funding/direct cost assumptions).'
             : 'Conventions used by the Lending LTV / Unit Economics engine.'}
       </Alert>
 
-      {isBaas ? (
-        <BaasInputsSection />
-      ) : isRevolving ? (
+      {isRevolving ? (
         <RevolvingInputsSection />
       ) : (
         <>
@@ -577,8 +535,7 @@ export function GeneralInputsScreen({ onNext, modelKey }: Props) {
           disabled={
             unmappedStatuses.length > 0 ||
             revolvingInvalid > 0 ||
-            (isRevolving && !state.generalInputs.revolving) ||
-            (isBaas && !state.generalInputs.baas)
+            (isRevolving && !state.generalInputs.revolving)
           }
         >
           {state.analysisRunning ? 'Running analysis…' : 'Run analysis →'}

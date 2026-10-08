@@ -10,7 +10,7 @@
  * canonical rows directly; the UI drives the ingest path end to end.
  */
 
-import type { BaasGeneralInputs, ModelKey, RevolvingGeneralInputs } from '../state/types';
+import type { ModelKey, RevolvingGeneralInputs } from '../state/types';
 
 export interface AnalysisSummary {
   rows: number;
@@ -601,57 +601,6 @@ export function getRevolvingDefaults(): Promise<RevolvingGeneralInputs> {
   return get<RevolvingGeneralInputs>('/revolving/defaults');
 }
 
-/** One market's result: run_market()'s scalar outputs (scripts/baas_analysis/
- * engine.py), empty when the row had input issues. */
-export interface BaasMarketResult {
-  market: string;
-  issues: string[];
-  metrics: Record<string, number | string | null>;
-  breakEven: {
-    net_ue_per_bike_usd: number;
-    vehicles_to_break_even: number;
-    batteries_to_break_even: number;
-    vehicle_shortfall: number;
-    battery_shortfall: number;
-  } | null;
-}
-
-export interface BaasResponse {
-  summary: { rows: number; cohorts: number };
-  markets: BaasMarketResult[];
-  /** Months down: Month, Date, then one net-cash-flow key per market that ran. */
-  cashflows: Array<Record<string, unknown>>;
-  generalInputs: Record<string, unknown>;
-}
-
-export interface BaasAnalyseInput {
-  ingest: LendingIngest;
-  generalInputs: BaasGeneralInputs | null;
-}
-
-export function runBaasAnalysis(input: BaasAnalyseInput): Promise<BaasResponse> {
-  return post<BaasResponse>('/analyse/baas', {
-    ingest: input.ingest,
-    ...(input.generalInputs ? { generalInputs: input.generalInputs } : {}),
-  });
-}
-
-export function exportBaasWorkbook(input: BaasAnalyseInput): Promise<Blob> {
-  return postForBlob('/export/baas', {
-    ingest: input.ingest,
-    ...(input.generalInputs ? { generalInputs: input.generalInputs } : {}),
-  });
-}
-
-export function getBaasDefaults(): Promise<BaasGeneralInputs> {
-  return get<BaasGeneralInputs>('/baas/defaults');
-}
-
-/** The upload template: one column per BaaS field, the 8 seed markets as rows. */
-export function getBaasTemplate(): Promise<Blob> {
-  return request<Blob>('/baas/template', { blob: true, errorPrefix: 'Template download' });
-}
-
 export interface SuggestMappingResult {
   mapping: Record<string, string | null>;
   excludeSuggestion: { column: string; values: string[] } | null;
@@ -891,7 +840,7 @@ export function saveProfile(input: {
    * AnalysisResponse/RentalResponse matches the current model), so
    * resuming later can render it straight away instead of re-running the
    * engine - see AppStore's saveSession. */
-  analysisResult?: AnalysisResponse | RentalResponse | RevolvingResponse | BaasResponse | null;
+  analysisResult?: AnalysisResponse | RentalResponse | RevolvingResponse | null;
 }): Promise<{ ok: boolean }> {
   return post<{ ok: boolean }>('/profiles/save', input);
 }
@@ -919,7 +868,7 @@ export interface RestorePayload {
   /** Present when this deal was saved with its computed result attached -
    * lets the caller skip straight to the results screen instead of
    * re-running the engine (see AppStore's restoreProfile). */
-  analysisResult: (AnalysisResponse | RentalResponse | RevolvingResponse | BaasResponse) | null;
+  analysisResult: (AnalysisResponse | RentalResponse | RevolvingResponse) | null;
 }
 
 export function loadProfile(sessionId: string): Promise<RestorePayload> {
@@ -932,7 +881,7 @@ export function createShare(input: {
   generalInputs: Record<string, unknown>;
   chatHistory: ChatMessage[];
   analysisContext?: string;
-  analysisResult?: AnalysisResponse | RentalResponse | RevolvingResponse | BaasResponse | null;
+  analysisResult?: AnalysisResponse | RentalResponse | RevolvingResponse | null;
 }): Promise<{ token: string }> {
   return post<{ token: string }>('/share', input);
 }

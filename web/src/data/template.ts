@@ -70,57 +70,6 @@ export const REVOLVING_TEMPLATE_FIELDS: MappingField[] = [
   { key: 'recoveries', label: 'recoveries', required: false, description: 'Cash recovered in the month on written-off balances (optional - lets LGD be derived)' },
 ];
 
-// BaaS: one row per market; field keys are the BaasMarket fields
-// (scripts/baas_analysis/engine.py) and the headers of GET /api/baas/template.
-// Percent fields are whole numbers (5 = 5%).
-const baas = (key: string, required: boolean, description: string): MappingField => ({
-  key,
-  label: key,
-  required,
-  description,
-});
-export const BAAS_TEMPLATE_FIELDS: MappingField[] = [
-  baas('market', true, 'Market name (one row per market)'),
-  baas('currency', true, 'Local currency code (USD if priced in USD)'),
-  baas('fx_rate', true, 'LCY per USD (1 for USD)'),
-  baas('price_per_swap', true, 'Revenue per swap, LCY'),
-  baas('pack_cost_usd', true, 'Cost of one swap pack, USD'),
-  baas('pack_capacity_kwh', true, 'Pack energy, kWh'),
-  baas('lifetime_months', true, 'Battery lifetime, months of revenue (1-120)'),
-  baas('batteries_per_swap', true, 'Batteries swapped per swap event'),
-  baas('batteries_in_bike', false, 'Batteries in the bike per swap unit (default = batteries_per_swap)'),
-  baas('batteries_per_bike', true, 'Batteries per bike incl. spares'),
-  baas('station_capex_usd', true, 'Station capex per bike deployed, USD'),
-  baas('station_life_years', false, 'Station lifetime, years (default 7)'),
-  baas('swaps_per_day', true, 'Swaps per day per user'),
-  baas('electricity_lcy_per_kwh', true, 'Electricity cost, LCY per kWh'),
-  baas('station_rent_usd_month', true, 'Station rent per bike per month, USD'),
-  baas('interest_rate_pct', true, 'Facility interest rate, %'),
-  baas('facility_tenor_months', true, 'Facility tenor, months'),
-  baas('facility_grace_months', false, 'Facility grace period, months'),
-  baas('upfront_fee_pct', false, 'Facility upfront fee, %'),
-  baas('wht_pct', false, 'Withholding tax on interest, %'),
-  baas('hedging_pct', false, 'Annual hedging cost, %'),
-  baas('signup_fee', false, 'User sign-up fee, LCY'),
-  baas('signup_renewal_months', false, 'Sign-up renewal period, months (1000 = never)'),
-  baas('salvage_pct', false, 'Salvage value, % of pack cost'),
-  baas('station_install_usd', false, 'Station installation per bike, USD'),
-  baas('install_life_years', false, 'Installation lifetime, years'),
-  baas('station_infra_usd', false, 'Station infrastructure per bike, USD'),
-  baas('infra_life_years', false, 'Infrastructure lifetime, years'),
-  baas('station_capex_upfront', false, '1 = full station capex in month 0; 0 = allocated over battery life'),
-  baas('revenue_days_per_month', false, 'Revenue days per month (default 30)'),
-  baas('opex_days_per_month', false, 'Opex days per month (default 30)'),
-  baas('commission_pct', false, 'Commission, % of usage revenue'),
-  baas('repair_maintenance_pct', false, 'Repair & maintenance, % of usage revenue'),
-  baas('insurance_pct', false, 'Insurance, % of pack cost p.a.'),
-  baas('battery_it_usd_month', false, 'Battery IT (cloud/SIM) per month'),
-  baas('other_opex_pct', false, 'Other opex incl. staff, % of usage revenue'),
-  baas('fixed_opex_usd', false, 'Annual company fixed opex, USD (blank/0 = break-even n/a)'),
-  baas('active_vehicles', false, 'Active vehicles today (break-even)'),
-  baas('batteries_on_road', false, 'Batteries on road today (break-even)'),
-];
-
 export const DEMO_FILE = {
   name: 'sample_loan_tape.xlsx',
   columns: [

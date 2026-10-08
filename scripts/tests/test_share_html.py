@@ -6,8 +6,8 @@ import re
 import sys
 from html import unescape
 
+from test_revolving_analysis import _client
 from test_revolving_analysis import _rows as revolving_rows
-from test_web_api_baas import _client, _template_rows
 from test_web_api_rental import _tape
 
 sys.path.insert(0, "scripts")
@@ -98,18 +98,6 @@ def test_revolving_report_draws_performance_charts():
     assert "Roll rates" in html and "<polyline" in html and "<polygon" in html
 
 
-def test_baas_report():
-    client = _client()
-    res = client.post(
-        "/api/export/html/baas",
-        json={"rows": _template_rows(client), "generalInputs": {"valuationDate": "2026-09-30"}},
-    )
-    assert res.status_code == 200, res.text
-    _assert_standalone(res.text)
-    assert _tabs(res.text) == ["General Inputs", "Results", "Cash Flows"]
-    assert "Amp-RW" in res.text
-
-
 def test_html_report_requires_a_session():
     from fastapi.testclient import TestClient
 
@@ -117,7 +105,7 @@ def test_html_report_requires_a_session():
 
     assert (
         TestClient(m.app, base_url="https://testserver")
-        .post("/api/export/html/baas", json={})
+        .post("/api/export/html/revolving", json={})
         .status_code
         == 401
     )
@@ -135,4 +123,4 @@ def test_chart_scales_points_and_skips_missing_values():
 def test_values_are_escaped():
     html = table([{"name": "<script>alert(1)</script>"}])
     assert "<script>" not in html and "&lt;script&gt;" in html
-    _assert_standalone(build_share_html("baas", {"markets": [], "cashflows": []}))
+    _assert_standalone(build_share_html("revolving", {}))
