@@ -13,7 +13,7 @@ class UeAnalysis:
         return product / total_principal
 
     def avg_loss(self):
-        matured = self.df[self.df["Reached T+3?"] == True]
+        matured = self.df[self.df["Reached T+3?"]]
         if matured.empty:
             return float("nan")
         owed = (
@@ -43,11 +43,22 @@ class UeAnalysis:
             return float("nan")
         return self.df["Expected Fee"].sum() / total_principal
 
-    def avg_interest_pct(self):
-        total_principal = self.df["Principal Value"].sum()
+    def avg_interest_pct(self, cohort_from=None, cohort_to=None):
+        """Expected Interest as a share of Principal, optionally limited to
+        cohorts in [cohort_from, cohort_to] (inclusive, either end open when
+        None). The range exists for the LTV Calculator's interest input:
+        Expected Interest is usually accrued-to-date, so the newest cohorts
+        carry full principal but almost no interest and drag a whole-book
+        average down (Salmon: 45.7% whole book vs 55.0% over 2023-05..2025-11)."""
+        df = self.df
+        if cohort_from is not None:
+            df = df[df["Cohort"] >= pd.Timestamp(cohort_from)]
+        if cohort_to is not None:
+            df = df[df["Cohort"] <= pd.Timestamp(cohort_to)]
+        total_principal = df["Principal Value"].sum()
         if total_principal == 0:
             return float("nan")
-        return self.df["Expected Interest"].sum() / total_principal
+        return df["Expected Interest"].sum() / total_principal
 
     def sense_check_margin(self):
         int_pct = self.avg_interest_pct()

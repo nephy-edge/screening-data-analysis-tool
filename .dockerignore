@@ -1,39 +1,40 @@
-# Keep the build context small, and keep client data and local credentials out
-# of the image even when building from a dirty working tree. Several of these
-# are gitignored too, but .dockerignore is what protects a local `docker build`.
-
 .git
-.gitignore
-
-# Virtualenvs and bytecode
 .venv
 venv
 env
 __pycache__
 *.py[cod]
-*.egg-info
-
-# Credentials and local config -- must never reach an image
 .streamlit/secrets.toml
 .env
 certs/
 *.pem
 *.key
 *.crt
-
-# Client/source workbooks: raw portfolio data, must not be published
+*.egg-info
+.idea/
+.vscode/
 docs/
-
-# Local tooling and notes
+data/
 .devcontainer/
 .kilo/
 .claude/
-.idea/
-.vscode/
+.github/
+.pre-commit-config.yaml
+pyproject.toml
+pytest.ini
+requirements-dev.txt
 PROGRESS.md
-AGENTS.md
+GOALS_CHECKLIST.md
+OUTSTANDING_CHECKLIST.md
 README.md
-
-# Docker's own files
-Dockerfile
-.dockerignore
+AGENTS.md
+streamlit_err.log
+streamlit_out.log
+scripts/prompt_evals/
+# Frontend build outputs / node_modules - kept out of the build context so a
+# Dockerfile.web build starts from a clean `npm ci` (+ fresh vite build) instead
+# of shipping huge/stale local artifacts.
+node_modules/
+web/node_modules/
+web/dist/
+web/vite_dev.log

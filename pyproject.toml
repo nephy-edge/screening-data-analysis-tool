@@ -1,0 +1,39 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Everything the app actually ships. This previously covered 23 of ~144 files,
+# leaving scripts/, rental_and_subscription/ and web_api/ - including every
+# route that handles client data - unlinted by CI.
+include = [
+    "app.py",
+    "theme.py",
+    "config.py",
+    "scripts/**/*.py",
+    "rental_and_subscription/**/*.py",
+    "web_api/**/*.py",
+]
+extend-exclude = ["scripts/archive"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# app.py deliberately imports template_analysis after inserting scripts/ onto
+# sys.path, so E402 is skipped per-line with # noqa: E402. That deferred block
+# is incompatible with isort (I001), whose auto-sort would impose an
+# unmaintainable one-symbol-per-import layout, so isort is disabled for this
+# file and the import order is maintained by hand instead.
+"app.py" = ["I001"]
+
+# Same deferred-import pattern as app.py: these insert onto sys.path and only
+# then import the sibling packages, so the imports genuinely cannot sit at the
+# top (E402) and isort must not reorder them above the path setup (I001).
+"web_api/main.py" = ["E402", "I001"]
+"scripts/s3_store.py" = ["E402"]
+"scripts/profile_store.py" = ["E402"]
+"scripts/tests/test_web_api_auth.py" = ["E402"]
+"scripts/prompt_evals/test_mapping_llm_eval.py" = ["E402"]
+"scripts/prompt_evals/test_mapping_field_coverage.py" = ["E402"]
+"rental_and_subscription/rental_analysis/__init__.py" = ["E402", "F401"]
+"rental_and_subscription/rental_analysis/__main__.py" = ["E402"]
+"rental_and_subscription/rental_analysis/run_all.py" = ["E402"]

@@ -17,6 +17,15 @@ env/
 *.key
 *.crt
 
+# Defensive: never commit a cached OAuth token, even though the app no
+# longer writes this file itself (removed in the multi-user Google sign-in
+# change - a shared on-disk token cache was a correctness bug, not just a
+# secrets risk).
+.google_drive_token.json
+# Per-session Google Drive token store for the React app (keyed by the
+# signed session id, so no cross-user leak - see web_api/main.py).
+data/.google_session_tokens.json
+
 # Local session/state
 PROGRESS.md
 
@@ -31,5 +40,35 @@ PROGRESS.md
 .devcontainer/
 certs/
 
+# Runtime logs (dev servers write here; never part of the deployed app)
+logs/
+
 # Client/source workbooks — contains raw Astranova portfolio data; do not publish
 docs/
+
+# Per-user saved profiles / share snapshots (local dummy-login fallback store) —
+# contains real client loan tapes
+data/profiles/
+data/shares/
+
+# Client portfolio data files (workbooks, exports, raw dumps) — never publish
+*.xlsx
+*.xls
+*.csv
+*.parquet
+scripts/*.txt
+scripts/*.xml
+
+# Warehouse exports (snowflake_lending/export_panel.py) — multi-GB Parquet
+# dumps of real borrower loan tapes straight from Snowflake. Caught these
+# only because data/ as a whole was never ignored, unlike data/profiles/
+# and data/shares/ above.
+data/*.parquet
+
+# Scratch scripts/dumps used during development — mixes throwaway tooling
+# with raw client workbook dumps (sheet contents, real file paths); never
+# publish
+scripts/archive/
+
+# Local dev-server log (vite writes here; never part of the deployed app).
+web/vite_dev.log

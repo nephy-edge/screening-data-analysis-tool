@@ -33,7 +33,7 @@ version: 2.1
 
 commands:
   build_and_healthcheck:
-    description: Build the image and prove it serves Streamlit's health endpoint.
+    description: Build the React + FastAPI image and prove it serves /api/health.
     steps:
       - run:
           name: Build image
@@ -41,18 +41,22 @@ commands:
             set -euo pipefail
             # linux/amd64 is not optional: ECS Express task definitions are
             # X86_64, and an arm64 image pulls fine and then fails to start.
-            docker build --platform linux/amd64 -t app:ci .
+            # Dockerfile.web is the React + FastAPI app; the Streamlit image
+            # (Dockerfile) is no longer what this pipeline deploys.
+            docker build --platform linux/amd64 -f Dockerfile.web -t app:ci .
       - run:
           name: Health check
           command: |
             set -euo pipefail
             docker rm -f app-ci >/dev/null 2>&1 || true
-            docker run -d --name app-ci app:ci
+            # SC_APP_WEB=0 skips the entrypoint's Google OAuth secret checks:
+            # this throwaway container has no secrets and serves no users.
+            docker run -d --name app-ci -e SC_APP_WEB=0 app:ci
             # The Docker daemon is remote under setup_remote_docker, so a
             # published port is not reachable from this job's container. Probe
             # from INSIDE the container instead. Kept on one line so the YAML
             # indentation cannot leak into the Python source.
-            PROBE="import urllib.request as u; print(u.urlopen('http://localhost:8501/_stcore/health', timeout=3).read().decode())"
+            PROBE="import json, urllib.request as u; print(json.load(u.urlopen('http://localhost:8000/api/health', timeout=3))['status'])"
             for _ in $(seq 1 30); do
               if docker exec app-ci python -c "$PROBE" 2>/dev/null | grep -q '^ok'; then
                 echo "health OK"
@@ -80,7 +84,7 @@ jobs:
           docker_layer_caching: true
       - run:
           name: Compile-check the Python
-          command: python -m compileall -q app.py theme.py scripts/ && echo ok
+          command: python -m compileall -q app.py theme.py scripts/ web_api/ && echo ok
       - build_and_healthcheck
 
   ############################################################################
