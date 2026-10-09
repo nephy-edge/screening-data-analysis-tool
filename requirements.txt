@@ -35,7 +35,7 @@ httpx==0.28.1
 # it was never reachable here -- bumped to close the alert rather than to fix
 # an exploitable path.
 python-dotenv==1.2.3
-pypdf==6.16.2
+pypdf==6.19.0
 python-docx==1.2.0
 # FastAPI web API (web_api/main.py -- the React app's engine backend). Pinned
 # to match the local venv (Python 3.11+).
