@@ -148,17 +148,13 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
     listProfiles().then(setProfiles).catch(() => setProfiles([]));
   }, [state.auth.user]);
 
-  // Lending only - the warehouse API exposes lending loan tapes, not Rental
-  // & Subscription contract tapes (mirrors app.py's own is_lending gate).
+  // Every model: the fetch can read any table under the approved databases
+  // and lands as a normal ingest, so each model's own column mapping applies.
   useEffect(() => {
-    if (state.modelKey !== 'lending') {
-      setRedshiftAvailable(false);
-      return;
-    }
     getRedshiftConfig()
       .then((c) => setRedshiftAvailable(c.available))
       .catch(() => setRedshiftAvailable(false));
-  }, [state.modelKey]);
+  }, []);
 
   useEffect(() => {
     if (source !== 'redshift' || !redshiftAvailable) return;
