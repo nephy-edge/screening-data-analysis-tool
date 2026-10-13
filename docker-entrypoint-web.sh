@@ -1,38 +1,43 @@
 #!/bin/sh
 # Startup guard for the React + FastAPI web app (Dockerfile.web).
 #
-# Unlike the Streamlit image, the FastAPI app reads its config straight from
-# environment variables (web_api/main.py uses os.environ and load_dotenv()), so
-# there is no secrets.toml to render - but we fail loudly and immediately if
-# the pieces that make login actually work are missing, rather than starting a
-# server whose Google sign-in is quietly broken. This mirrors the guard in the
-# Streamlit docker-entrypoint.sh.
+# The FastAPI app reads its config straight from environment variables
+# (web_api/main.py, web_api/cognito.py), so there is no secrets.toml to render
+# - but we fail loudly and immediately if the pieces that make login actually
+# work are missing, rather than starting a server whose sign-in is quietly
+# broken or absent. This mirrors the guard in the Streamlit docker-entrypoint.sh.
 set -eu
 
-if [ "${SC_APP_WEB:-1}" = "1" ]; then
-    # Google OAuth client (client id + secret). Without both,
-    # /api/auth/config returns googleEnabled=false and the frontend shows the
-    # unverified "temporary sign-in" fallback instead of Google login.
-    : "${GOOGLE_CLIENT_ID:?injected from Secrets Manager}"
-    : "${GOOGLE_CLIENT_SECRET:?injected from Secrets Manager}"
+if [ -n "${COGNITO_CLIENT_ID:-}" ]; then
+    # All injected by the ECS Express module (lendableio/terraform,
+    # ecs-express/modules/ecs-express-app). APP_BASE_URL is set by the second
+    # Terraform apply, because Express Mode only assigns the service's public
+    # URL after the service exists; Cognito's redirect_uri is built from it.
+    : "${APP_BASE_URL:?set by the second terraform apply - see the runbook}"
+    : "${APP_SESSION_SECRET:?injected from Secrets Manager}"
+    : "${COGNITO_CLIENT_SECRET:?injected from Secrets Manager}"
+    : "${COGNITO_ISSUER:?injected as an environment variable}"
+    : "${COGNITO_DOMAIN:?injected as an environment variable}"
 
-    # Absolute origin the SPA + API are served from. Must equal a redirect URI
-    # registered on the Google Cloud OAuth client for GOOGLE_CLIENT_ID (the URL
-    # path is /auth/google/callback, a browser route the SPA handles).
-    : "${APP_BASE_URL:?set to the deployed origin, e.g. https://host.on.aws}"
-
-    # Session-cookie signing secret - a wrong/rotating value just logs everyone
-    # out on restart, but we still want it explicit & stable across restarts.
-    : "${SC_REACT_SESSION_SECRET:?injected from Secrets Manager}"
-
-    # Derive the Google OAuth redirect URI from the deployed origin so it cannot
-    # drift from APP_BASE_URL. web_api/main.py only falls back to localhost when
-    # this env var is unset, which would break deployed login.
+    # Google is optional here: it only powers "Connect Google Drive". When it
+    # is configured, derive its redirect URI from the deployed origin so it
+    # cannot drift from APP_BASE_URL (web_api/main.py otherwise falls back to
+    # localhost). The Google OAuth client must list this exact URI.
     export GOOGLE_REACT_REDIRECT_URI="${GOOGLE_REACT_REDIRECT_URI:-${APP_BASE_URL%/}/auth/google/callback}"
 
-    echo "entrypoint: web app with redirect_uri=${GOOGLE_REACT_REDIRECT_URI}" >&2
+    echo "entrypoint: cognito sign-in via ${APP_BASE_URL%/}/oauth2callback" >&2
+elif [ "${SC_ALLOW_NO_AUTH:-0}" = "1" ]; then
+    # Explicit, deliberate opt-out - a local `docker run` or the CI health
+    # check, where there is no Cognito pool to point at.
+    echo "entrypoint: SC_ALLOW_NO_AUTH=1 - starting WITHOUT Cognito" >&2
 else
-    echo "entrypoint: SC_APP_WEB unset/0 - not validating web-auth secrets" >&2
+    # Fail closed. Without Cognito the app offers the unverified "temporary
+    # sign-in" (any typed email gets a session), which on a public URL opens
+    # every saved client loan tape to anyone with the link.
+    echo "entrypoint: refusing to start - COGNITO_CLIENT_ID is unset, so anyone" >&2
+    echo "  could sign in as anyone via the temporary sign-in. Set the Cognito" >&2
+    echo "  variables, or SC_ALLOW_NO_AUTH=1 (never on a deployed service)." >&2
+    exit 1
 fi
 
 exec "$@"

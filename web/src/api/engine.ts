@@ -890,11 +890,19 @@ export function loadShare(token: string): Promise<RestorePayload> {
   return get<RestorePayload>(`/share/${encodeURIComponent(token)}`);
 }
 
-/** Real Google sign-in (identity only - no Drive access, see
- * web_api/main.py's GOOGLE_REACT_APP_SCOPE). Falls back to the
- * self-declared dummy identity in LoginScreen.tsx when not configured. */
-export function getAuthConfig(): Promise<{ googleEnabled: boolean }> {
-  return get<{ googleEnabled: boolean }>('/auth/config');
+/** Which sign-in the server offers. cognitoEnabled (the deployed app) means
+ * the Cognito button is the only way in, and googleEnabled then only means
+ * "Connect Google Drive" is available. Otherwise real Google sign-in when
+ * googleEnabled, else the self-declared dummy identity in LoginScreen.tsx. */
+export function getAuthConfig(): Promise<{ cognitoEnabled: boolean; googleEnabled: boolean }> {
+  return get<{ cognitoEnabled: boolean; googleEnabled: boolean }>('/auth/config');
+}
+
+/** Full-page navigation (not fetch) into the Cognito flow: the server
+ * redirects to Cognito and, after its callback, back to `next` - the current
+ * path + query, so a ?share= link survives the round trip. */
+export function cognitoLoginHref(next: string): string {
+  return `/api/auth/login?next=${encodeURIComponent(next)}`;
 }
 
 export function getGoogleLoginUrl(): Promise<{ url: string }> {
@@ -915,9 +923,10 @@ export function getMe(): Promise<{ email: string; name: string; gdrive: boolean 
 }
 
 /** Clears the signed session cookie server-side (mirrors app.py's "Log out"
- * button). */
-export function logout(): Promise<{ ok: boolean }> {
-  return post<{ ok: boolean }>('/auth/logout', {});
+ * button). Under Cognito it also returns the hosted logout URL to navigate
+ * to, so the Cognito session ends too. */
+export function logout(): Promise<{ ok: boolean; logoutUrl?: string }> {
+  return post<{ ok: boolean; logoutUrl?: string }>('/auth/logout', {});
 }
 
 /** The self-declared "temporary sign-in" fallback (shown when Google isn't

@@ -43,3 +43,6 @@ fastapi==0.118.2
 uvicorn==0.32.1
 pydantic==2.10.3
 python-multipart==0.0.32
+# Signs the session cookie and the OAuth-state cookie (web_api/main.py imports
+# it directly). Previously only present because streamlit depends on it.
+itsdangerous==2.2.0

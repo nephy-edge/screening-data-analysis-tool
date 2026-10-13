@@ -46,7 +46,11 @@ export function Sidebar({ open, onClose, onResumed }: SidebarProps) {
   const signOut = async () => {
     setLoggingOut(true);
     try {
-      await logout();
+      const { logoutUrl } = await logout();
+      if (logoutUrl) {
+        window.location.href = logoutUrl;
+        return;
+      }
     } catch {
       // Best-effort: even if the request fails, drop the client-side
       // identity so the login screen reappears - a stale cookie just means

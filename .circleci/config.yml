@@ -49,9 +49,9 @@ commands:
           command: |
             set -euo pipefail
             docker rm -f app-ci >/dev/null 2>&1 || true
-            # SC_APP_WEB=0 skips the entrypoint's Google OAuth secret checks:
+            # SC_ALLOW_NO_AUTH=1 lets the entrypoint start without Cognito:
             # this throwaway container has no secrets and serves no users.
-            docker run -d --name app-ci -e SC_APP_WEB=0 app:ci
+            docker run -d --name app-ci -e SC_ALLOW_NO_AUTH=1 app:ci
             # The Docker daemon is remote under setup_remote_docker, so a
             # published port is not reachable from this job's container. Probe
             # from INSIDE the container instead. Kept on one line so the YAML
@@ -167,14 +167,24 @@ jobs:
             # APP_BASE_URL and all the Cognito values -- crash-looping at best,
             # and at worst starting with authentication silently disabled.
             #
-            # Verify the jq path against a real describe response the first
-            # time this runs; the Express Mode API is new.
+            # The port and health check are pinned on EVERY roll, in the same
+            # update as the image. The read-modify-write would otherwise carry
+            # over Streamlit's 8501 and /_stcore/health, and the FastAPI image
+            # (uvicorn on 8000, liveness at /api/health) would fail its health
+            # check and roll back - as both deploys on 2026-10-08 did. Never
+            # use a SPA path here: the catch-all answers 200 for any path.
             # ------------------------------------------------------------------
+            # Remember the current deployment BEFORE the update, so the wait
+            # step can tell the new one from the one already there.
+            PREV_DEP=$(aws ecs describe-express-gateway-service \
+              --service-arn "$ECS_SERVICE_ARN" \
+              --query 'service.currentDeployment' --output text)
+            echo "export PREV_DEP=$PREV_DEP" >> "$BASH_ENV"
             CURRENT=$(aws ecs describe-express-gateway-service \
               --service-arn "$ECS_SERVICE_ARN")
             PRIMARY=$(echo "$CURRENT" | jq -c \
               --arg img "$ECR_REPOSITORY_URL:$SHA_TAG" \
-              '(.service.activeConfigurations | sort_by(.createdAt) | last | .primaryContainer) | .image = $img')
+              '(.service.activeConfigurations | sort_by(.createdAt) | last | .primaryContainer) | .image = $img | .containerPort = 8000')
             if [ -z "$PRIMARY" ] || [ "$PRIMARY" = "null" ]; then
               echo "could not read the current primaryContainer; refusing to deploy"
               echo "$CURRENT" | jq '.' | head -40
@@ -182,21 +192,62 @@ jobs:
             fi
             aws ecs update-express-gateway-service \
               --service-arn "$ECS_SERVICE_ARN" \
-              --primary-container "$PRIMARY"
+              --primary-container "$PRIMARY" \
+              --health-check-path /api/health
 
       - run:
-          name: Wait for the canary to settle
+          name: Wait for the rollout to actually finish
           command: |
             set -euo pipefail
-            for _ in $(seq 1 60); do
-              STATUS=$(aws ecs describe-express-gateway-service \
+            # ------------------------------------------------------------------
+            # DO NOT poll `service.status.statusCode`. That is the SERVICE's
+            # status and reads ACTIVE whether or not any task is healthy - it
+            # stayed ACTIVE through both circuit-breaker rollbacks on
+            # 2026-10-08. The rollout is a SERVICE DEPLOYMENT, and that is what
+            # has a real terminal state. (Ported from verifications_automation.)
+            # ------------------------------------------------------------------
+
+            # currentDeployment can briefly still point at the previous rollout.
+            DEP=""
+            for _ in $(seq 1 24); do
+              DEP=$(aws ecs describe-express-gateway-service \
                 --service-arn "$ECS_SERVICE_ARN" \
-                --query 'service.status.statusCode' --output text)
-              echo "status=$STATUS"
-              if [ "$STATUS" = "ACTIVE" ]; then exit 0; fi
+                --query 'service.currentDeployment' --output text)
+              if [ -n "$DEP" ] && [ "$DEP" != "None" ] && [ "$DEP" != "${PREV_DEP:-}" ]; then
+                break
+              fi
+              sleep 5
+            done
+            if [ -z "$DEP" ] || [ "$DEP" = "None" ] || [ "$DEP" = "${PREV_DEP:-}" ]; then
+              echo "no new service deployment appeared after the update; refusing to call this a success"
+              exit 1
+            fi
+            echo "watching deployment $DEP"
+
+            for _ in $(seq 1 120); do
+              # No heredoc on purpose: a heredoc terminator's indentation does
+              # not survive this YAML block scalar cleanly.
+              INFO=$(aws ecs describe-service-deployments --service-deployment-arns "$DEP" \
+                --query 'serviceDeployments[0].[status,lifecycleStage,statusReason]' \
+                --output text)
+              STATUS=$(printf '%s' "$INFO" | awk '{print $1}')
+              STAGE=$(printf '%s' "$INFO" | awk '{print $2}')
+              REASON=$(printf '%s' "$INFO" | cut -f3-)
+              echo "status=$STATUS stage=$STAGE"
+              case "$STATUS" in
+                SUCCESSFUL)
+                  echo "rollout complete"
+                  exit 0 ;;
+                ROLLBACK_IN_PROGRESS|ROLLBACK_SUCCESSFUL|ROLLBACK_FAILED|FAILED|STOPPED)
+                  echo "ROLLOUT DID NOT SUCCEED: $STATUS ($REASON)"
+                  echo "--- last 50 log lines from the task ---"
+                  aws logs tail "/ecs/lendable-sandbox-ecs-express" \
+                    --since 15m --format short 2>/dev/null | tail -50 || true
+                  exit 1 ;;
+              esac
               sleep 20
             done
-            echo "service did not reach ACTIVE within 20 minutes"
+            echo "rollout did not reach a terminal state within 40 minutes"
             exit 1
 
 workflows:
