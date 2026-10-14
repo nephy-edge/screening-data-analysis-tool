@@ -50,7 +50,7 @@ from dotenv import load_dotenv
 
 from config import FX, REVOLVING_DEFAULTS, UE_MODEL_COST_DEFAULTS
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 # Same .env app.py loads at import (google_oauth.py's _get_google_client_id
@@ -127,6 +127,12 @@ from google_oauth import (
 # downloads use (falls back to certifi when certs/corporate_root.pem is absent).
 from ca_bundle import _ca_bundle_path
 
+# Cognito OIDC sign-in for the deployed app (see web_api/cognito.py). When it
+# is configured it is the ONLY way to get a session: the Google and temporary
+# sign-in routes below refuse to issue one.
+import cognito
+from starlette.middleware.sessions import SessionMiddleware
+
 # Drive + Sheets import scope - the same scopes app.py's GOOGLE_LOGIN_SCOPE
 # requests: read access for browsing the user's Drive (drive.readonly) plus
 # write access scoped to files this app itself creates (drive.file, NOT full
@@ -158,13 +164,15 @@ _OAUTH_STATE_LOCK = threading.Lock()
 # itself (a stolen HttpOnly cookie still can't touch Drive, because the
 # token only lives in the server's memory for that sid). It is HMAC-signed
 # so a client cannot forge an identity it was never granted. Secret comes
-# from SC_REACT_SESSION_SECRET, falls back to GOOGLE_CLIENT_SECRET (already
-# a server-only secret), else a per-process random - which is safe but means
-# cookies stop validating if this process restarts.
+# from SC_REACT_SESSION_SECRET, then APP_SESSION_SECRET (what the ECS Express
+# module injects), falls back to GOOGLE_CLIENT_SECRET (already a server-only
+# secret), else a per-process random - which is safe but means cookies stop
+# validating if this process restarts.
 _REACT_SESSION_COOKIE = "sc_react_session"
 _REACT_SESSION_MAX_AGE_SECONDS = int(os.environ.get("SC_REACT_SESSION_DAYS", "30")) * 86400
 _REACT_SESSION_SECRET = (
     os.environ.get("SC_REACT_SESSION_SECRET")
+    or os.environ.get("APP_SESSION_SECRET")
     or os.environ.get("GOOGLE_CLIENT_SECRET")
     or secrets.token_urlsafe(32)
 )
@@ -510,6 +518,24 @@ app = FastAPI(
     description="Lending + Rental & Subscription analysis engines for the React app.",
 )
 
+# Fail closed: a deployment that sets COGNITO_CLIENT_ID but forgets the rest
+# must refuse to start, not serve with sign-in quietly broken.
+if cognito.configuration_error():
+    raise RuntimeError(f"Refusing to start: {cognito.configuration_error()}")
+
+# Holds only Authlib's short-lived OAuth state/nonce between /api/auth/login
+# and /oauth2callback - the identity lives in _REACT_SESSION_COOKIE. lax, not
+# strict: the callback is a cross-site top-level redirect back from Cognito,
+# and a strict cookie would not be sent on it.
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=_REACT_SESSION_SECRET,
+    session_cookie="sc_oauth_state",
+    max_age=_OAUTH_STATE_TTL_SECONDS,
+    same_site="lax",
+    https_only=True,
+)
+
 
 # Paths under /api that are reachable without a session, because requiring one
 # would make signing in impossible (or, for a share link, defeat the point).
@@ -518,7 +544,7 @@ app = FastAPI(
 # protected by default, and only becomes public by being named here.
 _PUBLIC_API_PREFIXES = (
     "/api/health",
-    "/api/auth/",  # login-url, callback, dummy, me, logout, config
+    "/api/auth/",  # login, login-url, callback, dummy, me, logout, config
 )
 # /api/share/{token} is deliberately NOT public: each load registers an
 # ingest, so anonymous loads could evict every signed-in user's working
@@ -3620,8 +3646,51 @@ def auth_config() -> dict[str, bool]:
     LoginScreen can show the "Sign in with Google" button only when a
     client id/secret are actually configured - otherwise it falls back to
     the self-declared identity box (same fallback logic as
-    scripts/login_gates.py's _render_login_gate)."""
-    return {"googleEnabled": bool(_get_google_client_id() and _get_google_client_secret())}
+    scripts/login_gates.py's _render_login_gate).
+
+    cognitoEnabled switches LoginScreen to the single Cognito sign-in button;
+    googleEnabled then only means "Connect Google Drive" is available."""
+    return {
+        "cognitoEnabled": cognito.is_configured(),
+        "googleEnabled": bool(_get_google_client_id() and _get_google_client_secret()),
+    }
+
+
+@app.get("/api/auth/login", include_in_schema=False)
+async def cognito_login(request: Request, next: str = "/") -> Response:
+    """Start the Cognito authorization-code flow. `next` (a same-origin path,
+    e.g. "/?share=<token>") is where the callback lands, so a share link
+    survives the sign-in round trip."""
+    if not cognito.is_configured():
+        raise HTTPException(status_code=404, detail="Cognito sign-in is not configured.")
+    request.session["next"] = cognito.safe_next(next)
+    return await cognito.client().authorize_redirect(request, cognito.redirect_uri())
+
+
+@app.get(cognito.CALLBACK_PATH, include_in_schema=False)
+async def cognito_callback(request: Request) -> Response:
+    """Exchange the code, verify the ID token (Authlib checks its signature
+    against the pool's JWKS plus iss/aud/exp/nonce), then issue the same
+    signed session cookie every other route already trusts. Registered here,
+    before the SPA catch-all at the end of the file, which would otherwise
+    answer this path with index.html."""
+    if not cognito.is_configured():
+        raise HTTPException(status_code=404, detail="Not found.")
+    try:
+        token = await cognito.client().authorize_access_token(request)
+    except Exception as exc:  # noqa: BLE001 - any failure here means "not signed in"
+        # The provider's message stays in the logs, not the response.
+        raise HTTPException(status_code=401, detail="Sign-in failed. Please try again.") from exc
+    claims = token.get("userinfo") or {}
+    email = (claims.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(
+            status_code=403, detail="Your account has no email address, which this app requires."
+        )
+    target = cognito.safe_next(request.session.pop("next", "/"))
+    response = RedirectResponse(url=target, status_code=303)
+    _set_react_session_cookie(response, email, claims.get("name") or email)
+    return response
 
 
 @app.get("/api/auth/me")
@@ -3643,15 +3712,21 @@ def auth_me(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/auth/logout")
-def auth_logout(response: Response) -> dict[str, bool]:
+def auth_logout(response: Response) -> dict[str, Any]:
     """Clear the signed session cookie (mirrors app.py's "Log out" button in
     its non-Cognito branches, which clears its own session cookie the same
     way - see _clear_session_cookie_and_reload). The Google token cached
     server-side under this session's sid is left in place: it's keyed by an
     unguessable sid the browser can no longer present, and dropping it here
     would just force a fresh OAuth consent on the next sign-in for no
-    benefit."""
+    benefit.
+
+    Under Cognito it also returns Cognito's hosted logout URL for the browser
+    to follow - clearing only this cookie would leave the Cognito session live,
+    so "Sign in" would silently sign the same person straight back in."""
     response.delete_cookie(_REACT_SESSION_COOKIE, path="/")
+    if cognito.is_configured():
+        return {"ok": True, "logoutUrl": cognito.logout_url()}
     return {"ok": True}
 
 
@@ -3665,7 +3740,12 @@ def dummy_sign_in(body: DummySignInBody, response: Response) -> dict[str, str]:
     fallback (shown when Google isn't configured - see LoginScreen.tsx).
     Identity here is unverified by design, so the cookie just remembers
     whatever email the user typed - no worse than the existing client-only
-    behaviour, but it survives a refresh."""
+    behaviour, but it survives a refresh.
+
+    Refused outright under Cognito: it mints a session for any email the
+    caller types, so leaving it reachable would bypass the login gate."""
+    if cognito.is_configured():
+        raise HTTPException(status_code=404, detail="Not found.")
     email = (body.email or "").strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="Email is required.")
@@ -3674,7 +3754,11 @@ def dummy_sign_in(body: DummySignInBody, response: Response) -> dict[str, str]:
 
 
 @app.get("/api/auth/google/login-url")
-def google_login_url() -> dict[str, str]:
+def google_login_url(request: Request) -> dict[str, str]:
+    # Under Cognito, Google is "Connect Google Drive" for an already signed-in
+    # user, never a way in - so it needs the session first.
+    if cognito.is_configured() and _read_react_session(request) is None:
+        raise HTTPException(status_code=401, detail="Not signed in.")
     if not (_get_google_client_id() and _get_google_client_secret()):
         raise HTTPException(status_code=503, detail="Google sign-in is not configured.")
     state = secrets.token_urlsafe(16)
@@ -3699,7 +3783,9 @@ class GoogleCallbackBody(BaseModel):
 
 
 @app.post("/api/auth/google/callback")
-def google_callback(body: GoogleCallbackBody, response: Response) -> dict[str, Any]:
+def google_callback(
+    body: GoogleCallbackBody, request: Request, response: Response
+) -> dict[str, Any]:
     """Exchange the authorization code Google's redirect handed back to the
     React app's /auth/google/callback route for a real identity - the
     server-side half of the flow, so the client secret never reaches the
@@ -3708,7 +3794,14 @@ def google_callback(body: GoogleCallbackBody, response: Response) -> dict[str, A
     session id, so the React app's "From Google Drive" import can list and
     download the user's files without the token ever touching the browser.
     Also issues the signed remember-me cookie, so later loads skip the
-    login screen."""
+    login screen.
+
+    Under Cognito this only CONNECTS Drive: the Google account must be the
+    signed-in Cognito user's own (same verified email), its token is stored
+    under the existing session, and no new identity cookie is issued."""
+    session = _read_react_session(request) if cognito.is_configured() else None
+    if cognito.is_configured() and session is None:
+        raise HTTPException(status_code=401, detail="Not signed in.")
     with _OAUTH_STATE_LOCK:
         issued = _PENDING_GOOGLE_OAUTH_STATES.pop(body.state, None)
     if issued is None or time.time() - issued > _OAUTH_STATE_TTL_SECONDS:
@@ -3723,6 +3816,17 @@ def google_callback(body: GoogleCallbackBody, response: Response) -> dict[str, A
     email = (userinfo.get("email") or "").strip().lower()
     if not email:
         raise HTTPException(status_code=502, detail="Google did not return an email address.")
+    if session is not None:
+        if email != session["email"]:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Connect the Google account for {session['email']} - "
+                    f"{email} is a different account."
+                ),
+            )
+        _store_google_token(session["sid"], token)
+        return {"email": session["email"], "name": session["name"], "gdrive": True}
     name = userinfo.get("name") or email
     sid = _set_react_session_cookie(response, email, name)
     _store_google_token(sid, token)

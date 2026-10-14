@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '../state/AppStore';
 import { Button, Card, Input, Alert } from '../components/ui';
-import { getAuthConfig, getGoogleLoginUrl, dummySignIn } from '../api/engine';
+import { getAuthConfig, getGoogleLoginUrl, dummySignIn, cognitoLoginHref } from '../api/engine';
 
-/** Real Google sign-in when configured server-side (web_api/main.py's
+/** Cognito sign-in when the server has it configured (the ECS deployment -
+ * web_api/cognito.py), where it is the only way in. Otherwise real Google
+ * sign-in when configured server-side (web_api/main.py's
  * /api/auth/*, mirroring scripts/login_gates.py's _render_google_login_gate),
  * else the self-declared, unverified "dummy" identity
  * (_render_dummy_login_gate) - same either/or fallback app.py uses. The
@@ -14,12 +16,16 @@ export function LoginScreen() {
   const { dispatch } = useAppStore();
   const [email, setEmail] = useState('');
   const [googleEnabled, setGoogleEnabled] = useState<boolean | null>(null);
+  const [cognitoEnabled, setCognitoEnabled] = useState(false);
   const [googleBusy, setGoogleBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     getAuthConfig()
-      .then((c) => setGoogleEnabled(c.googleEnabled))
+      .then((c) => {
+        setCognitoEnabled(c.cognitoEnabled);
+        setGoogleEnabled(c.googleEnabled);
+      })
       .catch(() => setGoogleEnabled(false));
   }, []);
 
@@ -59,7 +65,20 @@ export function LoginScreen() {
       <Card className="sd-login__card">
         <h2 className="sd-h2">Sign in</h2>
         {error ? <Alert tone="error">{error}</Alert> : null}
-        {googleEnabled ? (
+        {cognitoEnabled ? (
+          <>
+            <p className="sd-muted">Sign in with your Lendable account to continue.</p>
+            <div className="sd-login__actions">
+              <Button
+                onClick={() => {
+                  window.location.href = cognitoLoginHref(window.location.pathname + window.location.search);
+                }}
+              >
+                Sign in
+              </Button>
+            </div>
+          </>
+        ) : googleEnabled ? (
           <>
             <p className="sd-muted">Sign in with your Lendable Google account to continue.</p>
             <div className="sd-login__actions">
