@@ -11,6 +11,33 @@ page."""
 import pandas as pd
 from html_tables import fmt
 
+# Rental & Subscription formulas, as rental_analysis computes them (the same
+# wording as the Summary / UE tooltips), so Ask AI explains the real method.
+_RENTAL_CHAT_METHODOLOGY = """\
+Term: each contract's term is expected end date minus start date, in days; months = days / 30.5.
+Lease Tenor (m) and Average Useful Life (m): contract term weighted by cost of asset (currently the same formula).
+Downpayment %: sum of downpayments / sum of cost of asset.
+Margin: average total value leased per asset / average original asset cost - 1, where total value leased = cost-weighted monthly expected payment x Lease Tenor, and original cost counts each asset's first lease only.
+PvD: sum of total paid / sum of amount expected to date, all contracts.
+Average Collection Rate: the same ratio for open contracts only.
+Utilisation Rate: assets with an open contract / all assets.
+Historical % Collected on Principal: for assets that reached term, (paid + recovered) / original asset cost; the lowest of the template's four estimates is used.
+Monthly Observed Repayment: assets are grouped by months on books (months since the asset's first contract, days / 30, rounded); for each group, total paid / asset cost / months on books; then the cost-weighted average over months 1-19, using groups with more assets than the minimum per cohort.
+Cost of Funding over Life: (funding cost % p.a. + direct cost % p.a.) x Lease Tenor / 12.
+Net UE margin: Margin - Cost of Funding over Life (not Margin minus the annual cost rates).
+MRR: sum of monthly expected payment on open contracts. MRR / average cost: sum of monthly expected payment on all contracts / sum of cost of asset.
+Churn (per cohort month): contracts whose last active month is that month / contracts active that month. Cohort months are only the months in which leases started. 95th %ile and average churn use cohorts with more active leases than the minimum per cohort.
+Stressed churn: 95th %ile churn x churn stress multiplier, capped at 100%.
+MRR survival multipliers (n = 12, 24, 36 months): (1 - (1 - c)^(n + 1)) / c with c = stressed churn; total = 1 / c.
+Defaulted contracts > 3mo: contracts closed at least N months (General Inputs, months since default) before the extraction date.
+% recovered: defaulted contracts whose asset was redeployed / all defaulted contracts (a count, not a value). Loss (non-recoverability) = 1 - % recovered.
+Recoverability (95th %ile): from recovery amounts / lendable asset value at default when recovery amounts exist, otherwise falls back to % recovered.
+Subscription margin: MRR (DSLP30-eligible MRR when payment dates exist) / sum of cost of asset. Subscription support: subscription margin x min(3-year MRR multiplier, 6), capped at 100%.
+Asset-value LTV: min((Recoverability 95th %ile + subscription support, capped at 100%) / (1 + FX devaluation), 95%); FX devaluation is the General Inputs value, halved when the 50% discount is on, and 0 when blank.
+Asset DSLP30: initial value of active assets with no payment in the last 30 days / initial value of all active assets; n/a without a last payment date column.
+Receivables Coverage (180d): performing receivables over the next 180 days / debt service due in the next 180 days (a General Inputs value; n/a when blank).
+Contracts Churned (Summary): contracts with Closed status / all contracts."""
+
 
 def _build_lending_chat_context(
     gi,
@@ -121,7 +148,7 @@ def _build_rental_chat_context(
         f"95th %ile monthly churn: {fmt(ca_data['pctile_95'], '{:.2%}')}. Average monthly churn: "
         + fmt(ca_data["avg_churn"], "{:.2%}"),
         f"Stressed churn (1.7x): {fmt(ca_data['stress_churn'], '{:.2%}')}.",
-        f"1/2/3-year and total residual multiples: {fmt(ca_data['multiplier_1y'], '{:.2f}')} / "
+        f"1/2/3-year and total MRR survival multipliers (months of MRR expected under stressed churn): {fmt(ca_data['multiplier_1y'], '{:.2f}')} / "
         f"{fmt(ca_data['multiplier_2y'], '{:.2f}')} / {fmt(ca_data['multiplier_3y'], '{:.2f}')} / "
         + fmt(ca_data["multiplier_total"], "{:.2f}"),
         "",
@@ -150,11 +177,15 @@ def _build_rental_chat_context(
         f"{fmt(ts.get('paid_at_12m_over_cost'))} / {fmt(ts.get('paid_at_24m_over_cost'))}.",
         "",
         "## Cohorts",
-        f"{len(cohorts)} monthly cohorts. Columns: {', '.join(cohorts.columns)}.",
+        f"{len(cohorts)} monthly cohorts. Columns: {', '.join(cohorts.columns)}. "
+        "Rates in this JSON (pvd, pct_recovered, churn_rate) are fractions: 0.496 means 49.6%.",
         # JSON, not CSV: easier for the model to parse reliably (per Niraj's suggestion in the
         # 2026-09-03 catch-up) and avoids the risk of a value containing a comma being misread
         # as a column boundary.
         cohorts.to_json(orient="records", date_format="iso"),
+        "",
+        "## How each figure is calculated",
+        _RENTAL_CHAT_METHODOLOGY,
     ]
     if user_context.strip():
         lines += ["", "## User-provided context about this dataset", user_context.strip()]

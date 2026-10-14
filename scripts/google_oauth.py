@@ -4,12 +4,14 @@ Shared by the sign-in flow (login_gates.py) and the "My Google Drive" file
 picker in app.py, which is why the Drive-token helpers live here rather than
 with the sign-in-only code in session_cookie.py/login_gates.py."""
 
+import json
 import os
 import time
 from urllib.parse import quote
 
 import requests
 import streamlit as st
+from authlib.jose import jwt
 from ca_bundle import _ca_bundle_path
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -126,15 +128,71 @@ def _fetch_google_userinfo(access_token: str) -> dict:
     return resp.json()
 
 
+def _service_account_info() -> dict | None:
+    """Service-account key for Drive domain-wide delegation: the key JSON
+    itself in GOOGLE_SERVICE_ACCOUNT_JSON (deploy, from Secrets Manager) or
+    a path to it in GOOGLE_SERVICE_ACCOUNT_FILE (local). None if neither."""
+    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
+    if not raw and path:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    return json.loads(raw) if raw else None
+
+
+def _delegated_drive_token(subject: str | None, scope: str = GOOGLE_DRIVE_SCOPE) -> dict:
+    """Service-account Drive access token. subject=None acts as the service
+    account itself - it sees only what's shared with it (Shared Drives it's a
+    member of, files/folders shared to its email). A subject email
+    impersonates that user (domain-wide delegation), which needs a Workspace
+    admin to have granted this client ID `scope`, else 401
+    unauthorized_client."""
+    info = _service_account_info()
+    now = int(time.time())
+    claims = {
+        "iss": info["client_email"],
+        "scope": scope,
+        "aud": GOOGLE_TOKEN_URL,
+        "iat": now,
+        "exp": now + 3600,
+    }
+    if subject:
+        claims["sub"] = subject
+    assertion = jwt.encode(
+        {"alg": "RS256", "kid": info["private_key_id"]}, claims, info["private_key"]
+    ).decode()
+    resp = requests.post(
+        GOOGLE_TOKEN_URL,
+        data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": assertion},
+        timeout=30,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    token = resp.json()
+    token["expires_at"] = time.time() + int(token.get("expires_in", 3600))
+    token["sa_subject"] = subject
+    return token
+
+
 def _gdrive_token() -> dict | None:
     # Deliberately session-only, not cached to a local file: this app can now
     # be signed into by multiple different real people (see
     # _render_google_login_gate), and a shared on-disk token cache would leak
     # whoever signed in most recently to the next visitor's fresh session.
-    return st.session_state.get("gdrive_token")
+    token = st.session_state.get("gdrive_token")
+    # Cognito sign-in carries no Google token - use the service account's own
+    # (Shared Drives / files shared with it) instead of an OAuth consent.
+    if not token and st.session_state.get("auth_mode") == "cognito" and _service_account_info():
+        token = _delegated_drive_token(None)
+        st.session_state["gdrive_token"] = token
+    return token
 
 
 def _gdrive_access_token(token: dict) -> str:
+    if time.time() >= token.get("expires_at", 0) - 60 and "sa_subject" in token:
+        refreshed = _delegated_drive_token(token["sa_subject"])
+        st.session_state["gdrive_token"] = refreshed
+        return refreshed["access_token"]
     if time.time() >= token.get("expires_at", 0) - 60 and token.get("refresh_token"):
         refreshed = _refresh_google_token(token["refresh_token"])
         refreshed["refresh_token"] = token["refresh_token"]

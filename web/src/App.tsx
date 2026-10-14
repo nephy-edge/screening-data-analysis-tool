@@ -63,7 +63,7 @@ function Shell() {
     // resumeShare) doesn't keep re-resuming the same shared snapshot.
     window.history.replaceState(null, '', window.location.pathname);
     resumeShare(token)
-      .then(() => setStep('mapping'))
+      .then((hasCachedResult) => setStep(hasCachedResult ? 'analysis' : 'mapping'))
       .catch((err) => setShareError(err instanceof Error ? err.message : 'This share link is invalid or has expired.'));
     // Runs once per mount (Shell only mounts after sign-in, matching
     // app.py's own share-token handling running after its login gate).

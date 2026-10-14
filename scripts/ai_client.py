@@ -383,6 +383,56 @@ def _suggest_escalation_writeup(filename: str, facts: list, model_name: str) -> 
     return result
 
 
+def _chat_json(system_prompt: str, user: str, max_tokens: int) -> dict:
+    """One JSON-mode chat completion, parsed."""
+    resp = requests.post(
+        DEEPINFRA_CHAT_URL,
+        headers={
+            "Authorization": f"Bearer {_get_deepinfra_api_key()}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": DEEPINFRA_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": max_tokens,
+        },
+        timeout=app_config.AI["request_timeout_seconds"],
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    return json.loads(resp.json()["choices"][0]["message"]["content"])
+
+
+def _extract_whatif(question: str, history: list, fields: dict) -> dict:
+    """Which of `fields` (input name -> current value) the question asks to
+    change, as {name: number}. The model only names the inputs and values;
+    the caller re-runs the engine, so no figure comes from the model. Returns
+    {} when not a what-if, on no API key, or on any unusable reply."""
+    if not _get_deepinfra_api_key():
+        return {}
+    system_prompt = app_config.render_prompt(
+        app_config.AI_PROMPTS["whatif_extract"], fields=json.dumps(fields)
+    ).strip()
+    recent = "\n".join(f"{m['role']}: {m['content']}" for m in history[-4:])
+    user = f"Recent conversation:\n{recent}\n\nQuestion: {question}" if recent else question
+    try:
+        parsed = _chat_json(system_prompt, user, app_config.AI["whatif_extract_max_tokens"])
+    except (requests.RequestException, ValueError, KeyError):
+        return {}
+    overrides = parsed.get("overrides") if isinstance(parsed, dict) else None
+    if not isinstance(overrides, dict):
+        return {}
+    return {
+        k: v
+        for k, v in overrides.items()
+        if k in fields and isinstance(v, (int, float)) and not isinstance(v, bool)
+    }
+
+
 def _ask_data_chatbot(question: str, context: str, history: list) -> str:
     """Ask DeepSeek V4 Flash (via DeepInfra) a question about the current
     analysis. `context` is a text summary of already-computed portfolio/cohort

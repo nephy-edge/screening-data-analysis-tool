@@ -25,7 +25,9 @@ import secrets
 import sys
 import threading
 import time
+import typing
 import uuid
+from pathlib import Path
 from typing import Any, Literal
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
@@ -51,7 +53,7 @@ from dotenv import load_dotenv
 from config import FX, REVOLVING_DEFAULTS, UE_MODEL_COST_DEFAULTS
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
 # Same .env app.py loads at import (google_oauth.py's _get_google_client_id
 # etc. fall back to os.environ when st.secrets isn't set) - lets this
@@ -63,6 +65,7 @@ load_dotenv()
 # Lending engine (see app.py's `_coerce_dates(raw, DATE_FIELDS, dayfirst)`).
 from ai_client import (
     _ask_data_chatbot,
+    _extract_whatif,
     _get_deepinfra_api_key,
     _suggest_derived_column,
     _suggest_escalation_writeup,
@@ -115,12 +118,14 @@ import s3_store
 # can't just be imported as-is), and it redirects back to the React app's
 # own callback route, not Streamlit's.
 from google_oauth import (
+    _delegated_drive_token,
     _exchange_google_code,
     _fetch_google_userinfo,
     _get_google_client_id,
     _get_google_client_secret,
     _google_auth_url,
     _refresh_google_token,
+    _service_account_info,
 )
 
 # Corporate-root-CA-aware TLS bundle, same lookup app.py's direct Drive/Sheets
@@ -218,6 +223,9 @@ def _store_google_token(sid: str, token: dict) -> None:
 
 
 _GOOGLE_TOKENS: dict[str, dict] = _load_google_tokens()
+# The service account's own Drive token. In memory only: a 1-hour access
+# token re-mintable from the key at any time, so nothing worth persisting.
+_SA_TOKEN: dict[str, dict] = {}
 
 
 _react_session_serializer = URLSafeTimedSerializer(_REACT_SESSION_SECRET, salt="sc-react-session")
@@ -265,11 +273,32 @@ _DRIVE_FILE_QUERY = (
 )
 
 
-def _gdrive_access_token(sid: str) -> str:
-    """Return a fresh-enough Drive access token for this session, refreshing
-    it (and updating the store) when it's within 60s of expiry and we hold a
-    refresh token - same refresh logic as google_oauth._gdrive_access_token,
-    minus the Streamlit session_state write."""
+def _service_account_access_token() -> str:
+    token = _SA_TOKEN.get("token")
+    if token is None or time.time() >= token["expires_at"] - 60:
+        try:
+            token = _delegated_drive_token(None)
+        except requests.RequestException as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Google Drive service account sign-in failed: {exc}"
+            ) from exc
+        _SA_TOKEN["token"] = token
+    return token["access_token"]
+
+
+def _gdrive_access_token(session: dict[str, str]) -> str:
+    """Return a fresh-enough Drive access token for this session.
+
+    With a service account configured (GOOGLE_SERVICE_ACCOUNT_JSON/_FILE),
+    every signed-in user shares the service account's own token - it sees
+    the Shared Drives and files shared with it, not anyone's personal Drive,
+    and needs no per-user OAuth consent. Otherwise falls back to the per-sid
+    OAuth token, refreshing it when within 60s of expiry - same refresh
+    logic as google_oauth._gdrive_access_token, minus the Streamlit
+    session_state write."""
+    if _service_account_info():
+        return _service_account_access_token()
+    sid = session["sid"]
     token = _GOOGLE_TOKENS.get(sid)
     if token is None:
         raise HTTPException(
@@ -286,11 +315,11 @@ def _gdrive_access_token(sid: str) -> str:
     return token["access_token"]
 
 
-def _require_gdrive_session(request: Request) -> str:
+def _require_gdrive_session(request: Request) -> dict[str, str]:
     session = _read_react_session(request)
     if session is None:
         raise HTTPException(status_code=401, detail="Not signed in.")
-    return session["sid"]
+    return session
 
 
 def _require_identity(request: Request) -> str:
@@ -385,6 +414,10 @@ def _list_drive_files(access_token: str) -> list[dict[str, Any]]:
             "pageSize": 200,
             "fields": "files(id,name,mimeType,modifiedTime)",
             "orderBy": "modifiedTime desc",
+            # Include Shared Drives, not just My Drive.
+            "corpora": "allDrives",
+            "includeItemsFromAllDrives": "true",
+            "supportsAllDrives": "true",
         },
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=30,
@@ -402,7 +435,7 @@ def _list_drive_files(access_token: str) -> list[dict[str, Any]]:
 def _gdrive_file_meta(access_token: str, file_id: str) -> dict[str, Any]:
     resp = requests.get(
         f"{GOOGLE_DRIVE_FILES_URL}/{file_id}",
-        params={"fields": "id,name,mimeType"},
+        params={"fields": "id,name,mimeType", "supportsAllDrives": "true"},
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=30,
         verify=_ca_bundle_path(),
@@ -430,7 +463,7 @@ def _download_drive_file(access_token: str, drive_file: dict[str, Any]) -> tuple
         if not name.lower().endswith(".xlsx"):
             name += ".xlsx"
     else:
-        url = f"{GOOGLE_DRIVE_FILES_URL}/{drive_file['id']}?alt=media"
+        url = f"{GOOGLE_DRIVE_FILES_URL}/{drive_file['id']}?alt=media&supportsAllDrives=true"
     resp = requests.get(
         url,
         headers={"Authorization": f"Bearer {access_token}"},
@@ -487,6 +520,7 @@ from rental_analysis.lease_cohorts import build_cohorts as rental_build_cohorts
 from rental_analysis.ltv_analysis import LtvAnalysis as RentalLtvAnalysis
 from rental_analysis.repayment_curve import build_repayment_curve
 from rental_analysis.ue_analysis import UeAnalysis as RentalUeAnalysis
+from rental_analysis.ue_analysis import ue_by_cohort as rental_ue_by_cohort
 from rental_analysis.ts_covenants import build_ts_covenants
 
 # Revolving Lending (RCL) engine
@@ -861,7 +895,8 @@ def _cached_pipeline(model: str, body: BaseModel, run) -> tuple[Any, ...]:
     only on a miss. Consumers only read these objects (verified: nothing
     downstream mutates them in place), so sharing one result is safe."""
     ingest = getattr(body, "ingest", None)
-    if ingest is None:  # direct `rows` payload - nothing stable to key on
+    # Direct `rows` payload (nothing stable to key on), or an Ask AI what-if.
+    if ingest is None or getattr(body, "_skip_cache", False):
         return run()
     key = model + json.dumps(
         body.model_dump(include=_ENGINE_KEY_FIELDS, mode="json"), sort_keys=True, default=str
@@ -2501,6 +2536,13 @@ def analyse_rental(body: RentalAnalyseBody) -> dict[str, Any]:
             "general": c["general_data"],
             "assetView": _frame_to_records(c["av"].reset_index()),
             "cohortRows": _frame_to_records(c["filtered"].reset_index()),
+            # Margin / lease tenor per cohort for the UE Overview charts, on the
+            # same cohorts as cohortRows.
+            "ueCohortRows": _frame_to_records(
+                rental_ue_by_cohort(c["processed"], c["gi_calc"]).pipe(
+                    lambda u: u[u["cohort"].isin(c["filtered"]["cohort"])]
+                )
+            ),
             # High-level repayment curve (mob vs % avg collection) - the rental UE
             # tab's "High level repayment curve" chart + table, mirroring app.py's
             # tabs[3] (Unit Economics Analysis).
@@ -3071,6 +3113,8 @@ class ChatMessage(BaseModel):
 
 class LendingChatBody(LendingAnalyseBody):
     question: str
+    # Set on Ask AI what-if copies so they never replace the cached real run.
+    _skip_cache: bool = PrivateAttr(default=False)
     history: list[ChatMessage] = Field(default_factory=list)
     userContext: str = ""
     documents: list[ContextDocument] = Field(default_factory=list)
@@ -3084,6 +3128,8 @@ class LendingChatBody(LendingAnalyseBody):
 
 class RentalChatBody(RentalAnalyseBody):
     question: str
+    # Set on Ask AI what-if copies so they never replace the cached real run.
+    _skip_cache: bool = PrivateAttr(default=False)
     history: list[ChatMessage] = Field(default_factory=list)
     userContext: str = ""
     documents: list[ContextDocument] = Field(default_factory=list)
@@ -3091,9 +3137,168 @@ class RentalChatBody(RentalAnalyseBody):
 
 class RevolvingChatBody(RevolvingAnalyseBody):
     question: str
+    # Set on Ask AI what-if copies so they never replace the cached real run.
+    _skip_cache: bool = PrivateAttr(default=False)
     history: list[ChatMessage] = Field(default_factory=list)
     userContext: str = ""
     documents: list[ContextDocument] = Field(default_factory=list)
+
+
+# Ask AI what-ifs: the inputs a question may override, per model, as
+# (body attribute, its model). Only numeric fields are offered, and the
+# engine re-runs with them - the AI never supplies a figure.
+_WHATIF_SECTIONS: dict[str, list[tuple[str, type[BaseModel]]]] = {
+    "lending": [
+        ("generalInputs", GeneralInputsBody),
+        ("ueModelInputs", UeModelInputsBody),
+        ("ltvCalculator", LtvCalcBody),
+    ],
+    "rental": [("generalInputs", RentalGeneralInputsBody)],
+    "revolving": [("generalInputs", RevolvingGeneralInputsBody)],
+}
+
+
+def _default_ue_model_inputs() -> UeModelInputsBody:
+    d = UE_MODEL_COST_DEFAULTS
+    return UeModelInputsBody(
+        upfrontCostPct=d["upfront_cost_pct"] / 100,
+        ongoingCostPct=d["ongoing_cost_pct"] / 100,
+        financingCostPct=d["financing_cost_pct"] / 100,
+        facilityFeePct=d["facility_fee_pct"] / 100,
+        hedgeCostPct=d["hedge_cost_pct"] / 100,
+    )
+
+
+def _whatif_section(body: BaseModel, attr: str, cls: type[BaseModel]) -> BaseModel:
+    """The section as the user has it, or its defaults when untouched."""
+    current = getattr(body, attr)
+    if current is not None:
+        return current
+    return _default_ue_model_inputs() if cls is UeModelInputsBody else cls()
+
+
+# Numeric, but only read when another (non-numeric) choice is set, so a
+# what-if on it alone would change nothing.
+_WHATIF_EXCLUDED = {"ueModelInputs.lossInputPct"}
+
+
+def _is_numeric_field(annotation: Any) -> bool:
+    args = typing.get_args(annotation) or (annotation,)
+    return any(a in (int, float) for a in args)
+
+
+def _whatif_fields(body: BaseModel, model: str) -> dict[str, Any]:
+    """'section.field' -> current value, for every numeric input."""
+    out: dict[str, Any] = {}
+    for attr, cls in _WHATIF_SECTIONS[model]:
+        section = _whatif_section(body, attr, cls)
+        for name, field in cls.model_fields.items():
+            key = f"{attr}.{name}"
+            if _is_numeric_field(field.annotation) and key not in _WHATIF_EXCLUDED:
+                out[key] = getattr(section, name)
+    return out
+
+
+def _apply_whatif(
+    body: BaseModel, model: str, overrides: dict[str, Any]
+) -> tuple[BaseModel, dict[str, Any], list[str]]:
+    """A copy of `body` with the overrides that pass the input's own
+    validation (ranges, types); returns (copy, applied, rejected names)."""
+    allowed = _whatif_fields(body, model)
+    applied: dict[str, Any] = {}
+    rejected: list[str] = []
+    update: dict[str, BaseModel] = {}
+    for attr, cls in _WHATIF_SECTIONS[model]:
+        data = _whatif_section(body, attr, cls).model_dump()
+        for key, value in overrides.items():
+            section, _, name = key.partition(".")
+            if section != attr:
+                continue
+            ok = key in allowed and isinstance(value, (int, float)) and not isinstance(value, bool)
+            if ok:
+                try:
+                    cls.model_validate({**data, name: value})
+                except ValidationError:
+                    ok = False
+            if ok:
+                data[name] = value
+                applied[key] = value
+            else:
+                rejected.append(key)
+        if any(k.startswith(f"{attr}.") for k in applied):
+            update[attr] = cls.model_validate(data)
+    rejected += [k for k in overrides if k not in applied and k not in rejected]
+    new = body.model_copy(update=update)
+    new._skip_cache = True
+    return new, applied, rejected
+
+
+def _chat_answer(body: BaseModel, model: str, build_context) -> dict[str, Any]:
+    """Answer an Ask AI question. When it asks for a what-if on an input, the
+    engine re-runs with that input changed and the AI is given both results."""
+    history = [msg.model_dump() for msg in body.history]
+    context = build_context(body)
+    fields = _whatif_fields(body, model)
+    overrides = _extract_whatif(body.question, history, fields)
+    whatif = None
+    if overrides:
+        alt, applied, rejected = _apply_whatif(body, model, overrides)
+        lines = [
+            "",
+            "## What-if scenario (hypothetical - recomputed by the app with the inputs below "
+            "changed; the actual portfolio figures are the sections above)",
+        ]
+        lines += [f"Changed: {k}: {fields[k]} -> {v}" for k, v in applied.items()]
+        if rejected:
+            lines.append(
+                "Could not apply (not an input, or outside its allowed range): "
+                + ", ".join(rejected)
+            )
+        if applied:
+            lines.append(build_context(alt, with_docs=False))
+        context += "\n".join(lines)
+        whatif = {
+            "changes": [
+                {
+                    "input": _whatif_label(k),
+                    "from": _whatif_value_text(k, fields[k]),
+                    "to": _whatif_value_text(k, v),
+                }
+                for k, v in applied.items()
+            ],
+            "rejected": [_whatif_label(k) for k in rejected],
+        }
+    try:
+        answer = _ask_data_chatbot(body.question, context, history)
+    except (RuntimeError, requests.RequestException) as exc:
+        raise _ai_error(exc) from exc
+    # `whatif` drives the Ask AI tab's banner: which inputs the answer changed.
+    return {"answer": answer, "whatif": whatif}
+
+
+_WHATIF_SECTION_LABELS = {
+    "generalInputs": "General Inputs",
+    "ueModelInputs": "UE Model",
+    "ltvCalculator": "LTV Calculator",
+}
+
+
+def _whatif_label(key: str) -> str:
+    """'generalInputs.fundingCostPct' -> 'General Inputs: Funding Cost %'."""
+    section, _, name = key.partition(".")
+    words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name).replace("Pct", "%")
+    words = re.sub(r"\b(lgd|ltv|ue|fx)\b", lambda w: w.group(0).upper(), words, flags=re.I)
+    return f"{_WHATIF_SECTION_LABELS.get(section, section)}: {words[:1].upper()}{words[1:]}"
+
+
+def _whatif_value_text(key: str, value: Any) -> str:
+    """Rates as percentages (they are held as decimals), everything else as is."""
+    if value is None:
+        return "blank"
+    name = key.partition(".")[2]
+    if re.search(r"Pct|Rate|Percentile|Haircut|Weight|^lgd$", name):
+        return f"{value * 100:g}%"
+    return f"{value:g}"
 
 
 def _ai_error(exc: Exception) -> HTTPException:
@@ -3350,54 +3555,51 @@ def _build_lending_chat_context_lite(
     return "\n".join(lines)
 
 
+def _chat_user_context(body: BaseModel, with_docs: bool) -> str:
+    # Same 60000/15000 truncation app.py's chat tab uses
+    # (_ai_context_text(max_chars=60000, per_doc=15000)). A what-if copy
+    # skips it: the documents are already in the real run's context.
+    if not with_docs:
+        return ""
+    return document_text.combine_context_text(
+        body.userContext, [d.model_dump() for d in body.documents], max_chars=60000, per_doc=15000
+    )
+
+
+def _lending_chat_context(body: LendingChatBody, with_docs: bool = True) -> str:
+    df, fx_warning, c = _lending_pipeline(body)
+    ue_data, ltv_data = c["ue"].as_dict(), c["ltv"].as_dict()
+    checks = _lending_data_quality_checks(
+        df, c["cohorts"], LENDING_DQ_CONFIG, c["gi"], c["filtered"]
+    )
+    return _build_lending_chat_context_lite(
+        c,
+        ue_data,
+        ltv_data,
+        checks,
+        _chat_user_context(body, with_docs),
+        fx_warning=fx_warning,
+        ltv_calc=body.ltvCalculator,
+        ue_model_inputs=body.ueModelInputs,
+    )
+
+
 @app.post("/api/ai/chat/lending")
 def ai_chat_lending(body: LendingChatBody) -> dict[str, Any]:
     """Ask AI, Lending model. Builds an aggregate-only text context of every
     figure the Lending screens show (never raw loan rows - see
     _build_lending_chat_context_lite) and forwards the question to
     ai_client._ask_data_chatbot."""
-    df, fx_warning, c = _lending_pipeline(body)
-    ue_data, ltv_data = c["ue"].as_dict(), c["ltv"].as_dict()
-    checks = _lending_data_quality_checks(
-        df, c["cohorts"], LENDING_DQ_CONFIG, c["gi"], c["filtered"]
-    )
-    # Same 60000/15000 truncation app.py's chat tab uses
-    # (_ai_context_text(max_chars=60000, per_doc=15000)).
-    user_context = document_text.combine_context_text(
-        body.userContext, [d.model_dump() for d in body.documents], max_chars=60000, per_doc=15000
-    )
-    context = _build_lending_chat_context_lite(
-        c,
-        ue_data,
-        ltv_data,
-        checks,
-        user_context,
-        fx_warning=fx_warning,
-        ltv_calc=body.ltvCalculator,
-        ue_model_inputs=body.ueModelInputs,
-    )
-    try:
-        answer = _ask_data_chatbot(body.question, context, [m.model_dump() for m in body.history])
-    except (RuntimeError, requests.RequestException) as exc:
-        raise _ai_error(exc) from exc
-    return {"answer": answer}
+    return _chat_answer(body, "lending", _lending_chat_context)
 
 
-@app.post("/api/ai/chat/rental")
-def ai_chat_rental(body: RentalChatBody) -> dict[str, Any]:
-    """Ask AI, Rental & Subscription model. Unlike the lending endpoint, this
-    calls the real, unmodified scripts/chat_context.py builder directly -
-    every object it needs (gi/df/av/cohorts/ue/ltv/churn/ts) already comes
-    out of _compute_rental, no reduced version required."""
+def _rental_chat_context(body: RentalChatBody, with_docs: bool = True) -> str:
     df, _, c = _rental_pipeline(body)
     ue_data, ltv_data, churn_data = c["ue"].as_dict(), c["ltv"].as_dict(), c["churn"].as_dict()
     checks = _rental_data_quality_checks(
         df, c["cohorts"], RENTAL_DQ_CONFIG, c["gi"], c["filtered"], ue_data
     )
-    user_context = document_text.combine_context_text(
-        body.userContext, [d.model_dump() for d in body.documents], max_chars=60000, per_doc=15000
-    )
-    context = _build_rental_chat_context(
+    return _build_rental_chat_context(
         c["gi"],
         c["processed"],
         c["av"],
@@ -3407,26 +3609,31 @@ def ai_chat_rental(body: RentalChatBody) -> dict[str, Any]:
         churn_data,
         c["ts"],
         checks,
-        user_context,
+        _chat_user_context(body, with_docs),
     )
-    try:
-        answer = _ask_data_chatbot(body.question, context, [m.model_dump() for m in body.history])
-    except (RuntimeError, requests.RequestException) as exc:
-        raise _ai_error(exc) from exc
-    return {"answer": answer}
 
 
-@app.post("/api/ai/chat/revolving")
-def ai_chat_revolving(body: RevolvingChatBody) -> dict[str, Any]:
-    """Ask AI, Revolving Lending model. The context is the monthly aggregates
-    and every figure the Revolving tabs show - the tape is already one row
-    per month, so no loan-level data exists to leak."""
+@app.post("/api/ai/chat/rental")
+def ai_chat_rental(body: RentalChatBody) -> dict[str, Any]:
+    """Ask AI, Rental & Subscription model. Unlike the lending endpoint, this
+    calls the real, unmodified scripts/chat_context.py builder directly -
+    every object it needs (gi/df/av/cohorts/ue/ltv/churn/ts) already comes
+    out of _compute_rental, no reduced version required."""
+    return _chat_answer(body, "rental", _rental_chat_context)
+
+
+# The Revolving calculation write-up, given to Ask AI so it can explain how
+# each figure is built.
+_REVOLVING_CALCULATIONS = (
+    Path(__file__).resolve().parent.parent / "scripts" / "revolving_analysis" / "CALCULATIONS.md"
+).read_text(encoding="utf-8")
+
+
+def _revolving_chat_context(body: RevolvingChatBody, with_docs: bool = True) -> str:
     _, _, c = _revolving_pipeline(body)
     perf = c["performance"]
     s = c["eclSummary"]
-    user_context = document_text.combine_context_text(
-        body.userContext, [d.model_dump() for d in body.documents], max_chars=60000, per_doc=15000
-    )
+    user_context = _chat_user_context(body, with_docs)
     lines = [
         "# Revolving Lending portfolio",
         f"As-of month {s['asOfMonth']}; roll-rate model {s['method']}; LGD {c['lgdUsed']}.",
@@ -3456,15 +3663,19 @@ def ai_chat_revolving(body: RevolvingChatBody) -> dict[str, Any]:
         *[f"- ({q['level']}) {q['message']}" for q in c["qualityChecks"]],
         *[f"- (warning) {w}" for w in c["warnings"]],
     ]
+    if with_docs:
+        lines += ["", "## How each figure is calculated", _REVOLVING_CALCULATIONS]
     if user_context.strip():
         lines += ["", "## User-provided context about this dataset", user_context.strip()]
-    try:
-        answer = _ask_data_chatbot(
-            body.question, "\n".join(lines), [m.model_dump() for m in body.history]
-        )
-    except (RuntimeError, requests.RequestException) as exc:
-        raise _ai_error(exc) from exc
-    return {"answer": answer}
+    return "\n".join(lines)
+
+
+@app.post("/api/ai/chat/revolving")
+def ai_chat_revolving(body: RevolvingChatBody) -> dict[str, Any]:
+    """Ask AI, Revolving Lending model. The context is the monthly aggregates
+    and every figure the Revolving tabs show - the tape is already one row
+    per month, so no loan-level data exists to leak."""
+    return _chat_answer(body, "revolving", _revolving_chat_context)
 
 
 def _infer_model_key(mapping: dict[str, Any]) -> str:
@@ -3513,6 +3724,7 @@ def _restore_payload(profile: dict[str, Any]) -> dict[str, Any]:
             # When present, the frontend renders this straight away instead of
             # re-running the engine - see save_profile's analysisResult.
             "analysisResult": profile.get("analysis_result"),
+            "viewState": profile.get("view_state") or {},
         }
     )
 
@@ -3592,6 +3804,8 @@ class CreateShareBody(BaseModel):
     chatHistory: list[ChatMessage] = Field(default_factory=list)
     analysisContext: str = ""
     analysisResult: dict[str, Any] | None = None
+    # LTV calculator / UE Model / cohort selection / custom charts / dedupe.
+    viewState: dict[str, Any] = Field(default_factory=dict)
 
 
 @app.post("/api/share")
@@ -3613,6 +3827,7 @@ def create_share(
         analysis_context=body.analysisContext,
         analysis_result=body.analysisResult,
         ingest_info=INGEST_INFO.get(body.ingestId),
+        view_state=body.viewState,
     )
     return {"token": token}
 
@@ -3649,7 +3864,7 @@ def auth_me(request: Request) -> dict[str, Any]:
     return {
         "email": session["email"],
         "name": session["name"],
-        "gdrive": session["sid"] in _GOOGLE_TOKENS,
+        "gdrive": bool(_service_account_info()) or session["sid"] in _GOOGLE_TOKENS,
     }
 
 
@@ -3671,7 +3886,7 @@ class DummySignInBody(BaseModel):
 
 
 @app.post("/api/auth/dummy")
-def dummy_sign_in(body: DummySignInBody, response: Response) -> dict[str, str]:
+def dummy_sign_in(body: DummySignInBody, response: Response) -> dict[str, Any]:
     """Set the remember-me cookie for the self-declared "temporary sign-in"
     fallback (shown when Google isn't configured - see LoginScreen.tsx).
     Identity here is unverified by design, so the cookie just remembers
@@ -3681,7 +3896,9 @@ def dummy_sign_in(body: DummySignInBody, response: Response) -> dict[str, str]:
     if not email:
         raise HTTPException(status_code=400, detail="Email is required.")
     _set_react_session_cookie(response, email, email)
-    return {"email": email, "name": email}
+    # Same Drive flag as /api/auth/me: the service account gives Drive access
+    # without a Google sign-in.
+    return {"email": email, "name": email, "gdrive": bool(_service_account_info())}
 
 
 @app.get("/api/auth/google/login-url")
@@ -3745,8 +3962,68 @@ def gdrive_files_list(request: Request) -> list[dict[str, Any]]:
     """List the signed-in user's Drive files that can be analysed
     (spreadsheets, CSV, Excel), newest first - backs the React app's
     "From Google Drive" picker (app.py's _list_drive_files)."""
-    sid = _require_gdrive_session(request)
-    return _list_drive_files(_gdrive_access_token(sid))
+    session = _require_gdrive_session(request)
+    return _list_drive_files(_gdrive_access_token(session))
+
+
+_DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
+
+
+def _drive_get(access_token: str, path: str, params: dict[str, Any]) -> dict[str, Any]:
+    resp = requests.get(
+        f"https://www.googleapis.com/drive/v3/{path}",
+        params=params,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+        verify=_ca_bundle_path(),
+    )
+    if resp.status_code == 401:
+        raise HTTPException(
+            status_code=401,
+            detail="Google Drive access expired - sign out and back in to reconnect.",
+        )
+    resp.raise_for_status()
+    return resp.json()
+
+
+@app.get("/api/auth/gdrive/browse")
+def gdrive_browse(request: Request, folder: str = "", q: str = "") -> list[dict[str, Any]]:
+    """One level of the Drive folder browser. No folder/q: the top level -
+    every Shared Drive visible, plus "Shared with me" (and "My Drive" for a
+    per-user OAuth token; the service account's own My Drive is empty).
+    folder=<id> (or "shared"): its subfolders + importable files, folders
+    first. q: name search across everything visible (files only)."""
+    session = _require_gdrive_session(request)
+    token = _gdrive_access_token(session)
+    if not folder and not q:
+        drives = _drive_get(token, "drives", {"pageSize": 100, "fields": "drives(id,name)"})
+        top = [] if _service_account_info() else [{"id": "root", "name": "My Drive"}]
+        top += [{"id": d["id"], "name": d["name"]} for d in drives.get("drives", [])]
+        top.append({"id": "shared", "name": "Shared with me"})
+        return [{**t, "mimeType": _DRIVE_FOLDER_MIME, "modifiedTime": ""} for t in top]
+    browse_types = _DRIVE_FILE_QUERY.replace(
+        "(mimeType=", f"(mimeType='{_DRIVE_FOLDER_MIME}' or mimeType=", 1
+    )
+    if q:
+        name = q.replace("\\", "\\\\").replace("'", "\\'")
+        query = f"name contains '{name}' and {_DRIVE_FILE_QUERY}"
+    elif folder == "shared":
+        query = f"sharedWithMe and {browse_types}"
+    else:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", folder):
+            raise HTTPException(status_code=422, detail="Invalid folder id.")
+        query = f"'{folder}' in parents and {browse_types}"
+    params = {
+        "q": query,
+        "pageSize": 100 if q else 1000,
+        "fields": "files(id,name,mimeType,modifiedTime)",
+        "orderBy": "folder,modifiedTime desc",
+        "supportsAllDrives": "true",
+        "includeItemsFromAllDrives": "true",
+    }
+    if folder != "shared":
+        params["corpora"] = "allDrives"
+    return _drive_get(token, "files", params).get("files", [])
 
 
 class GDriveImportBody(BaseModel):
@@ -3758,8 +4035,8 @@ def gdrive_import(body: GDriveImportBody, request: Request) -> dict[str, Any]:
     """Download a chosen Drive file (exporting a Google Sheet as a full
     workbook) and register it as a normal ingest, returning the same
     ingest payload as a local upload - app.py's "My Google Drive" source."""
-    sid = _require_gdrive_session(request)
-    token = _gdrive_access_token(sid)
+    session = _require_gdrive_session(request)
+    token = _gdrive_access_token(session)
     meta = _gdrive_file_meta(token, body.fileId)
     data, name = _download_drive_file(token, meta)
     return _json_safe(_register_ingest(data, name))
@@ -3774,7 +4051,13 @@ def gdrive_link_import(body: GDriveLinkImportBody) -> dict[str, Any]:
     """Import a public Google Sheets / Google Drive share link (must be
     shared with 'Anyone with the link can view' - no token needed) and
     register it as a normal ingest - app.py's "Google Sheets / Drive link"
-    source."""
+    source. With a service account configured, links shared with it (or in
+    a Shared Drive it belongs to) import too, not just public ones."""
+    if _service_account_info():
+        token = _service_account_access_token()
+        meta = _gdrive_file_meta(token, _extract_google_id(body.url.strip()))
+        data, name = _download_drive_file(token, meta)
+        return _json_safe(_register_ingest(data, name))
     data, name = _download_google_sheet(body.url)
     return _json_safe(_register_ingest(data, name))
 

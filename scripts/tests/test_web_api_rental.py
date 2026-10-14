@@ -86,3 +86,30 @@ def test_status_values_lists_every_status_with_a_case_blind_suggestion():
 def test_status_values_requires_a_session():
     client = TestClient(m.app, base_url="https://testserver")
     assert client.post("/api/ingest/status-values", json={}).status_code == 401
+
+
+def test_summary_data_up_to_is_the_last_contract_start_not_the_extraction_date():
+    tape = _tape(["Open", "Open"])
+    tape["start_date"] = pd.to_datetime(["2024-01-01", "2024-03-15"])
+    c = m._compute_rental(tape, m.RentalGeneralInputsBody(extractionDate="2025-01-01"))
+    s = m.rental_summary_metrics(
+        c["processed"], c["av"], c["gi"], c["ue"].as_dict(), c["ltv"].as_dict(), c["ts"]
+    )
+    assert s["dataUpTo"] == "2024-03-15"
+    assert s["dateRangeEnd"] == "2025-01-01"
+
+
+def test_ue_by_cohort_matches_the_portfolio_formulas_per_cohort():
+    from rental_analysis.ue_analysis import UeAnalysis, ue_by_cohort
+
+    tape = _tape(["Open"] * 3)
+    tape["start_date"] = pd.to_datetime(["2024-01-05", "2024-01-20", "2024-02-10"])
+    tape["cost_of_asset"] = [1000.0, 3000.0, 2000.0]
+    c = m._compute_rental(tape, m.RentalGeneralInputsBody(extractionDate="2025-01-01"))
+    df = c["processed"]
+    rows = ue_by_cohort(df, c["gi_calc"]).set_index("cohort")
+    jan = df[df["contract_cohort"] == pd.Timestamp("2024-01-01")]
+    ue_jan = UeAnalysis(jan, None, None, c["gi_calc"])
+    assert list(rows.index) == [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-02-01")]
+    assert rows.loc["2024-01-01", "margin"] == pytest.approx(ue_jan.margin())
+    assert rows.loc["2024-01-01", "lease_tenor_m"] == pytest.approx(ue_jan.lease_tenor_m())

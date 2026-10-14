@@ -22,6 +22,7 @@ import {
   type RevolvingResponse,
   type RestorePayload,
   type UeModelAssumptions,
+  type WhatIf,
 } from '../api/engine';
 import { aggregateChartData } from '../lib/chartAggregate';
 import { friendlyError } from '../lib/friendlyError';
@@ -133,7 +134,7 @@ type Action =
   | { type: 'analysisFail'; error: string }
   | { type: 'toggleModel'; modelKey: ModelKey }
   | { type: 'chatStart'; question: string }
-  | { type: 'chatDone'; answer: string }
+  | { type: 'chatDone'; answer: string; whatif?: WhatIf | null }
   | { type: 'chatFail'; error: string }
   | { type: 'addChartCard'; card: ChartCardSpec }
   | { type: 'updateChartCard'; id: number; patch: Partial<ChartCardSpec> }
@@ -248,6 +249,7 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, derivedColumns: action.columns };
     case 'restoreProfile': {
       const { payload } = action;
+      const view = payload.viewState ?? {};
       const mappings: ColumnMapping[] = Object.entries(payload.mapping).map(
         ([fieldKey, sourceColumn]) => ({ fieldKey, sourceColumn }),
       );
@@ -299,17 +301,17 @@ function reducer(state: AppState, action: Action): AppState {
               status: 'done',
             }
           : { rows: 0, cohorts: 0, lossRate: 0, ltv: 0, status: 'idle' },
-        customCharts: [],
+        customCharts: (view.customCharts as ChartCardSpec[] | undefined) ?? [],
         sessionId: action.sessionId,
         dealLabel: payload.label,
         savedAt: null,
         saveError: null,
         shareUrl: null,
         shareError: null,
-        dedupeActive: false,
-        selectedCohorts: null,
-        ltvInputs: initialState.ltvInputs,
-        ueModelInputs: null,
+        dedupeActive: (view.dedupeActive as boolean | undefined) ?? false,
+        selectedCohorts: (view.selectedCohorts as string[] | null | undefined) ?? null,
+        ltvInputs: { ...initialState.ltvInputs, ...(view.ltvInputs as Partial<LtvCalcInputs> | undefined) },
+        ueModelInputs: (view.ueModelInputs as UeModelAssumptions | null | undefined) ?? null,
       };
     }
     case 'saveStart':
@@ -426,7 +428,7 @@ function reducer(state: AppState, action: Action): AppState {
     case 'chatDone':
       return {
         ...state,
-        chatHistory: [...state.chatHistory, { role: 'assistant', content: action.answer }],
+        chatHistory: [...state.chatHistory, { role: 'assistant', content: action.answer, whatif: action.whatif ?? null }],
         chatRunning: false,
       };
     case 'chatFail':
@@ -697,7 +699,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const history = state.chatHistory;
       dispatch({ type: 'chatStart', question });
       try {
-        const { answer } = state.modelKey === 'revolving'
+        const { answer, whatif } = state.modelKey === 'revolving'
           ? await askRevolvingAi({
               ingest,
               generalInputs: state.generalInputs.revolving ?? null,
@@ -732,7 +734,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               }
             : {}),
         });
-        dispatch({ type: 'chatDone', answer });
+        dispatch({ type: 'chatDone', answer, whatif });
       } catch (err) {
         dispatch({
           type: 'chatFail',
@@ -802,6 +804,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
           chatHistory: state.chatHistory,
           analysisContext: state.analysisContext,
           analysisResult: activeResult(),
+          viewState: {
+            ltvInputs: state.ltvInputs,
+            ueModelInputs: state.ueModelInputs,
+            selectedCohorts: state.selectedCohorts,
+            customCharts: state.customCharts,
+            dedupeActive: state.dedupeActive,
+          },
         });
         const url = `${window.location.origin}${window.location.pathname}?share=${token}`;
         dispatch({ type: 'shareDone', url });

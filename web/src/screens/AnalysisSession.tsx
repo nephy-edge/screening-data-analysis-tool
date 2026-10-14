@@ -30,7 +30,7 @@ import {
   Legend,
   ReferenceLine,
 } from 'recharts';
-import type { EscalateResult, IngestData, QualityCheck, SummaryChartRow, UeModelAssumptions } from '../api/engine';
+import type { EscalateResult, IngestData, QualityCheck, SummaryChartRow, UeModelAssumptions, WhatIf } from '../api/engine';
 import { escalateVariance, fetchIngestData } from '../api/engine';
 import {
   aggregateChartData,
@@ -316,56 +316,126 @@ function LendingSummaryTab() {
   );
 }
 
+/** The Rental Summary in the Lending / Revolving layout: five headline
+ * cards, then the Portfolio Snapshot table beside the cohort churn chart. */
 function RentalSummaryTab() {
   const { state } = useAppStore();
-  const m = state.rentalResponse?.summaryMetrics;
+  const resp = state.rentalResponse;
+  const m = resp?.summaryMetrics;
   if (!m) return <Alert tone="info">Run analysis to see the portfolio summary.</Alert>;
-  const fxWarning = state.rentalResponse?.fxWarning;
+  const fxWarning = resp?.fxWarning;
+  const avgChurn = num(resp?.churn?.avg_churn);
   return (
     <>
       {fxWarning ? <Alert tone="warning">{fxWarning}</Alert> : null}
       <div className="sd-grid sd-grid--metrics">
-        <Metric label="Contracts" value={fint(m.contracts)} hint="Number of unique assets in the portfolio." />
-        <Metric label="MRR" value={fmoney(m.mrr, '')} hint="Monthly recurring revenue from active contracts." />
-        <Metric label="Avg MRR per Active Contract" value={fmoney(m.avgMrrPerActiveContract, '')} hint="Total MRR divided by the number of open (active) contracts." />
-        <Metric label="Average Useful Life (m)" value={fdec(m.avgUsefulLifeM)} hint="Principal-weighted average useful asset life, in months." />
+        <Metric label="Data up to" value={String(m.dataUpTo ?? '—')} hint="Latest contract start date in the tape." />
+        <Metric label="Total Cost of Assets" value={fmoney(m.totalCostOfAssets, '')} hint="Sum of the cost of asset on every contract." />
+        <Metric label="MRR" value={fmoney(m.mrr, '')} hint="Sum of the monthly expected payment on every open contract." />
+        <Metric label="95th %ile Churn" value={fpct(m.pctile95Churn)} hint="Each cohort month: contracts that stopped that month ÷ contracts active that month. This is the 95th percentile of those monthly rates (cohorts with more active leases than the minimum)." />
+        <Metric label="MRR / Average Cost" value={fpct(m.mrrOverAvgCost)} hint="Sum of monthly expected payments (all contracts) ÷ sum of asset cost." />
       </div>
-      <div className="sd-grid sd-grid--metrics">
-        <Metric label="95th %ile Churn" value={fpct(m.pctile95Churn)} hint="The churn level that only 5% of cohorts exceed." />
-        <Metric label="Stressed Churn" value={fpct(m.stressedChurn)} hint="Churn under the stress assumptions (e.g. adverse FX/credit scenario)." />
-        <Metric label="Contracts Churned" value={fpct(m.contractsChurned)} hint="Share of contracts that have churned (closed) relative to all contracts." />
-        <Metric label="Defaulted contracts > 3mo" value={na(m.defaultedGt3m) ?? fdec(m.defaultedGt3m, 0)} hint="Number of contracts in default for more than 3 months." />
-        <Metric label="% recovered" value={fpct(m.pctRecovered)} hint="Share of defaulted value that has been recovered." />
+      <div className="sd-grid sd-grid--2">
+        <div>
+          <h2 className="sd-h2">Portfolio Snapshot</h2>
+          <SnapshotTable
+            rows={[
+              ['Date Range', `${m.dateRangeStart} to ${m.dateRangeEnd}`, 'Earliest contract start date to the extraction (as-of) date.'],
+              ['Contracts', fint(m.contractRecords), 'Count of contract rows in the tape.'],
+              ['Unique Assets', fint(m.uniqueAssets), 'Count of distinct asset IDs.'],
+              ['Total Collected', fmoney(m.totalCollected), 'Sum of total paid on every contract.'],
+              ['Avg MRR per Active Contract', fmoney(m.avgMrrPerActiveContract), 'MRR ÷ number of open contracts.'],
+              ['Downpayment %', fpct(m.downpaymentPct), 'Sum of downpayments ÷ sum of asset cost.'],
+              ['Lease Tenor (m)', fdec(m.leaseTenorM), "Each contract's term (start to expected end), weighted by asset cost, in months (days ÷ 30.5)."],
+              ['Average Useful Life (m)', fdec(m.avgUsefulLifeM), "Each contract's term (start to expected end), weighted by asset cost, in months - currently the same formula as Lease Tenor."],
+              ['Margin', fpct(m.margin), 'Average total value leased per asset ÷ average original asset cost, minus 1.'],
+              ['PvD', fpct(m.pvd), 'Sum of total paid ÷ sum of amount expected to date (all contracts).'],
+              ['Utilisation Rate', fpct(m.utilisationRate), 'Assets with an open contract ÷ all assets.'],
+              ['Historical % Collected on Principal', fpct(m.historicalPctCollectedOnPrincipal), 'For assets that reached term: (paid + recovered) ÷ original asset cost. The lowest of the four template estimates is shown.'],
+              ['Average Collection Rate', fpct(m.avgCollectionRate), 'Open contracts only: sum of total paid ÷ sum of amount expected to date.'],
+              ['Contracts Churned', fpct(m.contractsChurned), 'Contracts with Closed status ÷ all contracts.'],
+              ['Average Churn (m)', fpct(avgChurn), 'Average of the monthly churn rates (stopped ÷ active) across cohorts with more active leases than the minimum.'],
+              ['Stressed Churn', fpct(m.stressedChurn), '95th %ile churn × stress multiplier (General Inputs), capped at 100%.'],
+              ['Defaulted Contracts > 3m', na(m.defaultedGt3m) ?? fdec(m.defaultedGt3m, 0), 'Count of contracts closed at least N months (General Inputs) before the extraction date.'],
+              ['% Recovered', fpct(m.pctRecovered), 'Defaulted contracts whose asset was redeployed ÷ all defaulted contracts (a count, not value).'],
+              ['Loss Rate (non-recoverability)', fpct(m.lossNonRecoverability), '1 − % Recovered.'],
+              ['Asset LTV (max 95%)', na(m.assetLtv) ?? fpct(m.assetLtv, 1), '(95th %ile recoverability + subscription revenue support) ÷ (1 + FX devaluation), capped at 95%.'],
+              ['Net UE Margin', fpct(m.netUeMargin), "Margin − cost of funding and direct costs over the asset's life."],
+              ['Asset DSLP30', fpct(m.assetDslp30), 'Initial value of active assets with no payment in the last 30 days ÷ initial value of all active assets. Needs a last payment date column.'],
+              ['Receivables Coverage (180d)', fpct(m.receivablesCoverage180d), 'Performing receivables over the next 180 days ÷ debt service due in 180 days (entered in General Inputs).'],
+            ]}
+          />
+        </div>
+        <RentalCohortChurnChart rows={resp?.cohortRows ?? []} avgChurn={avgChurn} pctile95={num(m.pctile95Churn)} />
       </div>
-      <div className="sd-grid sd-grid--metrics">
-        <Metric label="Loss (non-recoverability)" value={fpct(m.lossNonRecoverability)} hint="Expected loss from defaulted value that is not recoverable." />
-        <Metric label="MRR / average cost" value={fpct(m.mrrOverAvgCost)} hint="Monthly recurring revenue relative to average asset cost." />
-        <Metric label="Average Collection Rate" value={fpct(m.avgCollectionRate)} hint="Share of expected payments actually collected." />
-      </div>
-      <h2 className="sd-h2">LTV &amp; UE highlights</h2>
-      <div className="sd-grid sd-grid--metrics">
-        <Metric label="Asset LTV (max 95%)" value={na(m.assetLtv) ?? fpct(m.assetLtv, 1)} hint="Loan-to-value against asset value, capped at 95%." />
-        <Metric label="Net UE margin" value={fpct(m.netUeMargin)} hint="Net unit-economics margin after costs." />
-        <Metric label="Asset DSLP30" value={fpct(m.assetDslp30)} hint="Asset-level days-sales-late over the last 30 days exposure." />
-        <Metric label="Receivables Coverage (180d)" value={fpct(m.receivablesCoverage180d)} hint="Coverage of expected receivables over a 180-day horizon." />
-      </div>
-      <h2 className="sd-h2">Portfolio Snapshot</h2>
-      <SnapshotTable
-        rows={[
-          ['Date Range', `${m.dateRangeStart} to ${m.dateRangeEnd}`, 'From the earliest contract start date to the tape as-of date.'],
-          ['Contracts', fint(m.contractRecords), 'Total number of contract records in the tape.'],
-          ['Unique Assets', fint(m.uniqueAssets), 'Total number of unique assets.'],
-          ['Total Collected', fmoney(m.totalCollected), 'Total cash collected from customers to date.'],
-          ['Total Cost of Assets', fmoney(m.totalCostOfAssets), 'Total acquisition cost of the assets.'],
-          ['Downpayment %', fpct(m.downpaymentPct), 'Total downpayments as a share of total asset cost.'],
-          ['Lease Tenor (m)', fdec(m.leaseTenorM), 'Cost-weighted average lease term in months.'],
-          ['Margin', fpct(m.margin), 'Total scheduled payments over asset cost minus 1.'],
-          ['PvD', fpct(m.pvd), 'Total paid over total expected to date.'],
-          ['Utilisation Rate', fpct(m.utilisationRate), 'Share of assets currently on an open contract.'],
-          ['Historical % Collected on Principal', fpct(m.historicalPctCollectedOnPrincipal), 'Collections (incl. recovery) over the initial asset cost for assets that reached term.'],
-        ]}
-      />
     </>
+  );
+}
+
+/** The rental counterpart of CohortLossRateChart: value of leases started
+ * per cohort as bars, monthly churn rate as the line. */
+function RentalCohortChurnChart({ rows, avgChurn, pctile95 }: {
+  rows: Array<Record<string, unknown>>;
+  avgChurn: number | null;
+  pctile95: number | null;
+}) {
+  const data = rows.map((r) => ({
+    cohort: str(r.cohort).slice(0, 7),
+    value: num(r.value_of_leases),
+    churn: num(r.churn_rate),
+  }));
+  if (!data.length) return null;
+  return (
+    <div className="sd-card">
+      <h2 className="sd-h2">Cohort Churn Rates</h2>
+      <ResponsiveContainer width="100%" height={340}>
+        <ComposedChart data={data} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
+          <CartesianGrid stroke="#e7ecee" vertical={false} />
+          <XAxis dataKey="cohort" tick={{ fontSize: 11, fill: '#666' }} />
+          <YAxis
+            yAxisId="left"
+            tick={{ fontSize: 11, fill: '#666' }}
+            tickFormatter={(v) => (typeof v === 'number' ? v.toLocaleString(undefined, { notation: 'compact' }) : String(v))}
+          />
+          <YAxis
+            yAxisId="right"
+            orientation="right"
+            tick={{ fontSize: 11, fill: '#666' }}
+            tickFormatter={(v) => (typeof v === 'number' ? `${(v * 100).toFixed(0)}%` : String(v))}
+          />
+          <Tooltip
+            formatter={(v, name) =>
+              name === 'Churn Rate' && typeof v === 'number' ? pct(v, 2) : typeof v === 'number' ? fnum(v) : v
+            }
+          />
+          <Legend />
+          <Bar yAxisId="left" dataKey="value" fill="#B8BEC6" name="Value of Leases" />
+          {avgChurn !== null && (
+            <ReferenceLine
+              yAxisId="right"
+              y={avgChurn}
+              stroke="#6B7280"
+              strokeDasharray="6 6"
+              label={{ value: `Avg: ${pct(avgChurn, 2)}`, position: 'insideTopLeft', fill: '#6B7280', fontSize: 11 }}
+            />
+          )}
+          {pctile95 !== null && (
+            <ReferenceLine
+              yAxisId="right"
+              y={pctile95}
+              stroke="#d62728"
+              strokeDasharray="6 6"
+              label={{ value: `95th %ile: ${pct(pctile95, 2)}`, position: 'insideTopRight', fill: '#d62728', fontSize: 11 }}
+            />
+          )}
+          <Line yAxisId="right" dataKey="churn" stroke="#E8632A" strokeWidth={2.5} dot={{ r: 3 }} name="Churn Rate" connectNulls />
+        </ComposedChart>
+      </ResponsiveContainer>
+      <p className="sd-muted">
+        Grey bars: value of leases started per cohort (cohorts with at least the minimum new leases).
+        Orange line: monthly churn rate. Avg and 95th %ile use cohorts above the minimum active leases.
+      </p>
+    </div>
   );
 }
 
@@ -379,15 +449,19 @@ function SummaryTab() {
 // (the data-quality findings).
 function DataChecksTab() {
   const { state } = useAppStore();
-  const [subTab, setSubTab] = useState<'input' | 'checks'>('input');
+  const [subTab, setSubTab] = useState<'input' | 'checks' | 'asset'>('input');
   const subTabs = [
     { id: 'input', label: 'Data Input' },
+    // Rental only: the per-asset build the checks and covenants rest on.
+    ...(state.modelKey === 'rental' ? [{ id: 'asset', label: 'Asset View' }] : []),
     { id: 'checks', label: 'Checks' },
   ];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <Tabs items={subTabs} value={subTab} onChange={(v) => setSubTab(v as 'input' | 'checks')} />
-      {subTab === 'input' ? <DataInputGridTab /> : <ChecksList />}
+      <Tabs items={subTabs} value={subTab} onChange={(v) => setSubTab(v as 'input' | 'checks' | 'asset')} />
+      {subTab === 'input' && <DataInputGridTab />}
+      {subTab === 'checks' && <ChecksList />}
+      {subTab === 'asset' && <AssetViewTab />}
       {subTab === 'input' && state.modelKey === 'revolving' ? <RevolvingOutputsTab /> : null}
       {subTab === 'checks' && state.modelKey === 'revolving' ? (
         <>
@@ -830,6 +904,13 @@ function LendingCohortsTab() {
       setMasterMatured(response.cohorts);
       setMasterAll(response.cohortsAllLoans);
       setSelected(new Set(response.cohorts.map((r) => str(r['Cohort']))));
+    } else if (masterMatured.length === 0) {
+      // Opened from a share/save made with a selection: only the filtered
+      // result exists, so seed the checklist from it (Clear filter brings
+      // the excluded cohorts back).
+      setMasterMatured(response.cohorts);
+      setMasterAll(response.cohortsAllLoans);
+      setSelected(new Set(state.selectedCohorts));
     }
     // response and state.selectedCohorts change together (a filtered rerun
     // produces both at once) - only the emptiness of the selection matters
@@ -1018,7 +1099,7 @@ function irr(cashflows: number[]): number | null {
 function LendingUeCohortChart({ rows, title, yCol, yFmt, avg, avgLabel, color }: {
   rows: Array<Record<string, unknown>>;
   title: string;
-  yCol: 'Loss Rate' | 'Weighted Avg Term' | 'Interest %' | 'Fee %';
+  yCol: string;
   yFmt: (v: number) => string;
   avg: number | null;
   avgLabel: string;
@@ -1045,78 +1126,163 @@ function LendingUeCohortChart({ rows, title, yCol, yFmt, avg, avgLabel, color }:
   );
 }
 
-/** The rental Unit Economics tab - mirrors app.py's rental tabs[3] ("Unit
- * Economics Analysis"): three grouped metric rows followed by the
- * "High level repayment curve" chart and its table. */
+/** The rental Unit Economics tab, in the Lending / Revolving layout:
+ * Overview, Repayment Curve (with the TS Covenants below it), Churn
+ * Analysis and UE Model sub-tabs. */
 function RentalUnitEconomicsTab() {
   const { state } = useAppStore();
-  const ue = state.rentalResponse?.ue as Record<string, unknown> | undefined;
-  if (!ue) return <Alert tone="info">Run analysis to see unit economics.</Alert>;
-  const curveRows = state.rentalResponse?.curveRows ?? [];
-
-  const metricRow = (items: Array<[string, string, string?]>) => (
-    <div className="sd-grid sd-grid--metrics">
-      {items.map(([label, value, hint]) => (
-        <Metric key={label} label={label} value={value} hint={hint} />
-      ))}
+  const [subTab, setSubTab] = useState<'overview' | 'curve' | 'churn' | 'model'>('overview');
+  const subTabs = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'curve', label: 'Repayment Curve' },
+    { id: 'churn', label: 'Churn Analysis' },
+    { id: 'model', label: 'UE Model' },
+  ];
+  const resp = state.rentalResponse;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <Tabs items={subTabs} value={subTab} onChange={(v) => setSubTab(v as 'overview' | 'curve' | 'churn' | 'model')} />
+      {subTab === 'overview' ? (
+        <RentalUeOverviewTab />
+      ) : subTab === 'churn' ? (
+        <ChurnTab />
+      ) : subTab === 'curve' ? (
+        resp ? (
+          <>
+            <RentalRepaymentCurve rows={resp.curveRows ?? []} observed={num(resp.ue?.monthly_observed_repayment)} />
+            {(resp.curveRows ?? []).length > 0 && <RecordTable rows={resp.curveRows ?? []} />}
+            <TsCovenantsTab />
+          </>
+        ) : (
+          <Alert tone="info">Run analysis to see the repayment curve.</Alert>
+        )
+      ) : (
+        <Alert tone="info">
+          The Rental UE Model (editable cost assumptions, IRR and net unit economics, from the Asset
+          Rental / Subscriptions UE template) is the next step and is not built yet.
+        </Alert>
+      )}
     </div>
   );
+}
+
+/** Rental UE Overview: three grouped metric rows and four per-cohort
+ * charts, each with its portfolio average line. */
+function RentalUeOverviewTab() {
+  const { state } = useAppStore();
+  const resp = state.rentalResponse;
+  const ue = resp?.ue as Record<string, unknown> | undefined;
+  if (!resp || !ue) return <Alert tone="info">Run analysis to see unit economics.</Alert>;
+  const extra = new Map((resp.ueCohortRows ?? []).map((r) => [str(r.cohort), r]));
+  const chart = resp.cohortRows.map((r) => ({
+    Cohort: str(r.cohort).slice(0, 7),
+    PvD: num(r.pvd),
+    Churn: num(r.churn_rate),
+    Margin: num(extra.get(str(r.cohort))?.margin),
+    Tenor: num(extra.get(str(r.cohort))?.lease_tenor_m),
+  }));
+  const pct1 = (v: number) => `${(v * 100).toFixed(1)}%`;
+  const avgChurn = num(resp.churn?.avg_churn);
+
+  const rows: Array<Array<[string, string, string]>> = [
+    [
+      ['Downpayment %', fpct(ue['downpayment_pct'], 1), 'Sum of downpayments ÷ sum of asset cost.'],
+      ['Lease Tenor (m)', fdec(ue['lease_tenor_m']), "Each contract's term (start to expected end), weighted by asset cost, in months (days ÷ 30.5)."],
+      ['Margin', fpct(ue['margin'], 1), 'Average total value leased per asset ÷ average original asset cost, minus 1.'],
+      ['Utilisation Rate', fpct(ue['utilisation_rate'], 1), 'Assets with an open contract ÷ all assets.'],
+    ],
+    [
+      ['PvD', fpct(ue['pvd'], 1), 'Sum of total paid ÷ sum of amount expected to date (all contracts).'],
+      ['Historical % Collected on Principal', fpct(ue['historical_pct_collected_on_principal'], 1), 'For assets that reached term: (paid + recovered) ÷ original asset cost. The lowest of the four template estimates is shown.'],
+      ['Monthly Observed Repayment', fpct(ue['monthly_observed_repayment'], 2), 'Average monthly collection as % of asset cost over months 1-19 on books, weighted by asset cost (repayment curve).'],
+    ],
+    [
+      ['Funding Cost (% p.a.)', fpct(ue['funding_cost_pct'], 2), 'Annual cost of funding, from General Inputs.'],
+      ['Direct Cost (% p.a.)', fpct(ue['direct_cost_pct'], 2), 'Annual direct cost, from General Inputs.'],
+      ['Cost of Funding over Life', fpct(ue['cost_of_funding_over_life_pct'], 2), '(Funding cost + direct cost) × lease tenor ÷ 12.'],
+      ['Net UE Margin', fpct(ue['net_margin'], 1), 'Margin − cost of funding over life.'],
+    ],
+  ];
 
   return (
     <>
-      {metricRow([
-        ['Downpayment %', fpct(ue['downpayment_pct'], 1), 'Share of asset cost paid upfront by the customer.'],
-        ['Lease Tenor (m)', fdec(ue['lease_tenor_m']), 'Average lease term, in months.'],
-        ['Margin', fpct(ue['margin'], 1), 'Unit-economics margin on the lease.'],
-        ['Utilisation Rate', fpct(ue['utilisation_rate'], 1), 'Share of asset value that is being put to use.'],
-      ])}
-      {metricRow([
-        ['PvD', fpct(ue['pvd'], 1), 'Paid-vs-Due ratio (payments received relative to amounts due).'],
-        ['Historical % Collected on Principal', fpct(ue['historical_pct_collected_on_principal'], 1), 'Share of principal that has historically been collected.'],
-        ['Monthly Observed Repayment', fpct(ue['monthly_observed_repayment'], 2), 'Observed monthly repayment rate on the portfolio.'],
-      ])}
-      {metricRow([
-        ['Funding Cost (% p.a.)', fpct(ue['funding_cost_pct'], 2), 'Annualized cost of funding the portfolio.'],
-        ['Direct Cost (% p.a.)', fpct(ue['direct_cost_pct'], 2), 'Annualized direct operating cost as a share of value.'],
-        ['Cost of Funding over Life', fpct(ue['cost_of_funding_over_life_pct'], 2), 'Total funding cost accumulated over the asset life.'],
-        ['Net UE Margin', fpct(ue['net_margin'], 1), 'Net unit-economics margin after funding and direct costs.'],
-      ])}
-
-      {curveRows.length > 0 && (
-        <RentalRepaymentCurve rows={curveRows} />
+      {rows.map((row, i) => (
+        <div key={i} className="sd-grid sd-grid--metrics">
+          {row.map(([label, value, hint]) => (
+            <Metric key={label} label={label} value={value} hint={hint} />
+          ))}
+        </div>
+      ))}
+      {chart.length > 0 && (
+        <div className="sd-grid sd-grid--2">
+          <LendingUeCohortChart rows={chart} title="Margin per Cohort" yCol="Margin" yFmt={pct1} avg={num(ue['margin'])} avgLabel={`Avg: ${pct(num(ue['margin']), 1)}`} color="#2ca02c" />
+          <LendingUeCohortChart rows={chart} title="Lease Tenor per Cohort (m)" yCol="Tenor" yFmt={(v) => v.toFixed(1)} avg={num(ue['lease_tenor_m'])} avgLabel={`Avg: ${fdec(ue['lease_tenor_m'])} m`} color="#2ca02c" />
+          <LendingUeCohortChart rows={chart} title="PvD per Cohort" yCol="PvD" yFmt={pct1} avg={num(ue['pvd'])} avgLabel={`Avg: ${pct(num(ue['pvd']), 1)}`} color="#ff7f0e" />
+          <LendingUeCohortChart rows={chart} title="Churn per Cohort" yCol="Churn" yFmt={pct1} avg={avgChurn} avgLabel={`Avg: ${pct(avgChurn, 1)}`} color="#1f77b4" />
+        </div>
       )}
     </>
   );
 }
 
-/** The rental UE tab's "High level repayment curve" - a line chart of
- * pct_avg_collection by month-on-books (dropping null rows, matching
- * app.py's `curve.dropna(subset=['pct_avg_collection'])`) plus the full
- * curve table. */
-function RentalRepaymentCurve({ rows }: { rows: Array<Record<string, unknown>> }) {
-  const chart = rows
-    .map((r) => ({ mob: num(r['mob']), collection: num(r['pct_avg_collection']) }))
-    .filter((r) => r.mob !== null && r.collection !== null) as Array<{ mob: number; collection: number }>;
+/** The rental UE tab's Repayment Curve sub-tab: the template's "High level
+ * repayment curve" (assets grouped by month on books) as two charts, MOB
+ * buckets with no assets left out. */
+function RentalRepaymentCurve({ rows, observed }: { rows: Array<Record<string, unknown>>; observed: number | null }) {
+  const data = rows
+    .map((r) => ({
+      mob: num(r['mob']),
+      assets: num(r['number_of_contracts']),
+      paidOverCost: num(r['pct_paid_over_cost']),
+      collection: num(r['pct_avg_collection']),
+    }))
+    .filter((r) => r.mob !== null && (r.assets ?? 0) > 0);
+  if (data.length === 0) return <Alert tone="info">No assets to build the repayment curve.</Alert>;
+  const pctTick = (v: unknown) => (typeof v === 'number' ? `${(v * 100).toFixed(0)}%` : String(v));
+  const mobAxis = (
+    <XAxis dataKey="mob" tick={{ fontSize: 11, fill: '#666' }} label={{ value: 'Months on Books', position: 'insideBottom', offset: -5, fontSize: 11 }} />
+  );
   return (
-    <>
-      <h2 className="sd-h2" style={{ marginTop: 16 }}>High level repayment curve</h2>
-      {chart.length > 0 ? (
-        <div className="sd-card">
-          <ResponsiveContainer width="100%" height={350}>
-            <LineChart data={chart} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
-              <CartesianGrid stroke="#e7ecee" vertical={false} />
-              <XAxis dataKey="mob" tick={{ fontSize: 11, fill: '#666' }} label={{ value: 'Month on Books', position: 'insideBottom', offset: -5, fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11, fill: '#666' }} tickFormatter={(v) => (typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : v)} />
-              <Tooltip formatter={(v) => (typeof v === 'number' ? `${(v * 100).toFixed(2)}%` : v)} />
-              <Line dataKey="collection" stroke="#155b54" strokeWidth={2} dot={{ r: 3 }} name="% Avg collection" connectNulls />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      ) : null}
-      <div style={{ marginTop: 12 }}>
-        <RecordTable rows={rows} />
+    <div className="sd-grid sd-grid--2">
+      <div className="sd-card">
+        <h2 className="sd-h2">% of Asset Cost Collected by Months on Books</h2>
+        <ResponsiveContainer width="100%" height={340}>
+          <ComposedChart data={data} margin={{ top: 8, right: 16, bottom: 10, left: -8 }}>
+            <CartesianGrid stroke="#e7ecee" vertical={false} />
+            {mobAxis}
+            <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#666' }} allowDecimals={false} />
+            <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: '#666' }} tickFormatter={pctTick} />
+            <Tooltip formatter={(v, name) => (name === 'Assets' ? fnum(v as number) : typeof v === 'number' ? pct(v, 1) : v)} />
+            <Legend />
+            <Bar yAxisId="left" dataKey="assets" fill="#B8BEC6" name="Assets" />
+            <Line yAxisId="right" dataKey="paidOverCost" stroke="#155b54" strokeWidth={2.5} dot={{ r: 3 }} name="% of Cost Collected" connectNulls />
+          </ComposedChart>
+        </ResponsiveContainer>
+        <p className="sd-muted">
+          Assets grouped by months since their first contract started. Line: total paid ÷ asset cost
+          for that group. Grey bars: number of assets in the group.
+        </p>
       </div>
-    </>
+      <div className="sd-card">
+        <h2 className="sd-h2">Average Monthly Collection by Months on Books</h2>
+        <ResponsiveContainer width="100%" height={340}>
+          <LineChart data={data.filter((r) => r.collection !== null)} margin={{ top: 8, right: 16, bottom: 10, left: -8 }}>
+            <CartesianGrid stroke="#e7ecee" vertical={false} />
+            {mobAxis}
+            <YAxis tick={{ fontSize: 11, fill: '#666' }} tickFormatter={(v) => (typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : v)} />
+            <Tooltip formatter={(v) => (typeof v === 'number' ? pct(v, 2) : v)} />
+            <Line dataKey="collection" stroke="#E8632A" strokeWidth={2.5} dot={{ r: 3 }} name="Avg Monthly Collection" connectNulls />
+            {observed !== null && (
+              <ReferenceLine y={observed} stroke="#6B7280" strokeDasharray="6 6" label={{ value: `Observed: ${pct(observed, 2)}`, position: 'insideTopRight', fill: '#6B7280', fontSize: 11 }} />
+            )}
+          </LineChart>
+        </ResponsiveContainer>
+        <p className="sd-muted">
+          % of cost collected ÷ months on books. Dashed line: Monthly Observed Repayment (cost-weighted
+          average over months 1-19, groups above the minimum size).
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -1687,6 +1853,37 @@ function VizTab() {
   );
 }
 
+/** Shown above an Ask AI answer that ran a what-if: the scenario is
+ * hypothetical, and these inputs were changed for it (the session's own
+ * inputs and the other tabs are untouched). */
+function WhatIfBanner({ whatif }: { whatif: WhatIf }) {
+  const applied = whatif.changes.length > 0;
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <Alert tone="warning">
+        <strong>{applied ? 'What-if scenario - hypothetical figures' : 'What-if not applied'}</strong>
+        <div style={{ marginTop: 4 }}>
+          {applied
+            ? 'The app re-ran the model with the inputs below changed. Your actual inputs and the other tabs are unchanged.'
+            : 'The app can only re-run changes to input assumptions, so this answer uses the actual figures.'}
+        </div>
+        {applied && (
+          <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+            {whatif.changes.map((c) => (
+              <li key={c.input}>
+                {c.input}: <s>{c.from}</s> → <mark style={{ fontWeight: 600 }}>{c.to}</mark>
+              </li>
+            ))}
+          </ul>
+        )}
+        {whatif.rejected.length > 0 && (
+          <div style={{ marginTop: 4 }}>Could not apply: {whatif.rejected.join(', ')}</div>
+        )}
+      </Alert>
+    </div>
+  );
+}
+
 function AiTab() {
   const { state, askAiQuestion } = useAppStore();
   const [question, setQuestion] = useState('');
@@ -1710,6 +1907,7 @@ function AiTab() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, margin: '12px 0' }}>
           {state.chatHistory.map((m, i) => (
             <div key={i} className={m.role === 'user' ? 'sd-chat-msg sd-chat-msg--user' : 'sd-chat-msg'}>
+              {m.whatif ? <WhatIfBanner whatif={m.whatif} /> : null}
               <strong>{m.role === 'user' ? 'You' : 'AI'}:</strong> {m.content}
             </div>
           ))}
@@ -1742,7 +1940,7 @@ export function AnalysisSession({
   onNewSession: () => void;
   onEditMapping: () => void;
 }) {
-  const { state, exportWorkbook, saveSession, shareHtml } = useAppStore();
+  const { state, exportWorkbook, saveSession, shareHtml, createShareLink } = useAppStore();
   const isRental = state.modelKey === 'rental';
   const isRevolving = state.modelKey === 'revolving';
   const [exporting, setExporting] = useState(false);
@@ -1769,11 +1967,8 @@ export function AnalysisSession({
   const rentalTabs = [
     { id: 'summary', label: 'Summary' },
     { id: 'checks', label: 'Data Checks' },
-    { id: 'asset', label: 'Asset View' },
     { id: 'ue', label: 'Unit Economics' },
-    { id: 'churn', label: 'Churn Analysis' },
     { id: 'ltv', label: 'LTV Analysis' },
-    { id: 'ts', label: 'TS Covenants' },
     { id: 'general', label: 'General Analysis' },
     { id: 'viz', label: 'Custom Visualizations' },
     { id: 'ai', label: 'Ask AI' },
@@ -1807,11 +2002,8 @@ export function AnalysisSession({
       {tab === 'summary' && <SummaryTab />}
       {tab === 'checks' && <DataChecksTab />}
       {tab === 'cohorts' && (isRental ? <RentalCohortsTab /> : <LendingCohortsTab />)}
-      {tab === 'asset' && <AssetViewTab />}
       {tab === 'ue' && <UnitEconomicsTab />}
-      {tab === 'churn' && <ChurnTab />}
       {tab === 'ltv' && <LtvTab />}
-      {tab === 'ts' && <TsCovenantsTab />}
       {tab === 'general' && <GeneralAnalysisTab />}
       {tab === 'viz' && <VizTab />}
       {tab === 'ai' && <AiTab />}
@@ -1844,8 +2036,11 @@ export function AnalysisSession({
         >
           {state.saveRunning ? 'Saving…' : 'Save'}
         </Button>
-        <Button variant="secondary" onClick={() => void shareHtml()} disabled={state.shareRunning} title="Download a read-only HTML report anyone can open in a browser">
+        <Button variant="secondary" onClick={() => void createShareLink()} disabled={state.shareRunning} title="Create a link that opens this deal, as you see it, in the recipient's own session">
           {state.shareRunning ? 'Sharing…' : 'Share'}
+        </Button>
+        <Button variant="ghost" onClick={() => void shareHtml()} disabled={state.shareRunning} title="Download a read-only HTML report anyone can open in a browser">
+          Download report
         </Button>
         {state.savedAt ? <span className="sd-muted">Saved.</span> : null}
       </div>

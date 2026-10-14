@@ -24,6 +24,7 @@ _DEFAULTS = {
         "redshift_filter_suggestion_max_tokens": 300,
         "escalation_writeup_max_tokens": 700,
         "chat_assistant_max_tokens": 800,
+        "whatif_extract_max_tokens": 200,
         "prompts": {
             "mapping_suggestion": (
                 "You are a data-mapping assistant for a lending/leasing portfolio "
@@ -144,6 +145,29 @@ _DEFAULTS = {
                 "value.\n"
                 "- Use no column that isn't listed above."
             ),
+            "whatif_extract": (
+                "You decide whether an analyst's question to a portfolio screening tool "
+                "asks for a what-if on one or more model inputs, e.g. 'what if the funding "
+                "cost were 10%?' or 'rerun with a 2x churn stress'. You never compute "
+                "anything - the tool re-runs its own engine with the values you return.\n\n"
+                "Inputs that can be changed, with their CURRENT values (JSON):\n%%FIELDS%%\n\n"
+                "Rules:\n"
+                "- Respond with ONLY a JSON object, no markdown: "
+                '{"overrides": {"<input name>": <number>}}\n'
+                "- Use input names exactly as listed. Only include inputs the question "
+                "explicitly asks to change; if it is not a what-if, or names an input that "
+                'is not listed, return {"overrides": {}}.\n'
+                "- Only use an input when the question names that input itself. A "
+                "calculated result (a churn rate, loss rate, margin, LTV, IRR, yield, "
+                "PvD) is NOT an input, even when an input has a similar name: 'what if "
+                "churn were 5%?' names the churn rate, not the churn stress multiplier, "
+                'so return {"overrides": {}}.\n'
+                "- Use the same units as the current value: a current value of 0.13 means "
+                "13%, so '10%' is 0.10; whole-number inputs (months, counts, years) stay "
+                "whole numbers.\n"
+                "- A follow-up like 'and at 8%?' refers to the input changed in the recent "
+                "conversation.\n"
+            ),
             "redshift_filter_suggestion": (
                 "You are a SQL-filter-writing assistant for a data warehouse browser. "
                 "The user is about to fetch rows from one table and wants to filter it "
@@ -238,7 +262,10 @@ _DEFAULTS = {
                 "and short paragraphs. Avoid dense bullet dumps, lists, long technical "
                 "justifications, and repeating caveats at length - mention a caveat only "
                 "when it actually changes the answer to the question asked, and say it in "
-                "one plain sentence.\n\n"
+                "one plain sentence.\n"
+                "- Reply in plain text only, never Markdown: no headings, no bullet or "
+                "numbered lists, no bold or italics, no tables and no code blocks - the "
+                "answer is shown as raw text.\n\n"
                 "Stay strictly within this data's domain: only answer questions about this "
                 "portfolio, this analysis, or this conversation's own history - never general "
                 "knowledge, current events, today's date, or anything unrelated to the "

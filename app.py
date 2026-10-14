@@ -2104,10 +2104,9 @@ if _share_token:
 else:
     _saved_profiles = _store_list_profiles()
     _data_source_options = ["Local file", "Google Sheets / Drive link", "My Google Drive"]
-    # Loan tapes only - the warehouse layout this reads (a LOANS table per
-    # borrower schema, see scripts/warehouse.py) holds lending loan tapes,
-    # not Rental & Subscription contract tapes.
-    if is_lending and _redshift_available():
+    # Offered for every model, matching the React app: the fetch lands as a
+    # normal ingest, so each model's own column mapping applies.
+    if _redshift_available():
         _data_source_options.append("Redshift (Warehouse)")
     if _saved_profiles:
         _data_source_options.insert(0, "Resume my saved session")

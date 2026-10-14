@@ -103,3 +103,18 @@ def test_share_round_trip_and_unknown_token(monkeypatch):
     assert share["upload_bytes"] == b"shared tape"
     assert share["shared_by"] == "analyst@lendable.io"
     assert s3_store.load_share("not-a-real-token") is None
+
+
+def test_share_keeps_the_on_screen_inputs(monkeypatch):
+    _use_fake_s3(monkeypatch)
+    view = {"ltvInputs": {"stress": 1.5}, "selectedCohorts": ["2024-01"], "dedupeActive": True}
+    token = s3_store.create_share(
+        "analyst@lendable.io",
+        upload_bytes=b"tape",
+        upload_name="t.xlsx",
+        mapping=None,
+        currency=None,
+        gi_overrides=None,
+        view_state=view,
+    )
+    assert s3_store.load_share(token)["view_state"] == view

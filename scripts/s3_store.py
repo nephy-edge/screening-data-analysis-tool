@@ -121,6 +121,7 @@ def _save_snapshot(
     label: str | None = None,
     analysis_result: dict | None = None,
     ingest_info: dict | None = None,
+    view_state: dict | None = None,
     extra: dict | None = None,
 ) -> None:
     upload_hash = hashlib.sha256(upload_bytes).hexdigest()
@@ -151,6 +152,9 @@ def _save_snapshot(
         # The parsed upload's columns/rowCount/preview/sheet, so a lazy load
         # can hand back a usable ingest without downloading the data.
         "ingest_info": ingest_info,
+        # The React screen-side inputs (LTV calculator, UE Model, cohort
+        # selection, custom charts, dedupe) so a share opens as it was seen.
+        "view_state": view_state,
         **snapshot_fields(
             upload_name=upload_name,
             mapping=mapping,

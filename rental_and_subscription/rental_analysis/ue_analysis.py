@@ -169,3 +169,13 @@ class UeAnalysis:
             "cost_of_funding_over_life_pct": self.cost_of_funding_over_life_pct(),
             "net_margin": self.net_margin(),
         }
+
+
+def ue_by_cohort(df, gi):
+    """Margin and lease tenor per contract cohort, each the portfolio formula
+    above applied to that cohort's contracts alone (UE Overview charts)."""
+    rows = []
+    for cohort, sub in df.groupby("contract_cohort", sort=True):
+        ue = UeAnalysis(sub, None, None, gi)
+        rows.append({"cohort": cohort, "margin": ue.margin(), "lease_tenor_m": ue.lease_tenor_m()})
+    return pd.DataFrame(rows, columns=["cohort", "margin", "lease_tenor_m"])

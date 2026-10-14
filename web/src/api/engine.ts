@@ -383,6 +383,8 @@ export interface RentalResponse {
   general: Record<string, unknown>;
   assetView: Array<Record<string, unknown>>;
   cohortRows: Array<Record<string, unknown>>;
+  /** Margin / lease tenor per cohort (UE Overview charts); absent on results from older servers. */
+  ueCohortRows?: Array<Record<string, unknown>>;
   /** High-level repayment curve - mob vs % avg collection (the rental UE
    * tab's curve chart + table). */
   curveRows: Array<Record<string, unknown>>;
@@ -677,9 +679,17 @@ export function deriveColumn(input: {
   );
 }
 
+/** Inputs an Ask AI what-if changed (labels and values already formatted
+ * by the server); null/absent when the answer is about the real figures. */
+export interface WhatIf {
+  changes: Array<{ input: string; from: string; to: string }>;
+  rejected: string[];
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  whatif?: WhatIf | null;
 }
 
 /** Ask AI about the current analysis. Sends only already-computed aggregate
@@ -720,8 +730,8 @@ export function askAi(
     };
     ueModelInputs?: UeModelAssumptions | null;
   },
-): Promise<{ answer: string }> {
-  return post<{ answer: string }>(`/ai/chat/${modelKey}`, input);
+): Promise<{ answer: string; whatif?: WhatIf | null }> {
+  return post<{ answer: string; whatif?: WhatIf | null }>(`/ai/chat/${modelKey}`, input);
 }
 
 /** Ask AI, Revolving Lending model: the same run inputs as runRevolvingAnalysis. */
@@ -732,9 +742,9 @@ export function askRevolvingAi(
     userContext?: string;
     documents?: ContextDocument[];
   },
-): Promise<{ answer: string }> {
+): Promise<{ answer: string; whatif?: WhatIf | null }> {
   const { generalInputs, ...rest } = input;
-  return post<{ answer: string }>('/ai/chat/revolving', { ...rest, ...(generalInputs ? { generalInputs } : {}) });
+  return post<{ answer: string; whatif?: WhatIf | null }>('/ai/chat/revolving', { ...rest, ...(generalInputs ? { generalInputs } : {}) });
 }
 
 /** Result of the Data-Checks "Escalate flagged cohorts to analytics" action -
@@ -883,6 +893,8 @@ export interface RestorePayload {
    * lets the caller skip straight to the results screen instead of
    * re-running the engine (see AppStore's restoreProfile). */
   analysisResult: (AnalysisResponse | RentalResponse | RevolvingResponse) | null;
+  /** Screen-side inputs captured by a share (absent on saves and older shares). */
+  viewState?: Record<string, unknown>;
 }
 
 export function loadProfile(sessionId: string): Promise<RestorePayload> {
@@ -896,6 +908,7 @@ export function createShare(input: {
   chatHistory: ChatMessage[];
   analysisContext?: string;
   analysisResult?: AnalysisResponse | RentalResponse | RevolvingResponse | null;
+  viewState?: Record<string, unknown>;
 }): Promise<{ token: string }> {
   return post<{ token: string }>('/share', input);
 }
@@ -937,8 +950,8 @@ export function logout(): Promise<{ ok: boolean }> {
 /** The self-declared "temporary sign-in" fallback (shown when Google isn't
  * configured) - now server-side so the backend can set the same remember-me
  * cookie, making the dummy identity survive a refresh too. */
-export function dummySignIn(email: string): Promise<{ email: string; name: string }> {
-  return post<{ email: string; name: string }>('/auth/dummy', { email });
+export function dummySignIn(email: string): Promise<{ email: string; name: string; gdrive: boolean }> {
+  return post<{ email: string; name: string; gdrive: boolean }>('/auth/dummy', { email });
 }
 
 /** One importable file in the user's Google Drive, as listed by the backend
@@ -956,6 +969,18 @@ export interface GDriveFile {
  * Drive" picker. Requires a Google sign-in (Drive scope); rejects otherwise. */
 export function listGdriveFiles(): Promise<GDriveFile[]> {
   return get<GDriveFile[]>('/auth/gdrive/files');
+}
+
+/** One level of the Drive folder browser: no args = top level (Shared
+ * Drives + "Shared with me"); `folder` = its subfolders and importable files
+ * (folders first); `q` = name search across everything visible. Folders
+ * have mimeType application/vnd.google-apps.folder. */
+export function browseGdrive(opts: { folder?: string; q?: string } = {}): Promise<GDriveFile[]> {
+  const params = new URLSearchParams();
+  if (opts.folder) params.set('folder', opts.folder);
+  if (opts.q) params.set('q', opts.q);
+  const qs = params.toString();
+  return get<GDriveFile[]>(`/auth/gdrive/browse${qs ? `?${qs}` : ''}`);
 }
 
 /** Download the chosen Drive file (a Google Sheet is exported as a full

@@ -714,9 +714,10 @@ def test_analyse_endpoint_returns_performance_and_chat_uses_it(monkeypatch):
         return "ok"
 
     monkeypatch.setattr(m, "_ask_data_chatbot", fake)
+    monkeypatch.setattr(m, "_extract_whatif", lambda q, h, f: {})
     res = client.post("/api/ai/chat/revolving", json={"rows": _rows(), "question": "term?"})
     assert res.status_code == 200, res.text
-    assert res.json() == {"answer": "ok"}
+    assert res.json() == {"answer": "ok", "whatif": None}
     assert "Net Collection Ratio" in seen["context"]
 
 

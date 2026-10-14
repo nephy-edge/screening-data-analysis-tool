@@ -109,6 +109,9 @@ def rental_summary_metrics(
 
     return {
         # Headline metrics
+        # Last contract start in the tape, as Lending's dataUpTo; dateRangeEnd
+        # below stays the extraction (as-of) date.
+        "dataUpTo": str(df["start_date"].max().date()),
         "contracts": int(len(av)),
         "mrr": mrr,
         "avgMrrPerActiveContract": (mrr / open_contracts) if open_contracts else None,

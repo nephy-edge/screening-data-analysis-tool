@@ -30,8 +30,8 @@ export function LoginScreen() {
     // Server-side so the backend sets the remember-me cookie - without it a
     // refresh would fall back to the login screen again.
     try {
-      await dummySignIn(clean);
-      dispatch({ type: 'signIn', name: clean, gdrive: false });
+      const { gdrive } = await dummySignIn(clean);
+      dispatch({ type: 'signIn', name: clean, gdrive });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not sign in.');
     }

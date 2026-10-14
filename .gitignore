@@ -18,6 +18,7 @@ env/
 *.pem
 *.key
 *.crt
+service_account.json
 
 # Defensive: never commit a cached OAuth token, even though the app no
 # longer writes this file itself (removed in the multi-user Google sign-in

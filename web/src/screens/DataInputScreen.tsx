@@ -12,7 +12,6 @@ import {
   ingestFile,
   importGdriveFile,
   importGdriveLink,
-  listGdriveFiles,
   listProfiles,
   listRedshiftSchemas,
   listRedshiftTables,
@@ -23,6 +22,7 @@ import {
   type SavedProfileMeta,
 } from '../api/engine';
 import type { ModelKey } from '../state/types';
+import { DriveBrowser } from '../components/DriveBrowser';
 
 interface IngestProps {
   onNext: () => void;
@@ -84,9 +84,7 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
   const [gsUrl, setGsUrl] = useState('');
   const [gsBusy, setGsBusy] = useState(false);
   const [driveOpen, setDriveOpen] = useState(false);
-  const [driveFiles, setDriveFiles] = useState<GDriveFile[]>([]);
   const [driveBusy, setDriveBusy] = useState(false);
-  const [driveSel, setDriveSel] = useState('');
   const [googleEnabled, setGoogleEnabled] = useState(false);
   const [source, setSource] = useState<SourceKind>('file');
   const [redshiftAvailable, setRedshiftAvailable] = useState(false);
@@ -325,35 +323,13 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
     }
   };
 
-  // "From Google Drive" source: fetch the session's Drive file list (server
-  // holds the Drive-scoped token; it never reaches the browser) and let the
-  // user pick one to import.
-  const openDrive = async () => {
-    if (driveOpen) {
-      setDriveOpen(false);
-      return;
-    }
-    setDriveOpen(true);
+  // "From Google Drive" source: the DriveBrowser modal (server holds the
+  // Drive token; it never reaches the browser) hands back the clicked file.
+  const importDriveFile = async (file: GDriveFile) => {
     setDriveBusy(true);
     setError(null);
     try {
-      const files = await listGdriveFiles();
-      setDriveFiles(files);
-      setDriveSel(files.length ? files[0].id : '');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not list your Google Drive.');
-      setDriveOpen(false);
-    } finally {
-      setDriveBusy(false);
-    }
-  };
-
-  const importDriveFile = async () => {
-    if (!driveSel) return;
-    setDriveBusy(true);
-    setError(null);
-    try {
-      applyParsed(await importGdriveFile(driveSel));
+      applyParsed(await importGdriveFile(file.id));
       setDriveOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not import that Drive file.');
@@ -582,37 +558,17 @@ export function DataInputScreen({ onNext, onJsonUpload, onResumed }: Omit<Ingest
             <div className="sd-field" style={{ maxWidth: 560 }}>
               {state.auth.gdrive ? (
                 <>
-                  {!driveOpen && (
-                    <div className="sd-actions" style={{ gap: 8 }}>
-                      <Button variant="secondary" disabled={driveBusy} onClick={() => void openDrive()}>
-                        {driveBusy ? 'Connecting…' : 'Browse Drive files'}
-                      </Button>
-                    </div>
-                  )}
+                  <div className="sd-actions" style={{ gap: 8 }}>
+                    <Button variant="secondary" disabled={driveBusy} onClick={() => setDriveOpen(true)}>
+                      Browse Drive files
+                    </Button>
+                  </div>
                   {driveOpen && (
-                    <div className="sd-actions" style={{ gap: 8 }}>
-                      <Select
-                        aria-label="Drive file"
-                        value={driveSel}
-                        onChange={(e) => setDriveSel(e.target.value)}
-                      >
-                        {driveFiles.length === 0 && (
-                          <option value="">No spreadsheets, CSV or Excel files found</option>
-                        )}
-                        {driveFiles.map((f) => (
-                          <option key={f.id} value={f.id}>
-                            {f.name} ({driveMimeLabel(f.mimeType)})
-                          </option>
-                        ))}
-                      </Select>
-                      <Button
-                        variant="secondary"
-                        disabled={!driveSel || driveBusy}
-                        onClick={() => void importDriveFile()}
-                      >
-                        {driveBusy ? 'Importing…' : 'Import'}
-                      </Button>
-                    </div>
+                    <DriveBrowser
+                      busy={driveBusy}
+                      onClose={() => setDriveOpen(false)}
+                      onPick={(f) => void importDriveFile(f)}
+                    />
                   )}
                 </>
               ) : googleEnabled ? (
@@ -1023,12 +979,4 @@ function MetricStat({ label, value }: { label: string; value: string }) {
       <div className="sd-metric__value">{value}</div>
     </div>
   );
-}
-
-function driveMimeLabel(mime: string): string {
-  if (mime === 'application/vnd.google-apps.spreadsheet') return 'Google Sheet';
-  if (mime === 'text/csv') return 'CSV';
-  if (mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') return 'Excel';
-  if (mime === 'application/vnd.ms-excel') return 'Excel';
-  return mime.split('.').pop() ?? mime;
 }
