@@ -278,12 +278,13 @@ def standard_metrics(values: dict) -> list[dict]:
 
 
 def unit_economics(
-    values: dict, cost_of_funds: float, opex: float, tenor: float | None
+    cost_of_funds: float, opex: float, tenor: float | None, rate: float | None, wo: float | None
 ) -> list[dict]:
     """Net yield per dollar outstanding: interest yield − write-offs − costs.
-    Costs are annual rates on outstanding; everything is shown monthly and
-    annualised, plus over `tenor` (the average of 1 / net collection ratio)."""
-    rate, wo = values.get("rate_m"), values.get("writeoff_m")
+    `rate` and `wo` are the trailing monthly interest and write-off rates
+    (performance.py, same window); costs are annual rates on outstanding;
+    everything is shown monthly and annualised, plus over `tenor` (the
+    average of 1 / net collection ratio)."""
     cost_m = (cost_of_funds + opex) / 12
     net = rate - wo - cost_m if rate is not None and wo is not None else None
     rows = [

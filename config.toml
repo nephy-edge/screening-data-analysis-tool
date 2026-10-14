@@ -110,7 +110,9 @@ lgd = 1.0
 roll_rate_window = "T12"          # T3 / T6 / T12 / ALL
 ratio_window_months = 2           # months (ending at the as-of month) the Outputs averages use
 writeoff_window_months = 1        # write-off rate averaged over this many months (1 = as-of month only, as the template)
-min_outstanding_in_sample = 1000000000.0
+min_outstanding_in_sample = 0.0              # absolute floor; rcl_rollrate_ecl_3.xlsx uses 1bn, sized for that one deal
+min_outstanding_in_sample_pct_of_peak = 0.10  # and at least this share of the book's peak outstanding
+ltv_window_months = 12            # trailing months for the LTV / UE interest yield and the average term (rcl 'Revenue Monthly' B49)
 stress_percentile = 0.95
 denominator_lag_months = 5
 lagged_blend_weight = 0.5

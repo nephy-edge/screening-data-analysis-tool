@@ -85,7 +85,9 @@ Defaults are in `config.toml` → `[revolving_defaults]`.
 |---|---|---|
 | Loss-rate basis | `Blended` | Naive / Blended / Lagged (section 5.3). |
 | Stress percentile | 0.95 | Percentile reported as "95th %ile". |
-| Minimum outstanding to be in sample | 1,000,000,000 | Leaves out the ramp-up months. **Deal-specific, in the source currency.** |
+| Minimum outstanding to be in sample | 0 | Absolute floor, in the source currency (the reference workbook uses 1,000,000,000 for its deal). |
+| Minimum share of peak outstanding | 0.10 | A month also needs at least this share of peak outstanding. Leaves out the ramp-up months. |
+| LTV / UE window | 12 months | Trailing months for the LTV / UE interest yield and average term. |
 | Denominator lag | 5 months | Lag applied to cumulative issuance for the Lagged basis. |
 | Blend weight on the lagged rate | 0.5 | 0 = Naive only, 1 = Lagged only. |
 
@@ -135,7 +137,7 @@ Everything else, such as the template's column names and formulas, the full mode
 3. **Monthly fact block.** Columns A–K for every month up to the as-of month.
 4. **Point-in-time loss rate.** The distribution of the in-sample monthly loss rates: mean, median, percentiles and stress percentile. It feeds Loss Rate and 95th %ile.
 5. **Standard-definition metrics.** Proper credit definitions shown **next to** the template's ratios, which stay as defined (section 5.4).
-6. **Unit economics after costs.** Interest yield − write-offs − cost of funds − operating costs, per dollar outstanding: monthly, annualised, and over the principal-turnover tenor.
+6. **Unit economics after costs.** Interest yield − write-offs − cost of funds − operating costs, per dollar outstanding: monthly, annualised, and over the average term (1 ÷ net collection ratio).
 7. **Early warnings.** Each metric at the as-of month against its lookback average, with a flag where it is worse than the threshold.
 8. **Metrics over time.** Every metric, month by month.
 

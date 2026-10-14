@@ -4,9 +4,10 @@ import { useAppStore, getChartDataSources, type ChartCardSpec } from '../state/A
 import { Button, Input, Metric, Table, Tabs, Alert, Select, type TableColumn } from '../components/ui';
 import { LendingLtvTab, RentalLtvTab, inLtvCohortRange } from './LtvTabs';
 import {
-  RevolvingBacktestStressTab,
-  RevolvingFacilityTab,
+  RevolvingAgeingMix,
+  RevolvingEclTable,
   RevolvingLtvTab,
+  RevolvingOutputsTab,
   RevolvingPerformanceTab,
   RevolvingSummaryTab,
   RevolvingUnitEconomicsTab,
@@ -377,6 +378,7 @@ function SummaryTab() {
 // app's `tabs[1]`: "Data Input" (the raw uploaded data grid) and "Checks"
 // (the data-quality findings).
 function DataChecksTab() {
+  const { state } = useAppStore();
   const [subTab, setSubTab] = useState<'input' | 'checks'>('input');
   const subTabs = [
     { id: 'input', label: 'Data Input' },
@@ -386,6 +388,13 @@ function DataChecksTab() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <Tabs items={subTabs} value={subTab} onChange={(v) => setSubTab(v as 'input' | 'checks')} />
       {subTab === 'input' ? <DataInputGridTab /> : <ChecksList />}
+      {subTab === 'input' && state.modelKey === 'revolving' ? <RevolvingOutputsTab /> : null}
+      {subTab === 'checks' && state.modelKey === 'revolving' ? (
+        <>
+          <RevolvingAgeingMix />
+          <RevolvingEclTable />
+        </>
+      ) : null}
     </div>
   );
 }
@@ -1775,8 +1784,6 @@ export function AnalysisSession({
     { id: 'revPerformance', label: 'Performance' },
     { id: 'revLtv', label: 'LTV Calculator' },
     { id: 'revUe', label: 'Unit Economics' },
-    { id: 'backtest', label: 'Backtest & Stress' },
-    { id: 'facility', label: 'Facility & Covenants' },
     { id: 'viz', label: 'Custom Viz' },
     { id: 'ai', label: 'Ask AI' },
   ];
@@ -1812,8 +1819,6 @@ export function AnalysisSession({
       {tab === 'revPerformance' && <RevolvingPerformanceTab />}
       {tab === 'revLtv' && <RevolvingLtvTab />}
       {tab === 'revUe' && <RevolvingUnitEconomicsTab />}
-      {tab === 'backtest' && <RevolvingBacktestStressTab />}
-      {tab === 'facility' && <RevolvingFacilityTab />}
 
       <div className="sd-actions" style={{ marginTop: 24, flexWrap: 'wrap' }}>
         <Button variant="ghost" onClick={onEditMapping}>

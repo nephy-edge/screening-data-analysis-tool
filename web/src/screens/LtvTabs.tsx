@@ -20,7 +20,7 @@ function num(v: unknown): number | null {
 }
 
 /** app.py's html_tables.fmt(value, "{:.1%}") - percent, one decimal, n/a. */
-const fmtPct = (v: unknown): string => {
+export const fmtPct = (v: unknown): string => {
   const n = num(v);
   return n === null ? 'n/a' : `${(n * 100).toFixed(1)}%`;
 };
@@ -52,7 +52,7 @@ function lossChartRows(
 
 /** A small Metric | Value table with a muted help line under each label -
  * mirrors app.py's _render_snapshot_table (rows of label, value, tooltip). */
-function SnapshotTable({ rows }: { rows: Array<{ label: string; value: string; help?: string }> }) {
+export function SnapshotTable({ rows }: { rows: Array<{ label: string; value: string; help?: string }> }) {
   const cols: TableColumn<{ label: string; value: string; help?: string }>[] = [
     {
       key: 'label',
@@ -69,7 +69,7 @@ function SnapshotTable({ rows }: { rows: Array<{ label: string; value: string; h
   return <Table columns={cols} rows={rows} />;
 }
 
-function FxChart({ response, country }: { response: LtvCalculatorResponse; country: string }) {
+export function FxChart({ response, country }: { response: LtvCalculatorResponse; country: string }) {
   const fx = response.fxCountryData;
   const selected = response.result?.historical_fx_deval ?? null;
   const tenor = response.greenTermBucket;

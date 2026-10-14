@@ -36,6 +36,10 @@ export interface RevolvingGeneralInputs {
   ratioWindowMonths: number;
   writeoffWindowMonths: number;
   minOutstandingInSample: number;
+  /** In sample also needs at least this share (0-1) of the book's peak outstanding. */
+  minOutstandingPctOfPeak: number;
+  /** Trailing months for the LTV / UE interest yield and the average term. */
+  ltvWindowMonths: number;
   stressPercentile: number;
   denominatorLagMonths: number;
   laggedBlendWeight: number;

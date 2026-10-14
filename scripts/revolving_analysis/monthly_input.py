@@ -47,7 +47,17 @@ DATA_QUALITY_COLUMNS = [
 # Cash recovered in the month on previously written-off balances; lets LGD
 # be derived instead of entered.
 RECOVERIES = "recoveries"
-OPTIONAL_COLUMNS = CORE_BUCKET_COLUMNS + ZERO_FILLED_COLUMNS + DATA_QUALITY_COLUMNS + [RECOVERIES]
+# Interest charged in the month (rcl 'Monthly Report' REVENUE_ACCRUED); when
+# mapped, the LTV / UE interest yield uses it instead of interest_collected.
+INTEREST_ACCRUED = "interest_accrued"
+# Balance of the single largest borrower at month-end (borrower concentration).
+LARGEST_CUSTOMER = "largest_customer_outstanding"
+OPTIONAL_COLUMNS = (
+    CORE_BUCKET_COLUMNS
+    + ZERO_FILLED_COLUMNS
+    + DATA_QUALITY_COLUMNS
+    + [RECOVERIES, INTEREST_ACCRUED, LARGEST_CUSTOMER]
+)
 
 
 def has_full_buckets(df: pd.DataFrame) -> bool:

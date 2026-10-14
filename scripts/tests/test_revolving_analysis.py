@@ -48,6 +48,12 @@ def _ratios(result):
     return {r["row"]: r["value"] for r in result["ratios"]}
 
 
+def _workbook_inputs(**over):
+    """The reference workbook's own settings: its absolute in-sample floor
+    ('Loss Rate LTV' B9 = 1bn) rather than the app's peak-relative default."""
+    return RevolvingInputs(min_outstanding_in_sample=1_000_000_000.0, **over)
+
+
 def _reference_frame(with_buckets=True):
     """The workbook's Monthly Report, mapped onto the Outputs fields."""
     src = pd.read_excel(REFERENCE, sheet_name="Monthly Report", nrows=36)
@@ -211,7 +217,7 @@ needs_reference = pytest.mark.skipif(
 
 @needs_reference
 def test_round_trip_against_the_reference_workbook():
-    res = run(_reference_frame(), RevolvingInputs())
+    res = run(_reference_frame(), _workbook_inputs())
     assert res["eclSummary"]["method"] == "full"
     wb = load_workbook(REFERENCE, data_only=True)
     ecl_ws, loss_ws = wb["Roll Rate ECL"], wb["Loss Rate LTV"]
@@ -253,12 +259,12 @@ def test_round_trip_against_the_reference_workbook():
 def test_reference_without_buckets_falls_back_to_the_approximation():
     """Same data, Outputs columns only: the 3-link chain. Reads lower than the
     full model (1,663.1M) because the 1-60 bucket hides the 1-30 -> 31-60 roll."""
-    res = run(_reference_frame(with_buckets=False), RevolvingInputs())
+    res = run(_reference_frame(with_buckets=False), _workbook_inputs())
     s = res["eclSummary"]
     assert s["method"] == "coarse"
     assert s["totalEcl"] == pytest.approx(1_432_530_714, rel=1e-6)
     # Everything that doesn't depend on roll rates is unchanged.
-    full = _ratios(run(_reference_frame(), RevolvingInputs()))
+    full = _ratios(run(_reference_frame(), _workbook_inputs()))
     coarse = _ratios(res)
     for row in (9, 10, 11, 15, 16, 17, 18, 19, 22, 23, 24):
         assert coarse[row] == pytest.approx(full[row])
@@ -372,7 +378,7 @@ SCENARIOS = [
 
 @needs_reference
 def test_roll_forward_reproduces_the_source_unexplained_column():
-    checks = run(_reference_frame(), RevolvingInputs())["checks"]
+    checks = run(_reference_frame(), _workbook_inputs())["checks"]
     agree = checks.loc["Roll-forward agrees with source UNEXPLAINED"].tolist()
     assert agree[0] == "" and set(agree[1:]) == {"OK"}
 
@@ -380,17 +386,17 @@ def test_roll_forward_reproduces_the_source_unexplained_column():
 @needs_reference
 def test_backtest_matches_the_out_of_sample_check():
     """Same figures as the hand backtest: forecast write-offs vs actual."""
-    full = run(_reference_frame(), RevolvingInputs())["backtestSummary"]
+    full = run(_reference_frame(), _workbook_inputs())["backtestSummary"]
     assert (full["window"], full["months"]) == ("1 to 5 months later", 19)
     assert full["pooledRatio"] == pytest.approx(0.913, abs=5e-4)
-    coarse = run(_reference_frame(with_buckets=False), RevolvingInputs())["backtestSummary"]
+    coarse = run(_reference_frame(with_buckets=False), _workbook_inputs())["backtestSummary"]
     assert (coarse["window"], coarse["months"]) == ("2 to 4 months later", 20)
     assert coarse["pooledRatio"] == pytest.approx(0.904, abs=5e-4)
 
 
 @needs_reference
 def test_standard_metrics_on_the_reference_book():
-    res = run(_reference_frame(), RevolvingInputs())
+    res = run(_reference_frame(), _workbook_inputs())
     std = {m["key"]: m["value"] for m in res["standardMetrics"]}
     assert std["par91_total"] == pytest.approx(0.1763, abs=5e-5)  # template "PAR90" is 2.97%
     assert std["principal_tenor"] == pytest.approx(3.507, abs=5e-4)
@@ -399,7 +405,7 @@ def test_standard_metrics_on_the_reference_book():
 
 @needs_reference
 def test_base_scenario_reproduces_the_unstressed_ecl_and_stress_is_worse():
-    res = run(_reference_frame(), RevolvingInputs(scenarios=SCENARIOS))
+    res = run(_reference_frame(), _workbook_inputs(scenarios=SCENARIOS))
     base, stress, severe = res["stress"]
     assert base["totalEcl"] == pytest.approx(res["eclSummary"]["totalEcl"])
     assert base["totalEcl"] < stress["totalEcl"] < severe["totalEcl"]
@@ -440,8 +446,12 @@ def test_standard_metrics_and_unit_economics_by_hand():
     assert std["principal_tenor"] == pytest.approx(100 / 35)
     assert std["defaulted_share"] is None  # needs the bucket balances
     ue = {r["item"]: r["monthly"] for r in res["unitEconomics"]}
-    # Window 2: (9 + 9) / (100 + 100); write-offs 4 / 100; costs 18% / 12.
-    assert ue["Net yield"] == pytest.approx(0.09 - 0.04 - 0.015)
+    # Interest and write-offs: means of the monthly rates over the trailing 12
+    # months (all 5 here) - (5, 6, 8, 9, 9) / 100 and (0, 0, 1, 2, 4) / 100;
+    # costs 18% / 12.
+    assert ue["Interest yield"] == pytest.approx(0.074)
+    assert ue["Write-offs"] == pytest.approx(-0.014)
+    assert ue["Net yield"] == pytest.approx(0.074 - 0.014 - 0.015)
 
 
 def test_early_warning_flags_a_deteriorating_metric():
@@ -628,8 +638,9 @@ def test_writeoff_window_smooths_the_write_off_rate():
     assert std(one)["writeoff_m"] == pytest.approx(4 / 100)
     # Window 3: (1 + 2 + 4) written off over (100 + 100 + 100) outstanding.
     assert std(three)["writeoff_m"] == pytest.approx(7 / 300)
-    ue = {r["item"]: r["monthly"] for r in three["unitEconomics"]}
-    assert ue["Write-offs"] == pytest.approx(-7 / 300)
+    # Unit economics uses the LTV / UE window instead, so the setting leaves it alone.
+    ue = lambda r: {u["item"]: u["monthly"] for u in r["unitEconomics"]}  # noqa: E731
+    assert ue(three)["Write-offs"] == pytest.approx(ue(one)["Write-offs"])
     # The template's own Outputs row stays as the template defines it.
     assert _ratios(three)[19] == pytest.approx(_ratios(one)[19])
 
@@ -652,7 +663,7 @@ def test_ageing_mix_sums_to_100_percent():
 
 @needs_reference
 def test_backtest_shows_gap_and_tenor():
-    table = run(_reference_frame(), RevolvingInputs())["backtest"]
+    table = run(_reference_frame(), _workbook_inputs())["backtest"]
     done = table[table["Outcome observed"]]
     assert (done["Gap"] == done["Actual vs forecast"] - 1).all()
     assert "Principal tenor (m)" in table.columns
@@ -707,3 +718,68 @@ def test_analyse_endpoint_returns_performance_and_chat_uses_it(monkeypatch):
     assert res.status_code == 200, res.text
     assert res.json() == {"answer": "ok"}
     assert "Net Collection Ratio" in seen["context"]
+
+
+@needs_reference
+def test_ltv_inputs_follow_the_reference_workbook():
+    """LTV loss = 'Loss Rate LTV' C57 (blended stress percentile); interest
+    yield = 'Revenue Monthly' B50 (collected) / B49 (accrued), which the
+    workbook annualises."""
+    wb = load_workbook(REFERENCE, data_only=True)
+    rev = wb["Revenue Monthly"]
+    collected = run(_reference_frame(), _workbook_inputs())["performance"]
+    assert collected["lossRate95"] == pytest.approx(wb["Loss Rate LTV"]["C57"].value)
+    assert collected["lossRateBasis"] == "Blended"
+    assert collected["interestBasis"] == "collected"
+    assert collected["interestYield"] * 12 == pytest.approx(rev["B50"].value)
+    src = pd.read_excel(REFERENCE, sheet_name="Monthly Report", nrows=36)
+    frame = _reference_frame().assign(interest_accrued=src["REVENUE_ACCRUED"])
+    accrued = run(frame, _workbook_inputs())["performance"]
+    assert accrued["interestBasis"] == "accrued"
+    assert accrued["interestYield"] * 12 == pytest.approx(rev["B49"].value)
+
+
+def test_in_sample_floor_is_relative_to_the_peak():
+    book = _small_book().assign(principal_outstanding=[5.0, 50.0, 100.0, 100.0, 100.0])
+    in_sample = lambda **kw: run(book, RevolvingInputs(**kw))["pit"]["In sample"].tolist()  # noqa: E731
+    # Default: 10% of the 100 peak, so only the 5 month drops out.
+    assert in_sample(min_outstanding_in_sample=0) == [False, True, True, True, True]
+    # The absolute floor still applies when it is the higher of the two.
+    assert in_sample(min_outstanding_in_sample=60) == [False, False, True, True, True]
+    assert in_sample(min_outstanding_in_sample=0, min_outstanding_pct_of_peak=0) == [True] * 5
+    perf = run(book, RevolvingInputs(min_outstanding_in_sample=0))["performance"]
+    assert perf["inSampleFloor"] == pytest.approx(10.0)
+
+
+def test_ltv_term_and_interest_use_the_trailing_window():
+    res = run(_small_book(), RevolvingInputs(min_outstanding_in_sample=0, ltv_window_months=2))
+    perf = res["performance"]
+    # Last two months: NCR 0.39 and 0.44; interest 9 and 9 over outstanding 100.
+    assert perf["termMonths"] == 2
+    assert perf["avgTerm"] == pytest.approx((100 / 39 + 100 / 44) / 2)
+    assert perf["interestYieldMonths"] == 2
+    assert perf["interestYield"] == pytest.approx(0.09)
+    assert res["ltvInterest"] == pytest.approx(0.09 * perf["avgTerm"])
+    # The monthly series behind the UE charts: one point per month, and the
+    # trailing means above are its last two points.
+    series = perf["series"]
+    assert len(series) == 5
+    assert series[-1]["interestYield"] == pytest.approx(0.09)
+    assert perf["writeOffRate"] == pytest.approx(
+        (series[-1]["writeOffRate"] + series[-2]["writeOffRate"]) / 2
+    )
+
+
+def test_balance_past_the_chain_is_flagged_as_late_write_off():
+    df = _full_by_hand().assign(BAL_PAR_121_150=[0.0, 3.0, 2.0])
+    res = run(df, RevolvingInputs(min_outstanding_in_sample=0))
+    late = {c["check_id"]: c for c in res["qualityChecks"]}["late_write_off"]
+    assert [d["Month"] for d in late["detail"]] == ["2025-02", "2025-03"]
+    assert any("writes off later" in w for w in res["warnings"])
+
+
+def test_largest_customer_share_is_optional():
+    book = _small_book()
+    assert run(book, RevolvingInputs())["largestCustomerShare"] is None
+    book["largest_customer_outstanding"] = [1.0, 2.0, 3.0, 4.0, 6.0]
+    assert run(book, RevolvingInputs())["largestCustomerShare"] == pytest.approx(6 / 100)

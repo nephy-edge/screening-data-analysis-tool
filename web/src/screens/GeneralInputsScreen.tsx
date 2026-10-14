@@ -114,6 +114,8 @@ const REVOLVING_RANGES: Partial<Record<keyof RevolvingGeneralInputs, { min: numb
   advanceHaircut: { min: 0, max: 1 },
   earlyWarningThreshold: { min: 0, max: 1 },
   minOutstandingInSample: { min: 0 },
+  minOutstandingPctOfPeak: { min: 0, max: 1 },
+  ltvWindowMonths: { min: 1, whole: true },
   ratioWindowMonths: { min: 1, whole: true },
   writeoffWindowMonths: { min: 1, whole: true },
   denominatorLagMonths: { min: 0, whole: true },
@@ -145,7 +147,10 @@ function RevolvingInputsSection() {
   const { state, dispatch } = useAppStore();
   // Inputs saved before a field existed are completed from the defaults.
   const saved = state.generalInputs.revolving;
-  const ri = saved && saved.scenarios !== undefined ? saved : null;
+  const ri =
+    saved && saved.scenarios !== undefined && saved.ltvWindowMonths !== undefined && saved.minOutstandingPctOfPeak !== undefined
+      ? saved
+      : null;
   const [error, setError] = useState<string | null>(null);
   const [options, setOptions] = useState<RevolvingOptions | null>(null);
   const metrics = options?.covenantMetrics ?? [];
@@ -236,7 +241,9 @@ function RevolvingInputsSection() {
           </Select>
         </div>
         {numberField('Stress percentile (0-1)', 'Percentile of the in-sample monthly loss rates used as the stressed loss rate (Outputs 95th %ile). That rate sets the maximum advance rate.', 'stressPercentile')}
-        {numberField('Minimum outstanding to be in sample', 'A month only counts in the loss-rate distribution when principal outstanding is at least this much. It keeps small, early months out of the sample.', 'minOutstandingInSample')}
+        {numberField('Minimum outstanding to be in sample', 'A month only counts in the loss-rate distribution when principal outstanding is at least this much (and at least the share of peak below). It keeps small, early months out of the sample.', 'minOutstandingInSample')}
+        {numberField('Minimum share of peak outstanding (0-1)', "A month only counts in the loss-rate distribution when principal outstanding is at least this share of the book's highest outstanding. Works for a book of any size or currency.", 'minOutstandingPctOfPeak')}
+        {numberField('LTV / UE window (months)', 'The interest yield and the average term feeding the LTV Calculator and Unit Economics are averaged over this many trailing months.', 'ltvWindowMonths', '1')}
         {numberField('Denominator lag (months)', 'For the Lagged loss rate: divide by cumulative principal issued this many months earlier, so recent lending that has not had time to default does not dilute the rate.', 'denominatorLagMonths', '1')}
         {numberField('Blend weight on the lagged rate (0-1)', 'For the Blended loss rate: weight on the Lagged rate. The rest goes on the Naive rate (0.5 = an equal mix).', 'laggedBlendWeight')}
       </Card>
@@ -271,7 +278,7 @@ function RevolvingInputsSection() {
         columns={[
           {
             key: 'name',
-            header: <>Scenario<HelpTip text="Name shown on the Backtest & Stress and Portfolio Summary tabs." /></>,
+            header: <>Scenario<HelpTip text="Name shown on the Summary tab." /></>,
             render: (r) => <Input value={r.name} onChange={(e) => setScenario(r.i, { name: e.target.value })} />,
           },
           {
@@ -351,7 +358,7 @@ function RevolvingInputsSection() {
           },
           {
             key: 'limit',
-            header: <>Limit (0-1 for %)<HelpTip text="The facility limit. Enter percentages as decimals (0.15 = 15%). A breach shows on the Facility & Covenants and Portfolio Summary tabs." /></>,
+            header: <>Limit (0-1 for %)<HelpTip text="The facility limit. Enter percentages as decimals (0.15 = 15%). A breach shows on the Summary tab." /></>,
             render: (r) => (
               <Input
                 type="number"

@@ -11,6 +11,7 @@ from .facility import advance_rate, covenant_tests
 from .loss_rate import BASES, loss_rate_distribution, point_in_time_loss_rates
 from .metrics import early_warnings, metrics_at, metrics_over_time, standard_metrics, unit_economics
 from .monthly_input import (
+    LARGEST_CUSTOMER,
     MONTH,
     RECOVERIES,
     REQUIRED_COLUMNS,
@@ -35,6 +36,10 @@ class RevolvingInputs:
     ratio_window_months: int = DEFAULTS["ratio_window_months"]
     writeoff_window_months: int = DEFAULTS["writeoff_window_months"]
     min_outstanding_in_sample: float = DEFAULTS["min_outstanding_in_sample"]
+    # In sample also needs at least this share of the book's peak outstanding.
+    min_outstanding_pct_of_peak: float = DEFAULTS["min_outstanding_in_sample_pct_of_peak"]
+    # Trailing months for the LTV / UE interest yield and the average term.
+    ltv_window_months: int = DEFAULTS["ltv_window_months"]
     stress_percentile: float = DEFAULTS["stress_percentile"]
     denominator_lag_months: int = DEFAULTS["denominator_lag_months"]
     lagged_blend_weight: float = DEFAULTS["lagged_blend_weight"]
@@ -91,6 +96,12 @@ def run(df: pd.DataFrame, inputs: RevolvingInputs) -> dict:
     tm = build_transition_matrices(
         model_frame, spec, inputs.roll_rate_window, lgd, inputs.balance_tolerance
     )
+    # The workbook's absolute floor (1bn) fits one deal only; relative to the
+    # book's peak it drops ramp-up months for a book of any size or currency.
+    in_sample_floor = max(
+        inputs.min_outstanding_in_sample,
+        inputs.min_outstanding_pct_of_peak * float(monthly["principal_outstanding"].max()),
+    )
     pit = point_in_time_loss_rates(
         model_frame,
         spec,
@@ -99,7 +110,7 @@ def run(df: pd.DataFrame, inputs: RevolvingInputs) -> dict:
         lgd,
         inputs.denominator_lag_months,
         inputs.lagged_blend_weight,
-        inputs.min_outstanding_in_sample,
+        in_sample_floor,
     )
     dist = loss_rate_distribution(pit, inputs.stress_percentile)
     basis = dist[inputs.loss_rate_basis]
@@ -117,8 +128,25 @@ def run(df: pd.DataFrame, inputs: RevolvingInputs) -> dict:
     wo_window = inputs.writeoff_window_months
     over_time = metrics_over_time(monthly, window, full, wo_window)
     values = metrics_at(monthly, len(monthly) - 1, window, full, wo_window)
-    perf = performance(monthly, pit, lgd, full)
-    ue = unit_economics(values, inputs.cost_of_funds_pct, inputs.opex_pct, perf["avgTerm"])
+    perf = performance(monthly, pit, lgd, full, inputs.ltv_window_months)
+    # The LTV loss input is the Outputs stress percentile on the selected
+    # basis ('Loss Rate LTV' row 57), not the naive Performance line - the
+    # workbook calls naive a lower bound.
+    perf.update(
+        {
+            "lossRate95": _num(basis["Stress percentile"]),
+            "lossRateMonths": int(basis["Months in sample"]),
+            "lossRateBasis": inputs.loss_rate_basis,
+            "inSampleFloor": in_sample_floor,
+        }
+    )
+    ue = unit_economics(
+        inputs.cost_of_funds_pct,
+        inputs.opex_pct,
+        perf["avgTerm"],
+        perf["interestYield"],
+        perf["writeOffRate"],
+    )
     values.update(
         {
             "coverage_perf": tm["eclSummary"]["coveragePerforming"],
@@ -154,11 +182,12 @@ def run(df: pd.DataFrame, inputs: RevolvingInputs) -> dict:
         "overTime": over_time,
         "unitEconomics": ue,
         "performance": perf,
-        "ltvInterest": values["rate_m"] * perf["avgTerm"]
-        if values.get("rate_m") is not None and perf["avgTerm"] is not None
+        "ltvInterest": perf["interestYield"] * perf["avgTerm"]
+        if perf["interestYield"] is not None and perf["avgTerm"] is not None
         else None,
         "tenorInputs": _tenor_inputs(monthly, window, values),
         "ageingMix": _ageing_mix(monthly) if full else [],
+        "largestCustomerShare": _largest_customer_share(monthly),
         "earlyWarnings": early_warnings(
             over_time, inputs.early_warning_lookback_months, inputs.early_warning_threshold
         ),
@@ -205,6 +234,16 @@ def _ageing_mix(monthly: pd.DataFrame) -> list[dict]:
         }
         for label, cols in _AGEING
     ]
+
+
+def _largest_customer_share(monthly: pd.DataFrame) -> float | None:
+    """The largest borrower's balance as a share of principal outstanding at
+    the as-of month; None when the column isn't mapped or is blank."""
+    if LARGEST_CUSTOMER not in monthly.columns:
+        return None
+    now = monthly.iloc[-1]
+    largest, total = now[LARGEST_CUSTOMER], now["principal_outstanding"]
+    return None if pd.isna(largest) or not total else float(largest / total)
 
 
 def _tenor_inputs(monthly: pd.DataFrame, window: int, values: dict) -> dict:
@@ -255,12 +294,12 @@ def _warnings(monthly, tm, pit, inputs) -> list[str]:
             "Months missing from the data (roll rates across a gap pair non-consecutive "
             f"months): {', '.join(gaps)}"
         )
-    tail_cols = ["BAL_PAR_121_150", "BAL_PAR_151_180", "BAL_PAR_180_PLUS"]
-    tail = monthly[tail_cols].iloc[-1].sum() if summary["method"] == "full" else 0
+    tail = _late_tail(monthly).iloc[-1] if summary["method"] == "full" else 0
     if tail:
         out.append(
-            f"{tail:,.0f} of balance sits in PAR 121+ at the as-of month; the chain ends at "
-            "PAR 91-120, so it is outside the ECL."
+            f"{tail:,.0f} of balance sits in PAR 121+ at the as-of month, so this lender writes "
+            "off later than the roll chain assumes (write-off straight after PAR 91-120). That "
+            "balance is outside the ECL, and the reported write-offs lag the roll rates."
         )
     checks = tm["checks"]
     if "Unexplained as % of outstanding" in checks.index:
@@ -274,9 +313,14 @@ def _warnings(monthly, tm, pit, inputs) -> list[str]:
     if not pit["In sample"].any():
         out.append(
             "No month reaches the minimum outstanding for the loss-rate sample, so Loss Rate "
-            "and 95th %ile are blank - lower it in General Inputs."
+            "and 95th %ile are blank - lower the minimum (or its share of peak) in General Inputs."
         )
     return out
+
+
+def _late_tail(monthly: pd.DataFrame) -> pd.Series:
+    """Balance past the chain's end (PAR 121+) in each month."""
+    return monthly[["BAL_PAR_121_150", "BAL_PAR_151_180", "BAL_PAR_180_PLUS"]].sum(axis=1)
 
 
 def quality_checks(monthly, checks, inputs) -> list[dict]:
@@ -323,6 +367,25 @@ def quality_checks(monthly, checks, inputs) -> list[dict]:
                 ],
             }
         )
+    if has_full_buckets(monthly):
+        tail = _late_tail(monthly)
+        late = [
+            {"Month": m, "Balance in PAR 121+": round(float(v), 2)}
+            for m, v in zip(monthly[MONTH].dt.strftime("%Y-%m"), tail, strict=True)
+            if v
+        ]
+        if late:
+            out.append(
+                {
+                    "level": "warning",
+                    "check_id": "late_write_off",
+                    "message": (
+                        f"{len(late)} month(s) with balance in PAR 121+ - the lender writes off "
+                        "later than the roll chain assumes, so that balance is outside the ECL."
+                    ),
+                    "detail": late,
+                }
+            )
     gaps = missing_months(monthly)
     if gaps:
         out.append(

@@ -95,7 +95,9 @@ These are the assumptions the model uses. Every default comes from `config.toml`
 |---|---|---|
 | Loss-rate basis | Blended | Naive, Blended or Lagged (section 5.3). |
 | Stress percentile | 0.95 | The percentile reported as "95th %ile". It sets the advance rate. |
-| Minimum outstanding to be in sample | 1,000,000,000 | A month counts in the loss-rate sample only when G is at least this much. **Set it per deal, in the source currency.** A book smaller than this has no in-sample months, which blanks Loss Rate, 95th %ile and the advance rate. |
+| Minimum outstanding to be in sample | 0 | Absolute floor: a month counts in the loss-rate sample only when G is at least this much, in the source currency. The reference workbook uses 1,000,000,000, sized for its own deal. |
+| Minimum share of peak outstanding | 0.10 | A month also needs G of at least this share of the book's highest G. Leaves out ramp-up months for a book of any size or currency. |
+| LTV / UE window | 12 months | Trailing months the interest yield and the average term (LTV Calculator and Unit Economics) are averaged over. |
 | Denominator lag | 5 months | For the Lagged basis: divide by cumulative issuance this many months earlier. |
 | Blend weight on the lagged rate | 0.5 | For the Blended basis: 0 = Naive only, 1 = Lagged only. |
 
@@ -156,7 +158,7 @@ The same warning banners appear at the top of the Portfolio Summary and Outputs 
 - **Months are missing** from the data: roll rates across a gap pair months that aren't consecutive.
 - **Balance sits in PAR 121+** at the as-of month (full model only): it is outside the chain, so it isn't in the ECL.
 - **Unexplained movement at the as-of month** is above 5% of outstanding.
-- **No month is in the loss-rate sample:** Loss Rate and 95th %ile are blank. Lower the minimum outstanding.
+- **No month is in the loss-rate sample:** Loss Rate and 95th %ile are blank. Lower the minimum outstanding or its share of peak.
 
 ---
 
@@ -175,7 +177,7 @@ A one-screen overview at the as-of month. It only repeats figures calculated on 
 | **Headline** | Outstanding, Customers, Credit line utilised, Interest rate (m), Write-offs (m), Total ECL, ECL coverage (total) | Outputs ratio block and Transition Matrices ECL |
 | **Credit quality** | The template's Active, PAR30, PAR60 and PAR90, each with its lookback average, the change and the ⚠ flag | Early warnings (Outputs) |
 | **Ageing mix** | Outstanding by standard bucket (Current, 1-30, 31-60, 61-90, 91-120, 121-180+, Defaulted), balance and share; adds to 100%. Needs the bucket columns | Bucket balances (Transition Matrices) |
-| **Unit economics** | Net yield per month, annualised, and over the principal tenor | Unit economics (Outputs) |
+| **Unit economics** | Net yield per month, annualised, and over the average term | Unit economics (Outputs) |
 | **Stress** | Loss rate and advance rate for each scenario | Backtest & Stress |
 | **Facility** | Whether any covenant is breached, the covenant with the tightest headroom, and pass/fail for each | Facility |
 
@@ -254,8 +256,8 @@ A metric that needs the bucket balances shows "—" until those are mapped. One 
 
 | Line | Monthly |
 |---|---|
-| Interest yield | Interest Rate (m) |
-| Write-offs | − write-off rate (m) |
+| Interest yield | monthly interest (accrued when mapped, else collected) ÷ average outstanding, averaged over the LTV / UE window |
+| Write-offs | − monthly principal written off ÷ average outstanding, averaged over the LTV / UE window |
 | Cost of funds | − cost of funds ÷ 12 |
 | Operating costs | − operating costs ÷ 12 |
 | **Net yield** | the sum of the four lines above |
@@ -263,9 +265,9 @@ A metric that needs the bucket balances shows "—" until those are mapped. One 
 The columns are:
 - **Monthly**: the figures above.
 - **Annualised**: monthly × 12.
-- **Over the principal tenor**: monthly × tenor from principal turnover.
+- **Over the average term**: monthly × the average term (mean of 1 ÷ net collection ratio over the LTV / UE window).
 
-**Tenor inputs.** Principal collected in the as-of month, average outstanding over the ratio window, the principal payment rate (collected ÷ average outstanding) and the principal tenor (1 ÷ payment rate) that the over-tenor column uses.
+**Principal tenor (reference only).** Principal collected in the as-of month, average outstanding over the ratio window, the principal payment rate (collected ÷ average outstanding) and the principal tenor (1 ÷ payment rate). The over-term column does not use it.
 
 **Interest yield — whole book vs performing book.** The same interest collected over the
 ratio window, divided by principal outstanding (whole book) and by outstanding less
@@ -405,7 +407,7 @@ For each month m, using only roll rates observable by m:
 >
 > **Blended**(m) = Naive × (1 − blend weight) + Lagged × blend weight
 
-- A month is **in sample** when G ≥ the minimum outstanding.
+- A month is **in sample** when G ≥ the larger of the minimum outstanding and its share of peak G.
 - The Outputs **Loss Rate** is the mean of the chosen basis over the in-sample months.
 - **95th %ile** is its stress percentile.
 - Naive is a lower bound, because recent issuance hasn't had time to default. Lagged corrects for that.

@@ -68,6 +68,8 @@ export const REVOLVING_TEMPLATE_FIELDS: MappingField[] = [
   { key: 'MONTHS_FILLED_BY_CARRYFWD', label: 'Months Filled by Carry-Forward', required: false, description: 'Data-quality: loan-months carried forward' },
   { key: 'UNEXPLAINED', label: 'Unexplained Movement', required: false, description: 'Data-quality: balance movement not explained by flows' },
   { key: 'recoveries', label: 'recoveries', required: false, description: 'Cash recovered in the month on written-off balances (optional - lets LGD be derived)' },
+  { key: 'largest_customer_outstanding', label: 'largest_customer_outstanding', required: false, description: "Balance of the single largest borrower at month-end (optional - shows borrower concentration on the Summary)" },
+  { key: 'interest_accrued', label: 'interest_accrued', required: false, description: 'Interest charged in the month, collected or not (optional - the LTV and UE interest yield uses it instead of interest collected)' },
 ];
 
 export const DEMO_FILE = {

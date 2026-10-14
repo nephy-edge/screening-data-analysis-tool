@@ -1,10 +1,13 @@
 import {
   Area,
   AreaChart,
+  Bar,
   CartesianGrid,
+  ComposedChart,
   Legend,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -12,14 +15,16 @@ import {
 } from 'recharts';
 import { useEffect, useState } from 'react';
 import { useAppStore } from '../state/AppStore';
-import { Alert, HelpTip, Input, Metric, Select, Table, type TableColumn } from '../components/ui';
+import { Alert, HelpTip, Input, Metric, Select, Table, Tabs, type TableColumn } from '../components/ui';
 import { computeLtvCalculator, type LtvCalculatorResponse, type MetricKind, type RevolvingRatio } from '../api/engine';
-import { LtvMatrix } from './LtvTabs';
+import { FxChart, LtvMatrix, SnapshotTable, fmtPct } from './LtvTabs';
 
 type Row = Record<string, unknown>;
 
 const isNum = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
-const fpct = (v: unknown, digits = 2) => (isNum(v) ? `${((v as number) * 100).toFixed(digits)}%` : '—');
+// `+ 0` drops the sign from a value that rounds to zero (no "-0.00%").
+const fpct = (v: unknown, digits = 2) =>
+  isNum(v) ? `${(Number(((v as number) * 100).toFixed(digits)) + 0).toFixed(digits)}%` : '—';
 // `+ 0` turns a rounding-noise -0 (e.g. G − H − I − J) into 0.
 const fmoney = (v: unknown) =>
   isNum(v) ? (Math.round(v as number) + 0).toLocaleString() : '—';
@@ -74,8 +79,8 @@ const ROW_HELP: Record<string, string> = {
   'ECL coverage (total)': 'Total ECL divided by the total balance, including defaulted stock.',
   'Net yield (annualised)': 'Annual interest yield less write-offs, cost of funds and operating costs.',
   // Unit economics
-  'Interest yield': 'Interest collected per dollar outstanding.',
-  'Write-offs': 'Principal written off per dollar outstanding (a deduction).',
+  'Interest yield': 'Interest (accrued when mapped, else collected) per dollar outstanding, averaged over the LTV / UE window.',
+  'Write-offs': 'Principal written off per dollar outstanding (a deduction), averaged over the LTV / UE window like the interest yield.',
   'Cost of funds': 'Funding cost per dollar outstanding, from General Inputs (a deduction).',
   'Operating costs': 'Operating cost per dollar outstanding, from General Inputs (a deduction).',
   'Net yield': 'Interest yield less write-offs, cost of funds and operating costs.',
@@ -127,7 +132,7 @@ const COL_HELP: Record<string, string> = {
   // Unit economics
   Monthly: 'Per dollar outstanding, per month.',
   Annualised: 'The monthly figure multiplied by 12.',
-  'Over the principal tenor': 'The monthly figure multiplied by the term: the average of 1 / net collection ratio.',
+  'Over the average term': 'The monthly figure multiplied by the average term: the mean of 1 / net collection ratio over the LTV / UE window.',
   // Backtest
   'Forecast write-offs': 'Write-offs the ECL chain forecast from the book at that month, using only data up to it.',
   'Actual write-offs (2 to 4 months later)': 'Write-offs actually booked two to four months later.',
@@ -170,6 +175,26 @@ const fcell = (v: unknown) => (isNum(v) ? fmoney(v) : v === null || v === undefi
  * light: adjacent CVD ΔE ≥ 9.1); each chart sits above its table, which is
  * the table view the palette's contrast WARN requires. */
 const SERIES = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
+// Delinquency severity, green (performing) to dark red (defaulted). Ordered
+// by lightness as well as hue so the order survives colour-blindness
+// (validated with the dataviz validate_palette script; adjacent CVD passes).
+const SEVERITY: Array<[RegExp, string]> = [
+  [/default|written|91\+/i, '#4a0a0e'],
+  [/121|151|180/, '#7c1418'],
+  [/91-120|91_120/, '#b52222'],
+  [/61-90|61_90/, '#e2582a'],
+  [/31-60|31_60|1-60/, '#f39a2e'],
+  [/1-30|1_30/, '#f5c84c'],
+  [/^new/i, '#7cc68b'],
+  [/current|active/i, '#1f9d55'],
+];
+/** Colour for a bucket (or a roll from a bucket: the part before the arrow). */
+const severityColor = (name: string, i: number) => {
+  const from = name.split('→')[0];
+  return SEVERITY.find(([re]) => re.test(from))?.[1] ?? SERIES[i % SERIES.length];
+};
+// Loss lines are bad-is-up, so they wear the critical red.
+const LOSS_RED = '#b52222';
 const MONTH_KEY = /^\d{4}-\d{2}$/;
 const axisTick = { fontSize: 11, fill: '#666' };
 const compact = (v: unknown) => (typeof v === 'number' ? v.toLocaleString(undefined, { notation: 'compact' }) : String(v));
@@ -218,9 +243,10 @@ function BalancesChart({ rows }: { rows: Row[] }) {
             type="monotone"
             dataKey={name}
             stackId="b"
-            stroke={SERIES[i % SERIES.length]}
+            legendType="square"
+            stroke={severityColor(name, i)}
             strokeWidth={1}
-            fill={SERIES[i % SERIES.length]}
+            fill={severityColor(name, i)}
             fillOpacity={0.9}
             isAnimationActive={false}
           />
@@ -245,32 +271,13 @@ function RollRatesChart({ rows }: { rows: Row[] }) {
             key={name}
             type="monotone"
             dataKey={name}
-            stroke={SERIES[i % SERIES.length]}
+            stroke={severityColor(name, i)}
             strokeWidth={2}
             dot={{ r: 3 }}
             connectNulls={false}
             isAnimationActive={false}
           />
         ))}
-      </LineChart>
-    </ChartCard>
-  );
-}
-
-/** Forecast vs actual write-offs per tested month (same unit, one axis). */
-function BacktestChart({ rows }: { rows: Row[] }) {
-  const actualKey = Object.keys(rows[0] ?? {}).find((k) => k.startsWith('Actual write-offs')) ?? '';
-  const data = rows.filter((r) => r['Outcome observed']);
-  return (
-    <ChartCard title="Forecast vs actual write-offs (months with the outcome observed)">
-      <LineChart data={data} margin={{ top: 8, right: 16, bottom: 0, left: 0 }}>
-        <CartesianGrid stroke="#e7ecee" vertical={false} />
-        <XAxis dataKey="As-of" tick={axisTick} />
-        <YAxis tick={axisTick} tickFormatter={compact} />
-        <Tooltip formatter={(v) => fmoney(v)} />
-        <Legend formatter={legendText} />
-        <Line dataKey="Forecast write-offs" stroke={SERIES[0]} strokeWidth={2} dot={{ r: 4 }} isAnimationActive={false} />
-        <Line dataKey={actualKey} stroke={SERIES[1]} strokeWidth={2} dot={{ r: 4 }} isAnimationActive={false} />
       </LineChart>
     </ChartCard>
   );
@@ -372,13 +379,13 @@ export function RevolvingOutputsTab() {
           { key: 'item', header: '', render: (r: RevolvingUe) => <RowLabel label={r.item} help={ROW_HELP[r.item]} /> },
           { key: 'monthly', header: 'Monthly', align: 'right', render: (r: RevolvingUe) => <span className="sd-mono">{fpct(r.monthly)}</span> },
           { key: 'annualised', header: hdr('Annualised'), align: 'right', render: (r: RevolvingUe) => <span className="sd-mono">{fpct(r.annualised)}</span> },
-          { key: 'overTenor', header: hdr('Over the principal tenor'), align: 'right', render: (r: RevolvingUe) => <span className="sd-mono">{fpct(r.overTenor)}</span> },
+          { key: 'overTenor', header: hdr('Over the average term'), align: 'right', render: (r: RevolvingUe) => <span className="sd-mono">{fpct(r.overTenor)}</span> },
         ]}
         rows={res.unitEconomics}
       />
 
-      <h2 className="sd-h2">Tenor inputs</h2>
-      <p className="sd-muted">The figures behind the principal tenor that the &quot;Over the principal tenor&quot; column multiplies by.</p>
+      <h2 className="sd-h2">Principal tenor (reference only)</h2>
+      <p className="sd-muted">How fast principal turns over at the as-of month. Shown for reference: the &quot;Over the average term&quot; column above multiplies by the average term (1 / net collection ratio) instead.</p>
       <Table
         columns={[
           { key: 'label', header: 'Input', render: (r: TenorRow) => <RowLabel label={r.label} help={r.help} /> },
@@ -452,124 +459,11 @@ type RevolvingUe = RevolvingResult['unitEconomics'][number];
 type RevolvingEw = RevolvingResult['earlyWarnings'][number];
 type InterestBasis = { label: string; help: string; monthly: number | null };
 type TenorRow = { label: string; help: string; value: string };
-type AgeingRow = RevolvingResult['ageingMix'][number];
 
-/** Backtest (forecast vs actual write-offs) and stress scenarios. */
-export function RevolvingBacktestStressTab() {
-  const { state } = useAppStore();
-  const res = state.revolvingResponse;
-  if (!res) return <Alert tone="info">Run analysis to see the backtest and stress scenarios.</Alert>;
-  const b = res.backtestSummary;
-  return (
-    <>
-      <h2 className="sd-h2">1. Backtest — forecast vs actual write-offs</h2>
-      <p className="sd-muted">
-        At each past month the ECL chain is struck on data up to that month only; its forecast of write-offs from the
-        book then on balance sheet is compared with the write-offs booked {b.window}. Below 1 means the forecast was
-        conservative.
-      </p>
-      <div className="sd-grid sd-grid--metrics">
-        <Metric label="Months tested" value={String(b.months)} hint="Months whose full outcome window is observed." />
-        <Metric label="Actual vs forecast (pooled)" value={fdec(b.pooledRatio, 3)} hint="Total actual write-offs divided by total forecast write-offs over the tested months." />
-        <Metric label="Median ratio" value={fdec(b.medianRatio, 3)} hint="The middle monthly actual-vs-forecast ratio over the tested months." />
-        <Metric label="Range" value={`${fdec(b.minRatio, 2)} – ${fdec(b.maxRatio, 2)}`} hint="Lowest and highest monthly ratio." />
-        <Metric label="Mean absolute error" value={fpct(b.meanAbsError, 1)} hint="On average, how far each monthly ratio is from 1, in either direction." />
-      </div>
-      {b.months === 0 ? (
-        <Alert tone="info">Not enough history yet for a backtest (see General Inputs → Backtest).</Alert>
-      ) : null}
-      {b.months > 0 ? <BacktestChart rows={res.backtest} /> : null}
-      <WideTable
-        rows={res.backtest}
-        format={(v, col) =>
-          col === 'Actual vs forecast'
-            ? fdec(v, 3)
-            : col === 'Principal tenor (m)'
-              ? fdec(v, 2)
-              : col === 'Coverage (performing)' || col === 'Gap'
-              ? fpct(v)
-              : col === 'Outcome observed'
-                ? v
-                  ? 'Yes'
-                  : 'Not yet'
-                : fcell(v)
-        }
-      />
 
-      <h2 className="sd-h2">2. Stress scenarios</h2>
-      <p className="sd-muted">
-        Selected roll rates and LGD scaled per scenario (a stressed rate is capped at 100% unless already above it).
-        Loss rate is the as-of point-in-time rate on the chosen basis; the advance rate is 100% less the loss rate, less the haircut.
-      </p>
-      <Table
-        columns={[
-          { key: 'name', header: 'Scenario' },
-          { key: 'roll', header: hdr('Roll-rate multiplier'), align: 'right', render: (r: Stress) => fdec(r.rollRateMultiplier, 2) },
-          { key: 'lgdm', header: hdr('LGD multiplier'), align: 'right', render: (r: Stress) => fdec(r.lgdMultiplier, 2) },
-          { key: 'lgd', header: hdr('LGD'), align: 'right', render: (r: Stress) => fpct(r.lgd) },
-          { key: 'ecl', header: hdr('Total ECL'), align: 'right', render: (r: Stress) => <span className="sd-mono">{fmoney(r.totalEcl)}</span> },
-          { key: 'cp', header: hdr('Coverage (performing)'), align: 'right', render: (r: Stress) => fpct(r.coveragePerforming) },
-          { key: 'ct', header: hdr('Coverage (total)'), align: 'right', render: (r: Stress) => fpct(r.coverageTotal) },
-          { key: 'lr', header: hdr('Loss rate'), align: 'right', render: (r: Stress) => fpct(r.lossRate) },
-          { key: 'adv', header: hdr('Advance rate'), align: 'right', render: (r: Stress) => fpct(r.advanceRate) },
-        ]}
-        rows={res.stress}
-      />
-      {res.stress.some((s) => !s.valid) ? (
-        <Alert tone="error">Balances don&apos;t tie at the as-of month — stressed ECL withheld.</Alert>
-      ) : null}
-    </>
-  );
-}
-
-type Stress = RevolvingResult['stress'][number];
-type Covenant = RevolvingResult['covenants'][number];
-
-/** Advance rate and covenant tests. */
-export function RevolvingFacilityTab() {
-  const { state } = useAppStore();
-  const res = state.revolvingResponse;
-  if (!res) return <Alert tone="info">Run analysis to see the facility view.</Alert>;
-  const a = res.advance;
-  const breaches = res.covenants.filter((c) => c.status === 'BREACH').length;
-  return (
-    <>
-      <h2 className="sd-h2">1. Advance rate</h2>
-      <div className="sd-grid sd-grid--metrics">
-        <Metric label="Stress loss rate" value={fpct(a.stressLossRate)} hint="Outputs 95th %ile (point-in-time loss rate at the stress percentile)." />
-        <Metric label="Haircut" value={fpct(a.haircut)} hint="Additional haircut from General Inputs." />
-        <Metric label="Maximum advance rate" value={fpct(a.advanceRate)} hint="100% less the stress loss rate, less the haircut, and never below zero ('Loss Rate LTV' row 65)." />
-      </div>
-
-      <h2 className="sd-h2">2. Covenant tests — as of {res.eclSummary.asOfMonth}</h2>
-      {res.covenants.length === 0 ? (
-        <Alert tone="info">No covenants set. Add the deal's covenant terms in General Inputs → Covenant tests to test them here.</Alert>
-      ) : breaches ? (
-        <Alert tone="error">{breaches} covenant(s) breached.</Alert>
-      ) : (
-        <Alert tone="info">No covenant breached. Limits are set in General Inputs.</Alert>
-      )}
-      {res.covenants.length === 0 ? null : <Table
-        columns={[
-          { key: 'label', header: 'Metric', render: (r: { label: string }) => <RowLabel label={r.label} help={ROW_HELP[r.label]} /> },
-          { key: 'test', header: 'Test', render: (c: Covenant) => `${c.operator === '<=' ? 'at most' : 'at least'} ${fkind(c.limit, c.kind)}` },
-          { key: 'value', header: 'Value', align: 'right', render: (c: Covenant) => <span className="sd-mono">{fkind(c.value, c.kind)}</span> },
-          { key: 'headroom', header: hdr('Headroom'), align: 'right', render: (c: Covenant) => <span className="sd-mono">{fkind(c.headroom, c.kind)}</span> },
-          {
-            key: 'status',
-            header: 'Result',
-            render: (c: Covenant) => (c.status === 'BREACH' ? '✖ BREACH' : c.status === 'PASS' ? '✔ PASS' : 'N/A (map bucket balances)'),
-          },
-        ]}
-        rows={res.covenants}
-      />}
-    </>
-  );
-}
-
-/** rcl_rollrate_ecl_3.xlsx's 'Roll Rate ECL' tab: balances by bucket, the
- * roll rates with their T3/T6/T12/ALL averages, the cumulative loss factor,
- * the ECL at the as-of month, and the data-quality checks. */
+/** rcl_rollrate_ecl_3.xlsx's 'Roll Rate ECL' tab: the ECL summary, balances
+ * by bucket and the roll rates with their T3/T6/T12/ALL averages. The ECL
+ * table by bucket sits on Data Checks (RevolvingEclTable). */
 export function RevolvingTransitionTab() {
   const { state } = useAppStore();
   const res = state.revolvingResponse;
@@ -611,120 +505,172 @@ export function RevolvingTransitionTab() {
       </p>
       <RollRatesChart rows={res.rollRates} />
       <WideTable rows={res.rollRates} format={(v, col) => (col === 'Denominator' ? String(v) : fpct(v))} />
-      <h2 className="sd-h2">3. Cumulative loss factor</h2>
-      <WideTable rows={res.lossFactors} format={(v) => fpct(v)} />
-      <h2 className="sd-h2">4. Expected credit loss</h2>
-      <WideTable
-        rows={res.ecl}
-        format={(v, col) => (col === 'Loss factor' || col === 'LGD' ? fpct(v) : fcell(v))}
-      />
-      <h2 className="sd-h2">5. Data quality</h2>
-      <WideTable
-        rows={res.checks}
-        format={(v, _c, row) => (String(row.Check).includes('%') ? fpct(v) : fcell(v))}
-      />
     </>
   );
 }
 
-/** One-screen overview at the as-of month, reusing figures the other tabs
- * already show: headline ratios, credit quality vs the lookback, unit
- * economics, stress scenarios and covenant results. */
+/** Data Checks: the ECL build at the as-of month - balance, loss factor and
+ * LGD per bucket. */
+export function RevolvingEclTable() {
+  const { state } = useAppStore();
+  const res = state.revolvingResponse;
+  if (!res) return null;
+  return (
+    <div className="sd-card">
+      <h2 className="sd-h2">Expected credit loss — as of {res.eclSummary.asOfMonth}</h2>
+      <WideTable
+        rows={res.ecl}
+        format={(v, col) => (col === 'Loss factor' || col === 'LGD' ? fpct(v) : fcell(v))}
+      />
+    </div>
+  );
+}
+
+/** The values of a chart's dashed reference lines, as a key above the plot
+ * rather than labels on it, so they never sit on top of bars, lines or dots. */
+function RefKey({ items }: { items: Array<[string, string | null]> }) {
+  const shown = items.filter((i): i is [string, string] => i[1] !== null);
+  if (shown.length === 0) return null;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 12, marginBottom: 4 }}>
+      {shown.map(([color, text]) => (
+        <span key={text} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: '#333' }}>
+          <svg width="22" height="6" aria-hidden="true">
+            <line x1="0" y1="3" x2="22" y2="3" stroke={color} strokeWidth="2" strokeDasharray="5 3" />
+          </svg>
+          {text}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** Summary chart, mirroring Lending's "Cohort Loss Rates": grey bars =
+ * principal issued per month, orange line = the in-sample monthly loss rate on
+ * the selected basis, with the average and 95th %ile as reference lines. */
+function MonthlyLossRateChart({ res, avgLoss, pctile95 }: { res: RevolvingResult; avgLoss: number | null; pctile95: number | null }) {
+  const basis = res.performance.lossRateBasis;
+  const issued = res.performance.table.find((r) => r.key === 'principal_issued');
+  const loss = new Map(
+    res.lossRates.filter((r) => isNum(r[basis])).map((r) => [String(r.Month), r[basis] as number]),
+  );
+  const data = Object.keys(issued ?? {})
+    .filter((k) => MONTH_KEY.test(k))
+    .map((m) => ({ month: m, principal: isNum(issued![m]) ? (issued![m] as number) : null, lossRate: loss.get(m) ?? null }));
+  if (data.length === 0) return null;
+  return (
+    <div className="sd-card">
+      <h2 className="sd-h2">Monthly Loss Rates</h2>
+      <RefKey items={[['#6B7280', avgLoss === null ? null : `Avg: ${fpct(avgLoss)}`], ['#1f2937', pctile95 === null ? null : `95th %ile: ${fpct(pctile95)}`]]} />
+      <ResponsiveContainer width="100%" height={340}>
+        <ComposedChart data={data} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
+          <CartesianGrid stroke="#e7ecee" vertical={false} />
+          <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#666' }} />
+          <YAxis yAxisId="left" tick={{ fontSize: 11, fill: '#666' }} tickFormatter={compact} />
+          <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: '#666' }} tickFormatter={pctTick} />
+          <Tooltip formatter={(v, name) => (name === 'Loss Rate' ? fpct(v) : fmoney(v))} />
+          <Legend />
+          <Bar yAxisId="left" dataKey="principal" fill="#B8BEC6" name="Principal Issued" />
+          {avgLoss !== null && (
+            <ReferenceLine
+              yAxisId="right"
+              y={avgLoss}
+              stroke="#6B7280"
+              strokeDasharray="6 6"
+              ifOverflow="extendDomain"
+            />
+          )}
+          {pctile95 !== null && (
+            <ReferenceLine
+              yAxisId="right"
+              y={pctile95}
+              stroke="#1f2937"
+              strokeDasharray="6 6"
+              ifOverflow="extendDomain"
+            />
+          )}
+          <Line yAxisId="right" dataKey="lossRate" stroke={LOSS_RED} strokeWidth={2.5} dot={{ r: 3 }} name="Loss Rate" connectNulls />
+        </ComposedChart>
+      </ResponsiveContainer>
+      <p className="sd-muted">
+        Grey bars: principal issued per month. Red line: the {basis} loss rate for every month; the average and 95th
+        %ile use only the {res.performance.lossRateMonths} in-sample months.
+      </p>
+    </div>
+  );
+}
+
+type SnapshotRow = { label: string; value: string; help: string };
+
+/** The Lending Summary layout: five headline cards, then a Portfolio
+ * Snapshot table (every other key stat, including the credit-quality,
+ * covenant and data-check counts) beside the monthly loss-rate chart. */
 export function RevolvingSummaryTab() {
   const { state } = useAppStore();
   const res = state.revolvingResponse;
-  if (!res) return <Alert tone="info">Run analysis to see the summary.</Alert>;
+  if (!res) return <Alert tone="info">Run analysis to see the portfolio summary.</Alert>;
+  if (!res.performance?.lossRateBasis) return <StaleResult />;
+  const p = res.performance;
   const s = res.eclSummary;
-  const ratio = (label: string) => res.ratios.find((r) => r.label === label);
-  const pct = (label: string) => fpct(ratio(label)?.value);
-  const netYield = res.unitEconomics.find((u) => u.item === 'Net yield');
-  const quality = res.earlyWarnings.filter((e) => /template/.test(e.label));
-  const breaches = res.covenants.filter((c) => c.status === 'BREACH').length;
-  const tested = res.covenants.filter((c) => c.status !== 'N/A');
-  const tightest = tested.length
-    ? tested.reduce((a, b) => (Math.abs((b.headroom ?? Infinity) / (b.limit || 1)) < Math.abs((a.headroom ?? Infinity) / (a.limit || 1)) ? b : a))
-    : null;
+  const ratio = (row: number) => res.ratios.find((r) => r.row === row)?.value ?? null;
+  const perfRow = (key: string) => p.table.find((r) => r.key === key);
+  const months = Object.keys(p.table[0] ?? {}).filter((k) => MONTH_KEY.test(k));
+  const window = Number(res.generalInputs.ltvWindowMonths) || 12;
+  const series = (key: string, last?: number) =>
+    (last ? months.slice(-last) : months).map((m) => perfRow(key)?.[m]).filter(isNum) as number[];
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const ncr = series('ncr', window);
+  const avgNcr = ncr.length ? sum(ncr) / ncr.length : null;
+  const collected = sum(series('principal_paid')) + sum(series('interest_paid'));
+  const lines = series('avg_credit_line');
+  const lastCreditLine = lines.length ? lines[lines.length - 1] : null;
+  const netYield = res.unitEconomics.find((u) => u.item === 'Net yield')?.monthly ?? null;
+  const lossRate = ratio(12);
+  const rows: SnapshotRow[] = [
+    { label: 'Date Range', value: `${months[0] ?? '—'} to ${months[months.length - 1] ?? '—'}`, help: 'First to last report month in the data (up to the as-of month).' },
+    { label: 'Customers', value: fcount(ratio(23)), help: 'Borrowers on book at the as-of month.' },
+    { label: 'Total Principal Issued', value: fmoney(sum(series('principal_issued'))), help: 'Principal drawn across all months to date.' },
+    { label: 'Total Collected', value: fmoney(collected), help: 'Principal plus interest collected across all months to date.' },
+    { label: 'Credit Line Utilisation', value: fpct(ratio(24)), help: 'Principal outstanding divided by total credit line at the as-of month.' },
+    { label: 'Avg Credit Line per Customer', value: `$${fmoney(lastCreditLine)}`, help: 'A currency amount, not a percentage: total credit line divided by customers at the as-of month, in the source currency.' },
+    {
+      label: 'Highest Borrowing Customer %',
+      value: res.largestCustomerShare == null ? 'n/a' : fpct(res.largestCustomerShare),
+      help:
+        res.largestCustomerShare == null
+          ? "Map largest_customer_outstanding (the largest single borrower's balance each month) to show borrower concentration."
+          : "The largest single borrower's balance as a share of principal outstanding at the as-of month.",
+    },
+    { label: 'Interest Yield (m)', value: fpct(p.interestYield), help: `Monthly ${p.interestBasis} interest over average outstanding, averaged over the last ${p.interestYieldMonths} months.` },
+    { label: 'APR Proxy', value: fpct(p.interestYield === null ? null : p.interestYield * 12), help: 'Interest yield (m) times 12 - a simple flat annualisation.' },
+    { label: 'Write-off Rate (m)', value: fpct(p.writeOffRate), help: `Principal written off over average outstanding, averaged over the last ${p.interestYieldMonths} months (the Unit Economics write-off line).` },
+    { label: 'Net Yield (m)', value: fpct(netYield), help: 'Interest yield less write-offs, cost of funds and operating costs (Unit Economics).' },
+    { label: 'Avg Net Collection Ratio', value: fpct(avgNcr), help: `Principal plus interest collected over last month's outstanding, averaged over the last ${ncr.length} months.` },
+    { label: 'Avg Term (m)', value: fdec(p.avgTerm), help: `Average of 1 / net collection ratio over the last ${p.termMonths} months - the LTV term.` },
+  ];
   return (
     <>
       <Warnings warnings={res.warnings} />
-      <h2 className="sd-h2">Headline — as of {s.asOfMonth}</h2>
       <div className="sd-grid sd-grid--metrics">
-        <Metric label="Outstanding" value={fmoney(ratio('Outstanding')?.value)} hint={RATIO_HELP[22]} />
-        <Metric label="Customers" value={isNum(ratio('number of customers')?.value) ? (ratio('number of customers')!.value as number).toLocaleString() : '—'} hint={RATIO_HELP[23]} />
-        <Metric label="Credit line utilised" value={pct('% of credit line utilized')} hint={RATIO_HELP[24]} />
-        <Metric label="Interest rate (m)" value={pct('Interest Rate (m)')} hint={RATIO_HELP[10]} />
-        <Metric label="Write-offs (m)" value={pct('Write offs')} hint={RATIO_HELP[19]} />
-        <Metric label="Total ECL" value={fmoney(s.totalEcl)} hint={s.method === 'full' ? 'Full buckets' : 'Approximation from the Outputs columns'} />
-        <Metric label="ECL coverage (total)" value={fpct(s.coverageTotal)} hint={ROW_HELP['ECL coverage (total)']} />
+        <Metric label="Data up to" value={s.asOfMonth} hint="The as-of report month (the last month analysed)." />
+        <Metric label="Principal Outstanding" value={fmoney(ratio(22))} hint="Closing principal outstanding at the as-of month, incl. defaulted stock." />
+        <Metric label="Loss Rate" value={fpct(lossRate)} hint={`Mean of the in-sample monthly ${p.lossRateBasis} loss rates (Outputs).`} />
+        <Metric label="95th %ile Loss Rate" value={fpct(p.lossRate95)} hint={`Stress percentile of the in-sample monthly ${p.lossRateBasis} loss rates - the figure the LTV Calculator uses.`} />
+        <Metric label="Product Interest Rate" value={fpct(res.ltvInterest)} hint="Interest yield (m) multiplied by the average term - the LTV Calculator's interest input." />
       </div>
-
-      <h2 className="sd-h2">Credit quality</h2>
-      <Table
-        columns={[
-          { key: 'label', header: 'Metric', render: (r: { label: string }) => <RowLabel label={r.label} help={ROW_HELP[r.label]} /> },
-          { key: 'now', header: 'As-of', align: 'right', render: (r: RevolvingEw) => <span className="sd-mono">{fkind(r.now, r.kind)}</span> },
-          { key: 'prior', header: hdr('Lookback average'), align: 'right', render: (r: RevolvingEw) => <span className="sd-mono">{fkind(r.prior, r.kind)}</span> },
-          { key: 'change', header: hdr('Change'), align: 'right', render: (r: RevolvingEw) => <span className="sd-mono">{fpct(r.change, 1)}</span> },
-          { key: 'flag', header: hdr('Flag'), render: (r: RevolvingEw) => (r.flag ? '⚠ Worse' : '') },
-        ]}
-        rows={quality}
-      />
-
-      {res.ageingMix.length ? (
-        <>
-          <h2 className="sd-h2">Ageing mix — as of {s.asOfMonth}</h2>
-          <p className="sd-muted">Principal outstanding by days past due, standard buckets. Shares add to 100%.</p>
+      <div className="sd-grid sd-grid--2">
+        <div>
+          <h2 className="sd-h2">Portfolio Snapshot</h2>
           <Table
             columns={[
-              { key: 'bucket', header: 'Bucket' },
-              { key: 'balance', header: 'Balance', align: 'right', render: (r: AgeingRow) => <span className="sd-mono">{fmoney(r.balance)}</span> },
-              { key: 'share', header: 'Share of outstanding', align: 'right', render: (r: AgeingRow) => <span className="sd-mono">{fpct(r.share)}</span> },
+              { key: 'label', header: 'Metric', render: (r: SnapshotRow) => <RowLabel label={r.label} help={r.help} /> },
+              { key: 'value', header: 'Value', align: 'right', render: (r: SnapshotRow) => <span className="sd-mono">{r.value}</span> },
             ]}
-            rows={res.ageingMix}
+            rows={rows}
           />
-        </>
-      ) : null}
-
-      <h2 className="sd-h2">Unit economics</h2>
-      <div className="sd-grid sd-grid--metrics">
-        <Metric label="Net yield (m)" value={fpct(netYield?.monthly)} hint={ROW_HELP['Net yield']} />
-        <Metric label="Net yield (annualised)" value={fpct(netYield?.annualised)} hint={ROW_HELP['Net yield (annualised)']} />
-        <Metric label="Net yield (over tenor)" value={fpct(netYield?.overTenor)} hint="Net yield earned over the tenor implied by principal turnover." />
+        </div>
+        <MonthlyLossRateChart res={res} avgLoss={isNum(lossRate) ? (lossRate as number) : null} pctile95={p.lossRate95} />
       </div>
-
-      <h2 className="sd-h2">Stress</h2>
-      <Table
-        columns={[
-          { key: 'name', header: 'Scenario' },
-          { key: 'lr', header: hdr('Loss rate'), align: 'right', render: (r: Stress) => fpct(r.lossRate) },
-          { key: 'adv', header: hdr('Advance rate'), align: 'right', render: (r: Stress) => fpct(r.advanceRate) },
-        ]}
-        rows={res.stress}
-      />
-
-      <h2 className="sd-h2">Facility</h2>
-      {res.covenants.length === 0 ? (
-        <Alert tone="info">No covenants set. Add the deal's covenant terms in General Inputs → Covenant tests to test them here.</Alert>
-      ) : breaches ? (
-        <Alert tone="error">{breaches} covenant(s) breached.</Alert>
-      ) : (
-        <Alert tone="info">No covenant breached.</Alert>
-      )}
-      {tightest ? (
-        <p className="sd-muted">
-          Tightest headroom: {tightest.label} at {fkind(tightest.value, tightest.kind)} against{' '}
-          {tightest.operator === '<=' ? 'at most' : 'at least'} {fkind(tightest.limit, tightest.kind)} (headroom{' '}
-          {fkind(tightest.headroom, tightest.kind)}).
-        </p>
-      ) : null}
-      {res.covenants.length === 0 ? null : <Table
-        columns={[
-          { key: 'label', header: 'Covenant', render: (c: Covenant) => <RowLabel label={c.label} help={ROW_HELP[c.label]} /> },
-          { key: 'value', header: 'Value', align: 'right', render: (c: Covenant) => <span className="sd-mono">{fkind(c.value, c.kind)}</span> },
-          { key: 'status', header: 'Result', render: (c: Covenant) => (c.status === 'BREACH' ? '✖ BREACH' : c.status === 'PASS' ? '✔ PASS' : 'N/A') },
-        ]}
-        rows={res.covenants}
-      />}
     </>
   );
 }
@@ -811,9 +757,10 @@ function PerformanceChart({ res, chart, asPct }: { res: RevolvingResult; chart: 
               type="monotone"
               dataKey={name}
               stackId="b"
-              stroke={SERIES[i % SERIES.length]}
+              legendType="square"
+              stroke={severityColor(name, i)}
               strokeWidth={1}
-              fill={SERIES[i % SERIES.length]}
+              fill={severityColor(name, i)}
               fillOpacity={0.9}
               isAnimationActive={false}
             />
@@ -861,25 +808,48 @@ export function RevolvingPerformanceTab() {
   if (!res.performance) return <StaleResult />;
   const table = res.performance.table;
   const total = table.find((r) => r.key === 'total_balance')!;
-  const rows = table.map((r) => (asPct && r.group === 'breakdown' ? shareOfTotal(r, total) : r));
+  const shown = table.map((r) => (asPct && r.group === 'breakdown' ? shareOfTotal(r, total) : r));
+  // Labelled sections, each in one unit: New and Total Balance stay values,
+  // the bucket breakdown follows the toggle, the rest keep their own unit.
+  const sections: Array<[string, (r: PerfRow) => boolean]> = [
+    ['Balances (amount)', (r) => r.group === 'balance'],
+    [asPct ? 'Balance by bucket (% of Total Balance)' : 'Balance by bucket (amount)', (r) => r.group === 'breakdown'],
+    ['Rates (%)', (r) => r.group === 'metric' && r.kind === 'pct'],
+    ['Term (months)', (r) => r.group === 'metric' && r.kind === 'months'],
+    ['Amounts (currency)', (r) => r.group === 'metric' && r.kind === 'money'],
+    ['Counts', (r) => r.group === 'metric' && r.kind === 'count'],
+  ];
+  const rows = sections.flatMap(([title, keep]) => {
+    const part = shown.filter(keep);
+    return part.length ? [{ key: `section:${title}`, Metric: title } as PerfRow, ...part] : [];
+  });
+  const isSection = (r: PerfRow) => r.key.startsWith('section:');
   const months = Object.keys(table[0] ?? {}).filter((k) => MONTH_KEY.test(k));
   const cols: TableColumn<PerfRow>[] = [
-    { key: 'Metric', header: 'Monthly', render: (r) => <RowLabel label={r.Metric} help={PERF_HELP[r.Metric]} /> },
+    {
+      key: 'Metric',
+      header: 'Monthly',
+      render: (r) => (isSection(r) ? <strong>{r.Metric}</strong> : <RowLabel label={r.Metric} help={PERF_HELP[r.Metric]} />),
+    },
     ...months.map((m) => ({
       key: m,
       header: m,
       align: 'right' as const,
-      render: (r: PerfRow) => <span className="sd-mono">{fperf(r[m], r.kind)}</span>,
+      render: (r: PerfRow) => (isSection(r) ? null : <span className="sd-mono">{fperf(r[m], r.kind)}</span>),
     })),
   ];
   return (
     <>
       <Warnings warnings={res.warnings} />
+      <h2 className="sd-h2">Roll rates and ECL</h2>
+      <RevolvingTransitionTab />
+      <RevolvingEclTable />
+
       <h2 className="sd-h2">Monthly performance</h2>
       <div className="sd-actions">
-        <span className="sd-muted">Broken-down balance as</span>
+        <span className="sd-muted">Balances as</span>
         <Select
-          aria-label="Broken-down balance as"
+          aria-label="Balances as"
           value={asPct ? 'pct' : 'value'}
           onChange={(e) => setAsPct(e.target.value === 'pct')}
         >
@@ -887,7 +857,7 @@ export function RevolvingPerformanceTab() {
           <option value="pct">% of Total Balance</option>
         </Select>
       </div>
-      <p className="sd-muted">New Balance and Total Balance always show as values.</p>
+      <p className="sd-muted">The toggle switches the balance-by-bucket rows only; New Balance and Total Balance always show as values. The other sections keep the unit in their title. New Balance needs BAL_NEW mapped.</p>
       <Table columns={cols} rows={rows} />
 
       <h2 className="sd-h2">Charts</h2>
@@ -901,16 +871,61 @@ export function RevolvingPerformanceTab() {
         </Select>
       </div>
       <PerformanceChart res={res} chart={chart} asPct={asPct} />
-
-      <h2 className="sd-h2">Roll rates and ECL</h2>
-      <RevolvingTransitionTab />
     </>
   );
 }
 
-/** LTV Calculator: the Lending calculator's engine (/ltv-calculator, which
- * applies the 1.7x credit stress) fed with this book's interest, average
- * term and 95th %ile estimated loss rate. */
+/** The in-sample monthly loss rates on the selected basis with the 95th %ile
+ * line - the revolving counterpart of Lending's "Loss per Cohort" chart, same
+ * styling, limited (like Lending's) to what the 95th %ile uses. */
+function LossByMonthChart({ res, green }: { res: RevolvingResult; green: number | null }) {
+  const basis = res.performance.lossRateBasis;
+  const data = res.lossRates
+    .filter((r) => r['In sample'] && isNum(r[basis]))
+    .map((r) => ({ month: String(r.Month), lossRate: r[basis] as number }));
+  if (data.length === 0) return null;
+  return (
+    <div className="sd-card">
+      <h2 className="sd-h2">{`Loss Rate by Month (${basis})`}</h2>
+      <RefKey items={[['#1f2937', green === null ? null : `95th %ile: ${(green * 100).toFixed(2)}%`]]} />
+      <ResponsiveContainer width="100%" height={300}>
+        <LineChart data={data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+          <CartesianGrid stroke="#e7ecee" vertical={false} />
+          <XAxis
+            dataKey="month"
+            tick={{ fontSize: 11, fill: '#666' }}
+            label={{ value: 'Month', position: 'insideBottom', offset: -5, fontSize: 11 }}
+          />
+          <YAxis
+            tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
+            tick={{ fontSize: 11, fill: '#666' }}
+            label={{ value: 'Loss Rate', angle: -90, position: 'insideLeft', fontSize: 11 }}
+          />
+          <Tooltip formatter={(v) => (typeof v === 'number' ? `${(v * 100).toFixed(2)}%` : v)} />
+          <Line dataKey="lossRate" name="Loss Rate" stroke={LOSS_RED} strokeWidth={2} dot={{ r: 3 }} />
+          {green !== null ? (
+            <ReferenceLine
+              y={green}
+              stroke="#1f2937"
+              strokeDasharray="4 4"
+              ifOverflow="extendDomain"
+            />
+          ) : null}
+        </LineChart>
+      </ResponsiveContainer>
+      <p className="sd-muted">
+        In-sample months behind the 95th %ile: {res.performance.lossRateMonths} (principal outstanding at least{' '}
+        {fmoney(res.performance.inSampleFloor)}, the General Inputs minimum).
+      </p>
+    </div>
+  );
+}
+
+/** LTV Calculator: the same layout as Lending's tab (LendingLtvTab) on the
+ * same engine (/ltv-calculator, 1.7x credit stress). Only the green inputs
+ * differ - interest = trailing interest yield x avg term, term = trailing
+ * average of 1 / net collection ratio, loss = the Outputs stress percentile
+ * loss rate on the selected basis. */
 export function RevolvingLtvTab() {
   const { state, dispatch } = useAppStore();
   const res = state.revolvingResponse;
@@ -924,7 +939,7 @@ export function RevolvingLtvTab() {
   const loss = res?.performance?.lossRate95 ?? null;
 
   useEffect(() => {
-    if (!res?.performance) return;
+    if (!res?.performance?.lossRateBasis) return;
     let cancelled = false;
     computeLtvCalculator({
       dataSource,
@@ -949,7 +964,7 @@ export function RevolvingLtvTab() {
   }, [res, dataSource, country, macroFx, segmentation, hedgeRate, rolledHedge, interest, termDays, loss]);
 
   if (!res) return <Alert tone="info">Run analysis to see the LTV calculator.</Alert>;
-  if (!res.performance) return <StaleResult />;
+  if (!res.performance?.lossRateBasis) return <StaleResult />;
   const options = response?.options;
   const result = response?.ok ? response.result : null;
   const pick = (label: string, value: string, choices: string[], onChange: (v: string) => void) => (
@@ -967,8 +982,12 @@ export function RevolvingLtvTab() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <h2 className="sd-h2">LTV Calculator</h2>
+
+      <p className="sd-h2" style={{ fontSize: '0.95rem', fontWeight: 700 }}>
+        Inputs
+      </p>
       {options ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, alignItems: 'end' }}>
           {pick('Data Input Source', dataSource, options.dataInputSources, (v) => set({ dataSource: v }))}
           {pick('Alt Lender Country', country, options.countries, (v) => set({ country: v }))}
           {pick('Macro FX Risk Rating', macroFx, options.fxRiskRatings, (v) => set({ macroFx: v }))}
@@ -987,78 +1006,321 @@ export function RevolvingLtvTab() {
           {pick('Rolled hedge?', rolledHedge, options.hedgeTypes, (v) => set({ rolledHedge: v }))}
         </div>
       ) : null}
+
       {error ? <Alert tone="error">{error}</Alert> : null}
-      {response?.lossRateFallbackNotes.map((n) => (
-        <Alert key={n} tone="info">
-          {n}
-        </Alert>
-      ))}
+
+      {response
+        ? response.lossRateFallbackNotes.map((note, i) => <Alert key={`fb${i}`} tone="info">{note}</Alert>)
+        : null}
       {response && !response.ok ? <Alert tone="warning">{response.warning}</Alert> : null}
+      {result
+        ? result.notes.map((note, i) => <Alert key={`rn${i}`} tone="info">{note}</Alert>)
+        : null}
+
       {response && result ? (
         <>
+          <hr style={{ border: 'none', borderTop: '1px solid var(--sd-border, #e7ecee)' }} />
           <h3 className="sd-h2" style={{ fontSize: '1rem' }}>Outputs - Suggested LTV</h3>
           <LtvMatrix result={result} />
-          <h3 className="sd-h2" style={{ fontSize: '1rem' }}>Credit Stress Backup</h3>
-          <Table
-            columns={[
-              { key: 'label', header: 'Input', render: (r: TenorRow) => <RowLabel label={r.label} help={r.help} /> },
-              { key: 'value', header: 'Value', align: 'right', render: (r: TenorRow) => <span className="sd-mono">{r.value}</span> },
-            ]}
+          <p className="sd-muted">
+            FX High is the stressed, headline scenario. Advance on Principal = Advance on GBV grossed up by
+            (1 + weighted avg. gross interest). Both Advance on GBV and Advance on Principal limits must be
+            complied with (source: Receivables sheet, cell C44).
+          </p>
+
+          <hr style={{ border: 'none', borderTop: '1px solid var(--sd-border, #e7ecee)' }} />
+          <h3 className="sd-h2" style={{ fontSize: '1rem' }}>Back-Up</h3>
+
+          <h3 className="sd-h2" style={{ fontSize: '1rem', marginTop: 4 }}>FX Backup</h3>
+          <SnapshotTable
             rows={[
               {
-                label: 'Product Interest Rate',
-                help: 'Interest rate (m) multiplied by the average estimated term.',
-                value: fpct(response.greenInterest),
+                label: 'Term',
+                value: response.greenTermBucket != null ? `${response.greenTermBucket} months` : 'n/a',
+                help: `Average of 1 / net collection ratio over the last ${res.performance.termMonths} months (${fdec(avgTerm)} months), snapped to the nearest tenor bucket the workbook's dropdown allows.`,
               },
-              {
-                label: 'Avg Term (m)',
-                help: `Average of 1 / net collection ratio over ${res.performance.termMonths} months; snapped to ${response.greenTermBucket ?? 'n/a'} months for the FX tables.`,
-                value: fdec(avgTerm),
-              },
-              {
-                label: '95th %ile Loss',
-                help: `95th percentile of the monthly estimated loss rate over ${res.performance.lossRateMonths} in-sample months (or the sector minimum when n/a).`,
-                value: fpct(response.greenLoss),
-              },
-              {
-                label: 'Stress Loss',
-                help: `95th %ile loss multiplied by the credit stress factor (${result.credit_stress_factor}x).`,
-                value: fpct(result.stress_loss_rate),
-              },
-              { label: 'Min Sector Loss Rate', help: 'Sector-minimum stress loss floor.', value: fpct(result.minimum_stress_loss) },
-              { label: 'Selected Stress Loss', help: 'Max(stress loss, sector minimum).', value: fpct(result.selected_stress_loss) },
+              { label: 'Historical Devaluation', value: fmtPct(result.historical_fx_deval), help: '99th-percentile historical FX devaluation for the selected country and tenor.' },
+              { label: 'Utilized Historical FX Deval', value: fmtPct(result.utilized_fx_deval), help: 'Historical FX devaluation actually used - the 6-month figure when the tenor is 6 months or less.' },
+              { label: 'Stress FX Devaluation', value: fmtPct(result.stress_fx_deval), help: `Max(historical, utilized) FX devaluation, stressed by the FX stress factor (${result.stress_fx_factor}x).` },
+              { label: 'Base FX Deval', value: fmtPct(result.base_fx_deval), help: 'Stress FX devaluation, capped at the hedge rate when the deal is hedged.' },
+              { label: 'FX Slippage Stress', value: fmtPct(result.fx_slippage), help: 'FX basis-risk slippage for the selected country.' },
+              { label: 'Selected FX Deval (High)', value: fmtPct(result.selected_fx_deval_high), help: 'Base FX deval + slippage + high-end roll risk.' },
+              { label: 'Selected FX Deval (Low)', value: fmtPct(result.selected_fx_deval_low), help: 'Base FX deval + slippage + low-end roll risk.' },
             ]}
           />
+          <FxChart response={response} country={country} />
+
+          <h3 className="sd-h2" style={{ fontSize: '1rem', marginTop: 12 }}>Credit Stress Backup</h3>
+          <SnapshotTable
+            rows={[
+              { label: 'Product Interest Rate', value: fmtPct(response.greenInterest), help: `Monthly interest yield (${res.performance.interestBasis} interest over average outstanding, averaged over the last ${res.performance.interestYieldMonths} months) multiplied by the average term, pulled from this analysis.` },
+              {
+                label: '95th %ile Loss',
+                value: fmtPct(response.greenLoss),
+                help: `Stress percentile of the ${res.performance.lossRateBasis} monthly loss rate over ${res.performance.lossRateMonths} in-sample months (the Outputs 95th %ile), pulled from this analysis - or, when that's n/a, the Min Sector Loss Rate used as a fallback (see the note above).`,
+              },
+              { label: 'Stress Loss', value: fmtPct(result.stress_loss_rate), help: `Loss rate multiplied by the credit stress factor (${result.credit_stress_factor}x).` },
+              { label: 'Min Sector Loss Rate', value: fmtPct(result.minimum_stress_loss), help: 'Sector-minimum stress loss floor for the selected segmentation and data source.' },
+              { label: 'Selected Stress Loss', value: fmtPct(result.selected_stress_loss), help: 'Max(stress loss rate, minimum stress loss floor).' },
+            ]}
+          />
+          <LossByMonthChart res={res} green={response.greenLoss} />
         </>
       ) : null}
     </div>
   );
 }
 
-/** Unit Economics: the term (average of 1 / net collection ratio) and loss
- * rate up top, then the ratio, cost and metric tables. */
+/** Unit Economics: Overview / UE Model sub-tabs, laid out like Lending's. */
 export function RevolvingUnitEconomicsTab() {
+  const [subTab, setSubTab] = useState<'overview' | 'model'>('overview');
   const { state } = useAppStore();
   const res = state.revolvingResponse;
   if (!res) return <Alert tone="info">Run analysis to see unit economics.</Alert>;
-  if (!res.performance) return <StaleResult />;
+  if (!res.performance?.series) return <StaleResult />;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <Tabs
+        items={[
+          { id: 'overview', label: 'Overview' },
+          { id: 'model', label: 'UE Model' },
+        ]}
+        value={subTab}
+        onChange={(v) => setSubTab(v as 'overview' | 'model')}
+      />
+      {subTab === 'overview' ? <RevolvingUeOverview res={res} /> : <RevolvingUeModel res={res} />}
+    </div>
+  );
+}
+
+/** One monthly line with a dashed average line (the mean of the months
+ * plotted) - the revolving version of Lending's per-cohort UE charts. */
+function UeMonthChart({ data, title, fmt, color }: {
+  data: Array<{ month: string; value: number | null }>;
+  title: string;
+  fmt: (v: number) => string;
+  color: string;
+}) {
+  const vals = data.map((d) => d.value).filter((v): v is number => v !== null);
+  if (vals.length === 0) return null;
+  const avg = vals.reduce((a, v) => a + v, 0) / vals.length;
+  return (
+    <div className="sd-card">
+      <h2 className="sd-h2">{title}</h2>
+      <RefKey items={[[color, `Avg: ${fmt(avg)}`]]} />
+      <ResponsiveContainer width="100%" height={300}>
+        <LineChart data={data} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
+          <CartesianGrid stroke="#e7ecee" vertical={false} />
+          <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#666' }} />
+          <YAxis tick={{ fontSize: 11, fill: '#666' }} tickFormatter={(v) => (typeof v === 'number' ? fmt(v) : v)} />
+          <Tooltip formatter={(v) => (typeof v === 'number' ? fmt(v) : v)} />
+          <Line dataKey="value" stroke={color} strokeWidth={2} dot={{ r: 3 }} name={title} connectNulls />
+          <ReferenceLine y={avg} stroke={color} strokeDasharray="6 6" ifOverflow="extendDomain" />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function RevolvingUeOverview({ res }: { res: RevolvingResult }) {
   const p = res.performance;
+  const months = res.availableMonths;
+  const perfRow = (key: string) => {
+    const row = p.table.find((r) => r.key === key);
+    return months.map((m) => ({ month: m, value: row && isNum(row[m]) ? (row[m] as number) : null }));
+  };
+  const seriesOf = (k: 'interestYield' | 'writeOffRate') => p.series.map((s) => ({ month: s.month, value: s[k] }));
+  const net = isNum(p.interestYield) && isNum(p.writeOffRate) ? p.interestYield! - p.writeOffRate! : null;
+  const pct1 = (v: number) => `${(v * 100).toFixed(1)}%`;
+  const pct2 = (v: number) => `${(v * 100).toFixed(2)}%`;
+  const rows: Array<Array<[string, string, string]>> = [
+    [
+      ['Average Term (m)', fdec(p.avgTerm, 1), `Average of 1 / net collection ratio over the last ${p.termMonths} months.`],
+      ['Loss Rate (as-of)', fpct(p.lossRateNow, 1), PERF_HELP['Estimated Loss Rate']],
+      ['Loss Rate (95th %ile)', fpct(p.lossRate95, 1), `Stress percentile of the ${p.lossRateBasis} monthly loss rate over ${p.lossRateMonths} in-sample months - the figure the LTV Calculator uses.`],
+    ],
+    [
+      ['Interest Yield (m)', fpct(p.interestYield), `Monthly ${p.interestBasis} interest over average outstanding, averaged over the last ${p.interestYieldMonths} months.`],
+      ['Write-off Rate (m)', fpct(p.writeOffRate), 'Monthly write-offs over average outstanding, averaged over the same window.'],
+      ['Product Interest Rate', fpct(res.ltvInterest, 1), 'Interest yield (m) x average term - the interest earned on a dollar over its life.'],
+    ],
+    [['Sense-check Margin (m)', fpct(net), 'Interest yield (m) - write-off rate (m), before costs.']],
+  ];
   return (
     <>
-      <div className="sd-grid sd-grid--metrics">
-        <Metric
-          label="Term (m)"
-          value={fdec(p.avgTerm)}
-          hint={`Average of 1 / net collection ratio over ${p.termMonths} months. The "Over the principal tenor" column multiplies by this.`}
-        />
-        <Metric label="Loss rate (as-of)" value={fpct(p.lossRateNow)} hint={PERF_HELP['Estimated Loss Rate']} />
-        <Metric
-          label="Loss rate (95th %ile)"
-          value={fpct(p.lossRate95)}
-          hint={`95th percentile of the monthly estimated loss rate over ${p.lossRateMonths} in-sample months.`}
-        />
+      {rows.map((row, i) => (
+        <div key={i} className="sd-grid sd-grid--metrics">
+          {row.map(([label, value, hint]) => (
+            <Metric key={label} label={label} value={value} hint={hint} />
+          ))}
+        </div>
+      ))}
+      <div className="sd-grid sd-grid--2">
+        <UeMonthChart data={perfRow('loss_rate')} title="Loss Rate per Month" fmt={pct1} color="#2ca02c" />
+        <UeMonthChart data={perfRow('term')} title="Average Term per Month (m)" fmt={(v) => v.toFixed(1)} color="#2ca02c" />
+        <UeMonthChart data={seriesOf('interestYield')} title="Interest Yield per Month" fmt={pct2} color="#ff7f0e" />
+        <UeMonthChart data={seriesOf('writeOffRate')} title="Write-off Rate per Month" fmt={pct2} color="#1f77b4" />
       </div>
-      <RevolvingOutputsTab />
     </>
+  );
+}
+
+type UeLoss = 'Now' | 'P95' | 'WriteOff' | 'Input';
+
+/** UE Model: Lending's layout (manual costs, loss picker, two headline cards,
+ * two tables), on a per-dollar-outstanding basis over the average term. A
+ * revolving book has no single loan cash flow, so the headline is annualised
+ * net yield rather than an IRR. */
+function RevolvingUeModel({ res }: { res: RevolvingResult }) {
+  const p = res.performance;
+  const gi = res.generalInputs;
+  const [ongoing, setOngoing] = useState(Number(gi.opexPct) || 0);
+  const [financing, setFinancing] = useState(Number(gi.costOfFundsPct) || 0);
+  const [facility, setFacility] = useState(0);
+  const [hedge, setHedge] = useState(0);
+  const [lossChoice, setLossChoice] = useState<UeLoss>('Now');
+  const [lossInput, setLossInput] = useState((p.lossRateNow ?? 0) * 100);
+
+  const term = p.avgTerm;
+  const y = p.interestYield;
+  // Loss over the term: the cumulative loss rates already are; the write-off
+  // rate is monthly, so it scales by the term like the yield.
+  const loss =
+    lossChoice === 'Now' ? p.lossRateNow
+    : lossChoice === 'P95' ? p.lossRate95
+    : lossChoice === 'WriteOff' ? (isNum(p.writeOffRate) && isNum(term) ? p.writeOffRate! * term! : null)
+    : lossInput / 100;
+  const ok = (...v: Array<number | null | undefined>) => v.every((x) => x != null && Number.isFinite(x));
+  const income = ok(y, term) ? y! * term! : null;
+  const incomeNet = ok(income, loss) ? income! - loss! : null;
+  const variable = ok(term) ? (ongoing * term!) / 12 : null;
+  const contribution = ok(incomeNet, variable) ? incomeNet! - variable! : null;
+  const cof = financing + facility + hedge;
+  const cofOverTerm = ok(term) ? (cof * term!) / 12 : null;
+  const gross = ok(contribution, term) && term! > 0 ? (contribution! / term!) * 12 : null;
+  const netY = gross !== null ? gross - cof : null;
+
+  const f2 = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? 'n/a' : `${(v * 100).toFixed(2)}%`);
+  const f1 = (v: number | null) => (v == null || !Number.isFinite(v) ? 'n/a' : `${(v * 100).toFixed(1)}%`);
+  const costInput = (label: string, value: number, onChange: (v: number) => void) => (
+    <label>
+      <div className="sd-muted">{label}</div>
+      <Input type="number" min={0} step={0.1} value={value * 100} onChange={(e) => onChange(Math.max(0, Number(e.target.value) || 0) / 100)} />
+    </label>
+  );
+  const snap = (rows: Array<[string, string, string]>) => rows.map(([label, value, help]) => ({ label, value, help }));
+  const headline = (label: string, v: number | null, text: string) => (
+    <div className="sd-card">
+      <div className="sd-muted">{label}</div>
+      <div className="sd-metric__value" style={{ color: v != null && v < 0 ? '#d62728' : '#2ca02c' }}>{f1(v)}</div>
+      <p className="sd-muted" style={{ marginTop: 6 }}>{text}</p>
+    </div>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <h2 className="sd-h2">UE Model</h2>
+      <div className="sd-card">
+        <span className="sd-muted" style={{ display: 'inline-block', background: '#f5d90a', color: '#16312E', padding: '2px 8px', borderRadius: 4, fontSize: '.8rem', fontWeight: 600 }}>
+          Manual inputs (not in the monthly data)
+        </span>
+        <p className="sd-muted" style={{ marginTop: 8 }}>
+          Cost and financing assumptions, all % p.a. of principal outstanding; 0 if not applicable. Ongoing costs and
+          financing default to the General Inputs opex and cost of funds. A revolving line has no single origination,
+          so there is no upfront cost.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10, marginTop: 8 }}>
+          {costInput('Ongoing variable costs (% p.a.)', ongoing, setOngoing)}
+          {costInput('Financing cost (% p.a.)', financing, setFinancing)}
+          {costInput('Facility fee - annualised (% p.a.)', facility, setFacility)}
+          {costInput('Hedge cost - annualised (% p.a.)', hedge, setHedge)}
+        </div>
+      </div>
+
+      <div className="sd-card">
+        <span className="sd-muted" style={{ display: 'inline-block', marginBottom: 8 }}><strong>Loss Rate</strong></span>
+        <label>
+          <div className="sd-muted">Loss Rate used below</div>
+          <Select value={lossChoice} onChange={(e) => setLossChoice(e.target.value as UeLoss)}>
+            <option value="Now">Loss Rate (as-of)</option>
+            <option value="P95">Loss Rate (95th %ile)</option>
+            <option value="WriteOff">Write-off rate x term</option>
+            <option value="Input">Input</option>
+          </Select>
+        </label>
+        {lossChoice === 'Input' && (
+          <div className="sd-field" style={{ maxWidth: 260, marginTop: 10 }}>
+            <span>Loss Rate (%)</span>
+            <Input type="number" min={0} step={0.1} value={lossInput} onChange={(e) => setLossInput(Math.max(0, Number(e.target.value) || 0))} />
+          </div>
+        )}
+      </div>
+
+      <div className="sd-grid sd-grid--2">
+        {headline('Gross Annualised Yield', gross, 'Product contribution spread over the average term and annualised: what a dollar outstanding earns per year after losses and variable costs, before cost of finance. Not an IRR - a revolving book has no single loan cash flow.')}
+        {headline('Net Annualised Yield', netY, 'Gross annualised yield minus Cost of Finance (Financing cost + Facility fee + Hedge cost, % p.a.).')}
+      </div>
+
+      <SnapshotTable
+        rows={snap([
+          ['Product Interest Rate', f2(income), 'Interest yield (m) x average term - the interest earned on a dollar over its life.'],
+          ['Interest Yield (m)', f2(y), `Monthly ${p.interestBasis} interest over average outstanding, averaged over the last ${p.interestYieldMonths} months.`],
+          ['APR Proxy', f2(ok(y) ? y! * 12 : null), 'Interest yield (m) x 12.'],
+          ['Loss %', f2(loss), 'The loss rate chosen above, over the life of a dollar lent.'],
+          ['Term', ok(term) ? `${term!.toFixed(1)} months` : 'n/a', `Average of 1 / net collection ratio over the last ${p.termMonths} months.`],
+        ])}
+      />
+
+      <SnapshotTable
+        rows={snap([
+          ['Income (net losses)', f2(incomeNet), 'Product Interest Rate - Loss %, per dollar lent over the average term.'],
+          ['Variable costs (over term)', f2(variable), 'Ongoing variable costs (% p.a.) x term / 12.'],
+          ['Product contribution', f2(contribution), 'Income (net losses) - Variable costs, over the average term.'],
+          ['Cost of Finance (% p.a.)', f2(cof), 'Financing cost + Facility fee + Hedge cost, as entered.'],
+          ['Cost of Finance (over term)', f2(cofOverTerm), 'Cost of Finance (% p.a.) x term / 12, comparable to Product contribution.'],
+        ])}
+      />
+    </div>
+  );
+}
+
+type AgeingRow = RevolvingResult['ageingMix'][number];
+
+/** Data Checks: principal outstanding by days past due at the as-of month,
+ * in standard buckets that add to 100% - unlike the template's Outputs ratios
+ * ('PAR30' is 1-60 days, 'PAR60' divides by the active balance and 'PAR90'
+ * repeats the 61-90 bucket), which are not meant to sum. */
+export function RevolvingAgeingMix() {
+  const { state } = useAppStore();
+  const res = state.revolvingResponse;
+  if (!res) return null;
+  const rows = res.ageingMix;
+  const total: AgeingRow = {
+    bucket: 'Total',
+    balance: rows.reduce((a, r) => a + r.balance, 0),
+    share: rows.reduce((a, r) => a + (r.share ?? 0), 0),
+  };
+  return (
+    <div className="sd-card">
+      <h2 className="sd-h2">Ageing mix — as of {res.eclSummary.asOfMonth}</h2>
+      {rows.length === 0 ? (
+        <Alert tone="info">Map the bucket balances (BAL_NEW … BAL_DEFAULT) to see the ageing mix.</Alert>
+      ) : (
+        <>
+          <p className="sd-muted">
+            Principal outstanding by days past due. The shares should add to 100%; the template&apos;s PAR ratios on the
+            Data Input sub-tab use different denominators and overlapping buckets, so they do not.
+          </p>
+          <Table
+            columns={[
+              { key: 'bucket', header: 'Bucket', render: (r: AgeingRow) => (r.bucket === 'Total' ? <strong>Total</strong> : r.bucket) },
+              { key: 'balance', header: 'Balance', align: 'right', render: (r: AgeingRow) => <span className="sd-mono">{fmoney(r.balance)}</span> },
+              { key: 'share', header: 'Share of outstanding', align: 'right', render: (r: AgeingRow) => <span className="sd-mono">{fpct(r.share)}</span> },
+            ]}
+            rows={[...rows, total]}
+          />
+        </>
+      )}
+    </div>
   );
 }

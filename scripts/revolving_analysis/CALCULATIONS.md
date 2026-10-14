@@ -179,11 +179,12 @@ A metric is flagged when its latest value is more than 20% worse than its averag
 ## 5a. Performance tab
 
 - **Net collection ratio:** principal collected plus interest collected in the month, divided by last month's principal outstanding. The first month has none.
-- **Estimated avg term:** one divided by the net collection ratio. The Unit Economics and LTV term is the average of these monthly values.
+- **Estimated avg term:** one divided by the net collection ratio. The Unit Economics and LTV term is the average of these monthly values over the trailing LTV / UE window (12 months by default).
 - **ECL by month:** the point-in-time ECL on the performing book (roll rates observable by that month) multiplied by LGD.
-- **Estimated loss rate:** cumulative write-off up to the month plus that month's ECL, divided by cumulative principal issued up to the month.
-- **LTV loss rate:** the 95th percentile of the estimated loss rate over the in-sample months. The LTV Calculator multiplies it by the credit stress factor (1.7, from config).
-- **LTV product interest rate:** interest rate (m) multiplied by the average term.
+- **Estimated loss rate:** cumulative write-off up to the month plus that month's ECL, divided by cumulative principal issued up to the month. Shown for reference; it is not the LTV input.
+- **LTV loss rate:** the Outputs stress percentile (95th %ile) of the point-in-time loss rate on the selected basis (Blended by default), as 'Loss Rate LTV' row 57 computes it. The workbook calls the naive rate a lower bound, so it is not used. The LTV Calculator multiplies the rate by the credit stress factor (1.7, from config).
+- **Interest yield (LTV / UE):** each month's interest divided by the average of that month's and last month's principal outstanding, then averaged over the trailing LTV / UE window, as rcl_rollrate_ecl_3.xlsx 'Revenue Monthly' B49/B50 does. Uses interest accrued when that column is mapped, else interest collected. The Unit Economics interest yield row uses it.
+- **LTV product interest rate:** the interest yield multiplied by the average term.
 - **Avg credit line:** total credit line divided by number of customers. **Avg principal issued per customer:** principal issued divided by number of customers.
 
 ## 6. Backtest

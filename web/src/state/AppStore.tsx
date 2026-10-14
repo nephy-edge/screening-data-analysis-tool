@@ -479,12 +479,13 @@ export function getChartDataSources(state: AppState): Record<string, Array<Recor
 }
 
 /** A saved run's cached result, or null when it must be re-run: Revolving
- * runs saved before the Performance tab existed lack `performance`, which
- * the Performance / LTV / Unit Economics tabs need. */
+ * runs saved before the Performance tab (or its LTV loss basis) existed lack
+ * the `performance` figures the Performance / LTV / Unit Economics tabs need. */
 function usableCachedResult<T extends { modelKey: string; analysisResult?: unknown }>(payload: T) {
   const cached = payload.analysisResult as Record<string, unknown> | null | undefined;
   if (!cached) return null;
-  if (payload.modelKey === 'revolving' && !cached.performance) return null;
+  const perf = cached.performance as { lossRateBasis?: string } | undefined;
+  if (payload.modelKey === 'revolving' && !perf?.lossRateBasis) return null;
   return payload.analysisResult as T['analysisResult'];
 }
 

@@ -505,13 +505,25 @@ export interface RevolvingResponse {
    * term and loss rate the LTV Calculator and Unit Economics tabs use. */
   performance: {
     table: Array<{ key: string; Metric: string; kind: 'money' | 'pct' | 'months' | 'count'; group: 'balance' | 'breakdown' | 'metric' } & Record<string, unknown>>;
+    /** Monthly interest yield and write-off rate, both on average outstanding. */
+    series: Array<{ month: string; interestYield: number | null; writeOffRate: number | null }>;
+    /** Mean of 1 / net collection ratio over the trailing LTV window. */
     avgTerm: number | null;
     termMonths: number;
+    /** Mean monthly interest yield over the trailing LTV window. */
+    interestYield: number | null;
+    interestYieldMonths: number;
+    interestBasis: 'accrued' | 'collected';
+    /** Mean monthly write-off rate over the same trailing window. */
+    writeOffRate: number | null;
     lossRateNow: number | null;
+    /** The Outputs stress percentile loss rate on the selected basis. */
     lossRate95: number | null;
     lossRateMonths: number;
+    lossRateBasis: 'Naive' | 'Blended' | 'Lagged';
+    inSampleFloor: number;
   };
-  /** Product interest rate for the LTV Calculator: interest rate (m) x avg term. */
+  /** Product interest rate for the LTV Calculator: interest yield x avg term. */
   ltvInterest: number | null;
   /** The inputs behind the principal tenor used in unit economics. */
   tenorInputs: {
@@ -523,6 +535,8 @@ export interface RevolvingResponse {
   };
   /** Standard ageing split at the as-of month; empty without the bucket columns. */
   ageingMix: Array<{ bucket: string; balance: number; share: number | null }>;
+  /** Largest borrower's balance / principal outstanding at the as-of month; null when not mapped. */
+  largestCustomerShare: number | null;
   earlyWarnings: Array<{ key: string; label: string; kind: MetricKind; now: number; prior: number; change: number; flag: boolean }>;
   backtest: Array<Record<string, unknown>>;
   backtestSummary: {

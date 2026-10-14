@@ -1,16 +1,22 @@
 """The Performance tab: one row per figure, one column per month, plus the
-term and loss rate the LTV Calculator and Unit Economics tabs use.
+term and interest yield the LTV Calculator and Unit Economics tabs use.
 
     net collection ratio = (principal + interest collected) / last month's outstanding
     estimated term       = 1 / net collection ratio
     estimated loss rate  = (cumulative write-off + ECL) / cumulative principal issued
+    interest yield (m)   = interest / average of this and last month's outstanding
 
-ECL is the performing-book ECL from the point-in-time loss-rate build (each
-month's roll rates observable by that month) multiplied by LGD."""
+The average term and the interest yield are means over the trailing
+`window` months, as rcl_rollrate_ecl_3.xlsx's 'Revenue Monthly' B49/B50
+average its monthly yields. The yield uses interest_accrued when mapped,
+else interest_collected. ECL is the performing-book ECL from the
+point-in-time loss-rate build (each month's roll rates observable by that
+month) multiplied by LGD."""
 
 import numpy as np
 import pandas as pd
 
+from .monthly_input import INTEREST_ACCRUED
 from .transition_matrices import month_labels
 
 # Rows are (key, label, kind, group); kind: money | pct | months | count.
@@ -29,7 +35,6 @@ _FULL_BUCKETS = [
     ("121-180+ days", ["BAL_PAR_121_150", "BAL_PAR_151_180", "BAL_PAR_180_PLUS"]),
     ("Defaulted stock", ["BAL_DEFAULT"]),
 ]
-LTV_STRESS_PERCENTILE = 95
 
 
 def _div(num: np.ndarray, den: np.ndarray) -> np.ndarray:
@@ -37,7 +42,9 @@ def _div(num: np.ndarray, den: np.ndarray) -> np.ndarray:
         return np.where((den != 0) & ~np.isnan(den), num / den, np.nan)
 
 
-def performance(monthly: pd.DataFrame, pit: pd.DataFrame, lgd: float, full: bool) -> dict:
+def performance(
+    monthly: pd.DataFrame, pit: pd.DataFrame, lgd: float, full: bool, window: int
+) -> dict:
     col = lambda c: monthly[c].to_numpy(dtype=float)  # noqa: E731
     total = col("principal_outstanding")
     customers = col("number_of_customers")
@@ -120,14 +127,35 @@ def performance(monthly: pd.DataFrame, pit: pd.DataFrame, lgd: float, full: bool
         for k, label, kind, group, values in rows
     ]
 
-    in_sample = pit["In sample"].to_numpy(dtype=bool)
-    sample = loss_rate[in_sample & ~np.isnan(loss_rate)]
-    terms = term[~np.isnan(term)]
+    accrued = INTEREST_ACCRUED in monthly.columns and monthly[INTEREST_ACCRUED].notna().any()
+    interest = col(INTEREST_ACCRUED) if accrued else col("interest_collected")
+    avg_total = monthly["principal_outstanding"].rolling(2, min_periods=1).mean().to_numpy()
+    yield_series = _div(interest, avg_total)
+    wo_series = _div(written_off, avg_total)
+    series = [
+        {
+            "month": m,
+            "interestYield": None if np.isnan(y) else float(y),
+            "writeOffRate": None if np.isnan(w) else float(w),
+        }
+        for m, y, w in zip(months, yield_series.tolist(), wo_series.tolist())
+    ]
+    yields = yield_series[-window:]
+    yields = yields[~np.isnan(yields)]
+    # Write-offs on the same basis and window, so UE net yield mixes no windows.
+    wo_rates = wo_series[-window:]
+    wo_rates = wo_rates[~np.isnan(wo_rates)]
+    terms = term[-window:]
+    terms = terms[~np.isnan(terms)]
     return {
         "table": table,
+        # Monthly yield and write-off rate, for the Unit Economics charts.
+        "series": series,
         "avgTerm": float(terms.mean()) if terms.size else None,
         "termMonths": int(terms.size),
+        "interestYield": float(yields.mean()) if yields.size else None,
+        "interestYieldMonths": int(yields.size),
+        "interestBasis": "accrued" if accrued else "collected",
+        "writeOffRate": float(wo_rates.mean()) if wo_rates.size else None,
         "lossRateNow": None if np.isnan(loss_rate[-1]) else float(loss_rate[-1]),
-        "lossRate95": float(np.percentile(sample, LTV_STRESS_PERCENTILE)) if sample.size else None,
-        "lossRateMonths": int(sample.size),
     }

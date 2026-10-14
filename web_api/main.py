@@ -706,6 +706,10 @@ class RevolvingGeneralInputsBody(BaseModel):
     ratioWindowMonths: int = Field(REVOLVING_DEFAULTS["ratio_window_months"], ge=1)
     writeoffWindowMonths: int = Field(REVOLVING_DEFAULTS["writeoff_window_months"], ge=1)
     minOutstandingInSample: float = REVOLVING_DEFAULTS["min_outstanding_in_sample"]
+    minOutstandingPctOfPeak: float = Field(
+        REVOLVING_DEFAULTS["min_outstanding_in_sample_pct_of_peak"], ge=0, le=1
+    )
+    ltvWindowMonths: int = Field(REVOLVING_DEFAULTS["ltv_window_months"], ge=1)
     stressPercentile: float = Field(REVOLVING_DEFAULTS["stress_percentile"], ge=0, le=1)
     denominatorLagMonths: int = Field(REVOLVING_DEFAULTS["denominator_lag_months"], ge=0)
     laggedBlendWeight: float = Field(REVOLVING_DEFAULTS["lagged_blend_weight"], ge=0, le=1)
@@ -2816,6 +2820,8 @@ def _revolving_pipeline(body: RevolvingAnalyseBody) -> tuple[pd.DataFrame, None,
             ratio_window_months=gi.ratioWindowMonths,
             writeoff_window_months=gi.writeoffWindowMonths,
             min_outstanding_in_sample=gi.minOutstandingInSample,
+            min_outstanding_pct_of_peak=gi.minOutstandingPctOfPeak,
+            ltv_window_months=gi.ltvWindowMonths,
             stress_percentile=gi.stressPercentile,
             denominator_lag_months=gi.denominatorLagMonths,
             lagged_blend_weight=gi.laggedBlendWeight,
@@ -2892,6 +2898,7 @@ def analyse_revolving(body: RevolvingAnalyseBody) -> dict[str, Any]:
             "ltvInterest": c["ltvInterest"],
             "tenorInputs": c["tenorInputs"],
             "ageingMix": c["ageingMix"],
+            "largestCustomerShare": c["largestCustomerShare"],
             "earlyWarnings": c["earlyWarnings"],
             "backtest": _frame_to_records(c["backtest"]),
             "backtestSummary": c["backtestSummary"],
@@ -3431,11 +3438,15 @@ def ai_chat_revolving(body: RevolvingChatBody) -> dict[str, Any]:
         json.dumps(perf["table"], default=str),
         "",
         "## LTV Calculator / Unit Economics inputs",
-        f"- Avg term (mean of 1 / net collection ratio, months): {_chat_value(perf['avgTerm'])}",
+        f"- Avg term (mean of 1 / net collection ratio over the last {perf['termMonths']} "
+        f"months): {_chat_value(perf['avgTerm'])}",
+        f"- Interest yield (m, mean of the last {perf['interestYieldMonths']} months, "
+        f"{perf['interestBasis']} interest): {_chat_value(perf['interestYield'])}",
         f"- Estimated loss rate at as-of: {_chat_value(perf['lossRateNow'])}",
-        f"- 95th %ile estimated loss rate: {_chat_value(perf['lossRate95'])} "
+        f"- Stress percentile loss rate ({perf['lossRateBasis']} basis, "
+        f"{perf['lossRateMonths']} in-sample months): {_chat_value(perf['lossRate95'])} "
         "(the LTV Calculator stresses it by the credit stress factor)",
-        f"- Product interest rate (interest rate (m) x avg term): {_chat_value(c['ltvInterest'])}",
+        f"- Product interest rate (interest yield x avg term): {_chat_value(c['ltvInterest'])}",
         *[f"- UE {u['item']}: monthly {_chat_value(u['monthly'])}" for u in c["unitEconomics"]],
         "",
         "## ECL at as-of",
