@@ -383,6 +383,45 @@ def _suggest_escalation_writeup(filename: str, facts: list, model_name: str) -> 
     return result
 
 
+def _ai_status() -> dict:
+    """Whether Ask AI can work on this server, for diagnosing a deployment
+    without log access: is the key set, does it look like a bare key, and
+    does a 1-token request succeed. Never includes the key itself."""
+    key = _get_deepinfra_api_key()
+    status = {
+        "keyConfigured": bool(key),
+        "keyLooksClean": bool(key) and re.fullmatch(r"[A-Za-z0-9_\-.]+", key) is not None,
+        "providerStatus": None,
+        "ok": False,
+        "error": None,
+    }
+    if not key:
+        status["error"] = "DEEPINFRA_API_KEY is not set in this server's environment."
+        return status
+    try:
+        resp = requests.post(
+            DEEPINFRA_CHAT_URL,
+            headers={"Authorization": f"Bearer {key.strip()}", "Content-Type": "application/json"},
+            json={
+                "model": DEEPINFRA_MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            },
+            timeout=app_config.AI["request_timeout_seconds"],
+            verify=_ca_bundle_path(),
+        )
+    except Exception as exc:  # network, TLS or proxy failure - report the kind only
+        status["error"] = f"Could not reach the AI provider: {type(exc).__name__}"
+        return status
+    status["providerStatus"] = resp.status_code
+    status["ok"] = resp.status_code == 200 and status["keyLooksClean"]
+    if resp.status_code != 200:
+        status["error"] = f"The AI provider returned HTTP {resp.status_code} (401/403: bad key)."
+    elif not status["ok"]:
+        status["error"] = "The key has spaces, quotes or newlines around it."
+    return status
+
+
 def _chat_json(system_prompt: str, user: str, max_tokens: int) -> dict:
     """One JSON-mode chat completion, parsed."""
     resp = requests.post(

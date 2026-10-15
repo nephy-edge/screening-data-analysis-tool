@@ -106,3 +106,28 @@ def test_plain_question_has_no_whatif_banner(monkeypatch):
     monkeypatch.setattr(m, "_extract_whatif", lambda q, h, f: {})
     monkeypatch.setattr(m, "_ask_data_chatbot", lambda q, ctx, h: "ok")
     assert m.ai_chat_rental(_rental_body("What is the PvD?"))["whatif"] is None
+
+
+def test_ai_status_reports_without_revealing_the_key(monkeypatch):
+    def status(key, code=None):
+        monkeypatch.setattr(ai_client, "_get_deepinfra_api_key", lambda: key)
+        monkeypatch.setattr(
+            ai_client.requests, "post", lambda *a, **k: type("R", (), {"status_code": code})
+        )
+        return ai_client._ai_status()
+
+    assert status(None)["error"] == "DEEPINFRA_API_KEY is not set in this server's environment."
+    s = status(' "sk-secret"\n', 401)
+    assert not s["keyLooksClean"] and s["providerStatus"] == 401 and not s["ok"]
+    assert "sk-secret" not in str(s)
+    assert status("sk-abc123", 200)["ok"] is True
+
+
+def test_ai_status_endpoint_needs_sign_in(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(m, "_ai_status", lambda: {"ok": True})
+    client = TestClient(m.app, base_url="https://testserver")
+    assert client.get("/api/ai/status").status_code == 401
+    client.post("/api/auth/dummy", json={"email": "a@lendable.io"})
+    assert client.get("/api/ai/status").json() == {"ok": True}

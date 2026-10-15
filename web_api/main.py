@@ -64,6 +64,7 @@ load_dotenv()
 # Same raw-upload date coercion app.py itself calls before running the
 # Lending engine (see app.py's `_coerce_dates(raw, DATE_FIELDS, dayfirst)`).
 from ai_client import (
+    _ai_status,
     _ask_data_chatbot,
     _extract_whatif,
     _get_deepinfra_api_key,
@@ -1131,6 +1132,14 @@ def _json_safe(value: Any) -> Any:
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "engine": "template_analysis"}
+
+
+@app.get("/api/ai/status")
+def ai_status(identity: str = Depends(_require_identity)) -> dict[str, Any]:
+    """Can Ask AI work on this server? Open in the browser to diagnose a
+    deployment without log access; reports key presence/shape and a 1-token
+    test call, never the key."""
+    return _ai_status()
 
 
 def _register_ingest(
@@ -3702,6 +3711,71 @@ def ai_chat_revolving(body: RevolvingChatBody) -> dict[str, Any]:
     and every figure the Revolving tabs show - the tape is already one row
     per month, so no loan-level data exists to leak."""
     return _chat_answer(body, "revolving", _revolving_chat_context)
+
+
+# Ask AI as a background job the browser polls. An answer takes 5-30 s (two
+# AI calls, plus an engine re-run for a what-if); a proxy or load balancer in
+# front of the deployed app can give up on a request that long and return a
+# bare 502/503. Start and status each return at once, so nothing times out.
+# In memory: one worker, and a lost job just means asking again.
+_CHAT_JOBS: dict[str, dict[str, Any]] = {}
+_CHAT_JOBS_LOCK = threading.Lock()
+_CHAT_JOB_TTL_SECONDS = 15 * 60
+
+
+def _start_chat_job(identity: str, run) -> dict[str, str]:
+    job_id = uuid.uuid4().hex
+    now = time.time()
+    with _CHAT_JOBS_LOCK:
+        for old in [k for k, j in _CHAT_JOBS.items() if now - j["created"] > _CHAT_JOB_TTL_SECONDS]:
+            del _CHAT_JOBS[old]
+        _CHAT_JOBS[job_id] = {"owner": identity, "created": now, "state": {"status": "running"}}
+
+    def work() -> None:
+        try:
+            state = {"status": "done", **run()}
+        except HTTPException as exc:
+            state = {"status": "error", "code": exc.status_code, "detail": exc.detail}
+        except Exception as exc:  # surface it to the poller instead of losing it
+            state = {"status": "error", "code": 500, "detail": f"Ask AI failed: {exc}"}
+        with _CHAT_JOBS_LOCK:
+            if job_id in _CHAT_JOBS:
+                _CHAT_JOBS[job_id]["state"] = state
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"jobId": job_id}
+
+
+@app.post("/api/ai/chat/lending/start")
+def ai_chat_lending_start(
+    body: LendingChatBody, identity: str = Depends(_require_identity)
+) -> dict[str, str]:
+    return _start_chat_job(identity, lambda: ai_chat_lending(body))
+
+
+@app.post("/api/ai/chat/rental/start")
+def ai_chat_rental_start(
+    body: RentalChatBody, identity: str = Depends(_require_identity)
+) -> dict[str, str]:
+    return _start_chat_job(identity, lambda: ai_chat_rental(body))
+
+
+@app.post("/api/ai/chat/revolving/start")
+def ai_chat_revolving_start(
+    body: RevolvingChatBody, identity: str = Depends(_require_identity)
+) -> dict[str, str]:
+    return _start_chat_job(identity, lambda: ai_chat_revolving(body))
+
+
+@app.get("/api/ai/chat/status/{job_id}")
+def ai_chat_status(job_id: str, identity: str = Depends(_require_identity)) -> dict[str, Any]:
+    """{"status": "running"}, then the answer ({"status": "done", "answer",
+    "whatif"}) or the error ({"status": "error", "code", "detail"})."""
+    with _CHAT_JOBS_LOCK:
+        job = _CHAT_JOBS.get(job_id)
+        if job is None or job["owner"] != identity:
+            raise HTTPException(status_code=404, detail="That question has expired - ask again.")
+        return dict(job["state"])
 
 
 def _infer_model_key(mapping: dict[str, Any]) -> str:

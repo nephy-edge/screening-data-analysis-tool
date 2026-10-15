@@ -710,6 +710,36 @@ export interface UeModelAssumptions {
   lossInputPct: number | null;
 }
 
+type ChatAnswer = { answer: string; whatif?: WhatIf | null };
+type ChatJobStatus =
+  | { status: 'running' }
+  | ({ status: 'done' } & ChatAnswer)
+  | { status: 'error'; code: number; detail: string };
+
+/** Ask AI runs as a server-side job polled every 2 s (web_api/main.py
+ * _start_chat_job): a single 5-30 s request could be cut off as a bare
+ * 502/503 by a proxy or load balancer in front of the deployed app. A
+ * failed poll is retried a few times before giving up. */
+async function runChatJob(model: 'lending' | 'rental' | 'revolving', body: unknown): Promise<ChatAnswer> {
+  const { jobId } = await post<{ jobId: string }>(`/ai/chat/${model}/start`, body);
+  const deadline = Date.now() + 5 * 60 * 1000;
+  let misses = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    let job: ChatJobStatus;
+    try {
+      job = await get<ChatJobStatus>(`/ai/chat/status/${jobId}`);
+      misses = 0;
+    } catch (err) {
+      if (++misses >= 4) throw err;
+      continue;
+    }
+    if (job.status === 'done') return { answer: job.answer, whatif: job.whatif ?? null };
+    if (job.status === 'error') throw new Error(job.detail);
+  }
+  throw new Error('Ask AI took too long to answer - please try again.');
+}
+
 export function askAi(
   modelKey: 'lending' | 'rental',
   input: (LendingAnalyseInput | RentalAnalyseInput) & {
@@ -730,8 +760,8 @@ export function askAi(
     };
     ueModelInputs?: UeModelAssumptions | null;
   },
-): Promise<{ answer: string; whatif?: WhatIf | null }> {
-  return post<{ answer: string; whatif?: WhatIf | null }>(`/ai/chat/${modelKey}`, input);
+): Promise<ChatAnswer> {
+  return runChatJob(modelKey, input);
 }
 
 /** Ask AI, Revolving Lending model: the same run inputs as runRevolvingAnalysis. */
@@ -742,9 +772,9 @@ export function askRevolvingAi(
     userContext?: string;
     documents?: ContextDocument[];
   },
-): Promise<{ answer: string; whatif?: WhatIf | null }> {
+): Promise<ChatAnswer> {
   const { generalInputs, ...rest } = input;
-  return post<{ answer: string; whatif?: WhatIf | null }>('/ai/chat/revolving', { ...rest, ...(generalInputs ? { generalInputs } : {}) });
+  return runChatJob('revolving', { ...rest, ...(generalInputs ? { generalInputs } : {}) });
 }
 
 /** Result of the Data-Checks "Escalate flagged cohorts to analytics" action -
