@@ -1705,6 +1705,37 @@ def ingest_data(body: DataGridBody) -> dict[str, Any]:
     )
 
 
+@app.post("/api/data-grid/{model}")
+def data_grid(model: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Data Checks > Data Input after a run: the engine's per-row table (the
+    template's Data Input sheet), i.e. the mapped inputs plus every column the
+    engine computes. Same payload as /api/analyse/{model}, so it reuses the
+    cached run. `calculated` names the engine's columns; `derived` maps each
+    field fed by an AI-derived column to its formula."""
+    runs = {
+        "lending": (LendingAnalyseBody, _lending_pipeline, "processed"),
+        "rental": (RentalAnalyseBody, _rental_pipeline, "processed"),
+        "revolving": (RevolvingAnalyseBody, _revolving_pipeline, "monthly"),
+    }
+    if model not in runs:
+        raise HTTPException(status_code=404, detail="Unknown model.")
+    cls, pipeline, key = runs[model]
+    parsed = cls.model_validate(body)
+    frame = pipeline(parsed)[2][key]
+    mapping = parsed.ingest.mapping if parsed.ingest else {}
+    formulas = {d.name: d.formula for d in parsed.ingest.derivedColumns} if parsed.ingest else {}
+    return _json_safe(
+        {
+            "columns": list(frame.columns),
+            "rows": frame.head(_DATA_GRID_LIMIT).to_dict("records"),
+            "rowCount": len(frame),
+            "truncated": len(frame) > _DATA_GRID_LIMIT,
+            "calculated": [c for c in frame.columns if c not in mapping],
+            "derived": {f: formulas[s] for f, s in mapping.items() if s in formulas},
+        }
+    )
+
+
 LENDING_DATE_FIELDS = {"Disbursement Date", "Expected Completion Date"}
 
 # Monetary canonical fields rescaled when a non-USD portfolio currency is
@@ -3825,6 +3856,7 @@ def _restore_payload(profile: dict[str, Any]) -> dict[str, Any]:
             # re-running the engine - see save_profile's analysisResult.
             "analysisResult": profile.get("analysis_result"),
             "viewState": profile.get("view_state") or {},
+            "derivedColumns": profile.get("derived_columns") or [],
         }
     )
 
@@ -3840,6 +3872,7 @@ class SaveProfileBody(BaseModel):
     chatHistory: list[ChatMessage] = Field(default_factory=list)
     analysisContext: str = ""
     analysisResult: dict[str, Any] | None = None
+    derivedColumns: list[DerivedColumn] = Field(default_factory=list)
 
 
 @app.post("/api/profiles/save")
@@ -3863,6 +3896,7 @@ def save_profile(
         analysis_context=body.analysisContext,
         analysis_result=body.analysisResult,
         ingest_info=INGEST_INFO.get(body.ingestId),
+        derived_columns=_derived_dicts(body.derivedColumns),
     )
     _PROFILES_CACHE.pop(identity, None)
     return {"ok": True}
@@ -3906,6 +3940,7 @@ class CreateShareBody(BaseModel):
     analysisResult: dict[str, Any] | None = None
     # LTV calculator / UE Model / cohort selection / custom charts / dedupe.
     viewState: dict[str, Any] = Field(default_factory=dict)
+    derivedColumns: list[DerivedColumn] = Field(default_factory=list)
 
 
 @app.post("/api/share")
@@ -3928,6 +3963,7 @@ def create_share(
         analysis_result=body.analysisResult,
         ingest_info=INGEST_INFO.get(body.ingestId),
         view_state=body.viewState,
+        derived_columns=_derived_dicts(body.derivedColumns),
     )
     return {"token": token}
 

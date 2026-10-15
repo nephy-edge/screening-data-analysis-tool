@@ -23,6 +23,9 @@ import {
   type RestorePayload,
   type UeModelAssumptions,
   type WhatIf,
+  type DataGrid,
+  type RevolvingAnalyseInput,
+  fetchDataGrid as fetchDataGridApi,
 } from '../api/engine';
 import { aggregateChartData } from '../lib/chartAggregate';
 import { friendlyError } from '../lib/friendlyError';
@@ -284,7 +287,7 @@ function reducer(state: AppState, action: Action): AppState {
         analysisContext: payload.analysisContext ?? '',
         contextDocuments: [],
         mappings,
-        derivedColumns: [],
+        derivedColumns: payload.derivedColumns ?? [],
         generalInputs: { ...state.generalInputs, ...(payload.generalInputs as Partial<GeneralInputs>) },
         chatHistory: payload.chatHistory,
         analysisResponse,
@@ -452,6 +455,8 @@ interface AppStoreValue {
   resumeProfile: (sessionId: string) => Promise<boolean>;
   resumeShare: (token: string) => Promise<boolean>;
   createShareLink: () => Promise<void>;
+  /** The engine's per-row Data Input table for the current run (same payload as analyse). */
+  fetchDataGrid: () => Promise<DataGrid | null>;
   /** Pre-deployment Share: download a read-only HTML report. */
   shareHtml: () => Promise<void>;
 }
@@ -761,6 +766,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           chatHistory: state.chatHistory,
           analysisContext: state.analysisContext,
           analysisResult: activeResult(),
+          derivedColumns: state.derivedColumns,
         });
         dispatch({ type: 'saveDone' });
       } catch (err) {
@@ -788,6 +794,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return usableCachedResult(payload) != null;
     };
 
+    const fetchDataGrid = async () => {
+      const ingest = buildIngest();
+      if (!ingest) return null;
+      if (state.modelKey === 'revolving') {
+        const gi = state.generalInputs.revolving;
+        return fetchDataGridApi('revolving', { ingest, ...(gi ? { generalInputs: gi } : {}) } as RevolvingAnalyseInput);
+      }
+      if (state.modelKey === 'rental') {
+        return fetchDataGridApi('rental', { ingest, generalInputs: buildRentalGeneralInputs(), dedupeById: state.dedupeActive });
+      }
+      return fetchDataGridApi('lending', {
+        ingest,
+        generalInputs: buildLendingGeneralInputs(),
+        dedupeById: state.dedupeActive,
+        selectedCohorts: state.selectedCohorts ?? undefined,
+      });
+    };
+
     const createShareLink = async () => {
       const ingest = buildIngest();
       if (!ingest || !state.auth.user) {
@@ -804,6 +828,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           chatHistory: state.chatHistory,
           analysisContext: state.analysisContext,
           analysisResult: activeResult(),
+          derivedColumns: state.derivedColumns,
           viewState: {
             ltvInputs: state.ltvInputs,
             ueModelInputs: state.ueModelInputs,
@@ -869,6 +894,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       resumeProfile,
       resumeShare,
       createShareLink,
+      fetchDataGrid,
       shareHtml,
     };
   }, [state]);

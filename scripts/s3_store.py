@@ -122,6 +122,7 @@ def _save_snapshot(
     analysis_result: dict | None = None,
     ingest_info: dict | None = None,
     view_state: dict | None = None,
+    derived_columns: list | None = None,
     extra: dict | None = None,
 ) -> None:
     upload_hash = hashlib.sha256(upload_bytes).hexdigest()
@@ -155,6 +156,8 @@ def _save_snapshot(
         # The React screen-side inputs (LTV calculator, UE Model, cohort
         # selection, custom charts, dedupe) so a share opens as it was seen.
         "view_state": view_state,
+        # AI-derived columns ([{name, formula}]) the mapping may point at.
+        "derived_columns": derived_columns,
         **snapshot_fields(
             upload_name=upload_name,
             mapping=mapping,

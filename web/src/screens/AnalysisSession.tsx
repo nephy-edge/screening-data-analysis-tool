@@ -30,7 +30,7 @@ import {
   Legend,
   ReferenceLine,
 } from 'recharts';
-import type { EscalateResult, IngestData, QualityCheck, SummaryChartRow, UeModelAssumptions, WhatIf } from '../api/engine';
+import type { DataGrid, EscalateResult, QualityCheck, SummaryChartRow, UeModelAssumptions, WhatIf } from '../api/engine';
 import { escalateVariance, fetchIngestData } from '../api/engine';
 import {
   aggregateChartData,
@@ -473,11 +473,15 @@ function DataChecksTab() {
   );
 }
 
+/** Data Checks > Data Input. After a run: the engine's per-row table
+ * (inputs, AI-derived inputs and the columns the engine calculates, each
+ * marked in the header). Before a run, or if that fails: the mapped inputs. */
 function DataInputGridTab() {
-  const { state } = useAppStore();
-  const [data, setData] = useState<IngestData | null>(null);
+  const { state, fetchDataGrid } = useAppStore();
+  const [data, setData] = useState<DataGrid | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const result = state.analysisResponse ?? state.rentalResponse ?? state.revolvingResponse;
 
   useEffect(() => {
     if (!state.file) {
@@ -493,27 +497,46 @@ function DataInputGridTab() {
       setError('No column mapping yet — go back and map your columns first.');
       return;
     }
+    const inputsOnly = () =>
+      fetchIngestData({
+        ingestId: state.file!.ingestId,
+        mapping,
+        derivedColumns: state.derivedColumns.length ? state.derivedColumns : undefined,
+      }).then((d) => ({ ...d, calculated: [], derived: {} }));
     setLoading(true);
     setError(null);
-    fetchIngestData({ ingestId: state.file.ingestId, mapping })
+    (result ? fetchDataGrid().then((g) => g ?? inputsOnly()).catch(inputsOnly) : inputsOnly())
       .then(setData)
       .catch((err) => {
         setError(err instanceof Error ? err.message : 'Could not load the data grid.');
         setData(null);
       })
       .finally(() => setLoading(false));
-  }, [state.file, state.mappings]);
+    // fetchDataGrid reads the same state; re-fetch when the run or mapping changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.file, state.mappings, result]);
 
   if (loading) return <Alert tone="info">Loading uploaded data…</Alert>;
   if (error) return <Alert tone="error">{error}</Alert>;
   if (!data || data.rows.length === 0) return <Alert tone="info">No uploaded rows to show.</Alert>;
+  const calculated = new Set(data.calculated);
+  const header = (key: string) =>
+    calculated.has(key) ? (
+      <span title="Calculated by the engine" style={{ color: '#a7f3d0' }}>ƒ {key}</span>
+    ) : key in data.derived ? (
+      <span title={`AI-derived: ${data.derived[key]}`} style={{ color: '#fcd34d' }}>✦ {key}</span>
+    ) : (
+      key
+    );
   return (
     <>
       <p className="sd-muted">
-        {data.rowCount.toLocaleString()} rows x {data.columns.length} columns uploaded.
+        {data.rowCount.toLocaleString()} rows x {data.columns.length} columns.
         {data.truncated ? ` Showing first ${data.rows.length.toLocaleString()} rows.` : ''}
+        {data.calculated.length > 0 ? ' ƒ = calculated by the engine.' : ''}
+        {Object.keys(data.derived).length > 0 ? ' ✦ = from an AI-derived column (hover for the formula).' : ''}
       </p>
-      <RecordTable rows={data.rows} />
+      <RecordTable rows={data.rows} header={header} />
     </>
   );
 }
@@ -1058,12 +1081,19 @@ function GeneralAnalysisTab() {
   );
 }
 
-function RecordTable({ rows }: { rows: Array<Record<string, unknown>> }) {
+function RecordTable({
+  rows,
+  header = (key) => key,
+}: {
+  rows: Array<Record<string, unknown>>;
+  header?: (key: string) => ReactNode;
+}) {
   const cols = Object.keys(rows[0] ?? {}).map((key) => ({
     key,
-    header: key,
+    header: header(key),
     align: 'right' as const,
     render: (r: Record<string, unknown>) => {
+      if (typeof r[key] === 'boolean') return r[key] ? 'TRUE' : 'FALSE';
       const n = num(r[key]);
       return <span className={n != null ? 'sd-mono' : undefined}>{n != null ? fnum(n) : str(r[key])}</span>;
     },

@@ -288,6 +288,20 @@ export interface IngestData {
   truncated: boolean;
 }
 
+/** The engine's per-row table after a run (web_api /api/data-grid): inputs
+ * plus `calculated` columns, and `derived` fields with their formulas. */
+export interface DataGrid extends IngestData {
+  calculated: string[];
+  derived: Record<string, string>;
+}
+
+export function fetchDataGrid(
+  model: 'lending' | 'rental' | 'revolving',
+  input: LendingAnalyseInput | RentalAnalyseInput | RevolvingAnalyseInput,
+): Promise<DataGrid> {
+  return post<DataGrid>(`/data-grid/${model}`, input);
+}
+
 export function fetchIngestData(input: {
   ingestId: string;
   mapping: Record<string, string>;
@@ -895,6 +909,7 @@ export function saveProfile(input: {
    * resuming later can render it straight away instead of re-running the
    * engine - see AppStore's saveSession. */
   analysisResult?: AnalysisResponse | RentalResponse | RevolvingResponse | null;
+  derivedColumns?: DerivedColumn[];
 }): Promise<{ ok: boolean }> {
   return post<{ ok: boolean }>('/profiles/save', input);
 }
@@ -925,6 +940,8 @@ export interface RestorePayload {
   analysisResult: (AnalysisResponse | RentalResponse | RevolvingResponse) | null;
   /** Screen-side inputs captured by a share (absent on saves and older shares). */
   viewState?: Record<string, unknown>;
+  /** AI-derived columns the mapping may use (empty on older saves/shares). */
+  derivedColumns?: DerivedColumn[];
 }
 
 export function loadProfile(sessionId: string): Promise<RestorePayload> {
@@ -939,6 +956,7 @@ export function createShare(input: {
   analysisContext?: string;
   analysisResult?: AnalysisResponse | RentalResponse | RevolvingResponse | null;
   viewState?: Record<string, unknown>;
+  derivedColumns?: DerivedColumn[];
 }): Promise<{ token: string }> {
   return post<{ token: string }>('/share', input);
 }

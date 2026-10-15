@@ -126,3 +126,107 @@ def test_a_missing_data_object_fails_on_first_read_not_on_open(client, s3):
     with pytest.raises(m.HTTPException) as exc:
         m._get_ingest(restored.json()["ingestId"])
     assert exc.value.status_code == 502
+
+
+def test_ask_ai_works_on_a_reopened_saved_run(client, s3, monkeypatch):
+    import time
+
+    tape = (
+        b"contract_id,asset_id,start_date,expected_end_date,status,downpayment,"
+        b"monthly_expected_payment,total_paid,cost_of_asset\n"
+        b"c0,a0,2024-01-01,2027-01-01,Open,0,100,500,3000\n"
+        b"c1,a1,2024-02-01,2027-02-01,Open,0,100,400,3000\n"
+    )
+    _save(client, tape)
+    restored = client.get("/api/profiles/sess1").json()
+    monkeypatch.setattr(m, "_extract_whatif", lambda q, h, f: {})
+    monkeypatch.setattr(m, "_ask_data_chatbot", lambda q, ctx, h: f"saw {len(ctx)} chars")
+
+    cols = [
+        "contract_id",
+        "asset_id",
+        "start_date",
+        "expected_end_date",
+        "status",
+        "downpayment",
+        "monthly_expected_payment",
+        "total_paid",
+        "cost_of_asset",
+    ]
+    job = client.post(
+        "/api/ai/chat/rental/start",
+        json={
+            "ingest": {"ingestId": restored["ingestId"], "mapping": {c: c for c in cols}},
+            "generalInputs": {"extractionDate": "2025-01-01"},
+            "question": "q",
+        },
+    ).json()
+    for _ in range(100):
+        res = client.get(f"/api/ai/chat/status/{job['jobId']}").json()
+        if res["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert res["status"] == "done", res
+    assert res["answer"].startswith("saw ")
+    assert len(_data_gets(s3)) == 1  # the saved data was fetched on first read
+
+
+_RENTAL_TAPE = (
+    b"cid,asset,start,end,st,dp,mrr,paid,cost\n"
+    b"c0,a0,2024-01-01,2027-01-01,Open,0,100,500,3000\n"
+    b"c1,a1,2024-02-01,2027-02-01,Open,0,100,400,3000\n"
+)
+_RENTAL_MAPPING = {
+    "contract_id": "cid",
+    "asset_id": "asset",
+    "start_date": "start",
+    "expected_end_date": "end",
+    "status": "st",
+    "downpayment": "dp",
+    "monthly_expected_payment": "mrr",
+    "total_paid": "paid",
+    "cost_of_asset": "Cost x2",
+}
+_DERIVED = [{"name": "Cost x2", "formula": "cost * 2"}]
+
+
+def _grid(client, restored):
+    return client.post(
+        "/api/data-grid/rental",
+        json={
+            "ingest": {
+                "ingestId": restored["ingestId"],
+                "mapping": restored["mapping"],
+                "derivedColumns": restored["derivedColumns"],
+            },
+            "generalInputs": {"extractionDate": "2025-01-01"},
+        },
+    )
+
+
+def test_saved_and_shared_runs_keep_ai_derived_columns_for_the_data_grid(client, s3):
+    up = client.post("/api/ingest", files={"file": ("t.csv", _RENTAL_TAPE, "text/csv")}).json()
+    common = {
+        "ingestId": up["ingestId"],
+        "mapping": _RENTAL_MAPPING,
+        "derivedColumns": _DERIVED,
+    }
+    assert (
+        client.post(
+            "/api/profiles/save", json={"sessionId": "sess2", "label": "R", **common}
+        ).status_code
+        == 200
+    )
+    token = client.post("/api/share", json=common).json()["token"]
+
+    for restored in (
+        client.get("/api/profiles/sess2").json(),
+        client.get(f"/api/share/{token}").json(),
+    ):
+        assert restored["derivedColumns"] == _DERIVED
+        res = _grid(client, restored)
+        assert res.status_code == 200, res.text
+        grid = res.json()
+        assert grid["derived"] == {"cost_of_asset": "cost * 2"}
+        assert grid["rows"][0]["cost_of_asset"] == 6000
+        assert "term_days" in grid["calculated"]
