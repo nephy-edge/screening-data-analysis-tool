@@ -50,7 +50,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from config import FX, REVOLVING_DEFAULTS, UE_MODEL_COST_DEFAULTS
+from config import FIELD_ALIASES, FX, REVOLVING_DEFAULTS, UE_MODEL_COST_DEFAULTS
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError
@@ -1132,6 +1132,13 @@ def _json_safe(value: Any) -> Any:
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "engine": "template_analysis"}
+
+
+@app.get("/api/field-aliases/{model_key}")
+def field_aliases(model_key: str) -> dict[str, list[str]]:
+    """Known header aliases per template field (config.toml [field_aliases]),
+    so the mapping screen can pre-fill obvious columns without an AI call."""
+    return FIELD_ALIASES.get(model_key, {})
 
 
 @app.get("/api/ai/status")
@@ -3873,6 +3880,7 @@ class SaveProfileBody(BaseModel):
     analysisContext: str = ""
     analysisResult: dict[str, Any] | None = None
     derivedColumns: list[DerivedColumn] = Field(default_factory=list)
+    viewState: dict[str, Any] = Field(default_factory=dict)
 
 
 @app.post("/api/profiles/save")
@@ -3897,6 +3905,7 @@ def save_profile(
         analysis_result=body.analysisResult,
         ingest_info=INGEST_INFO.get(body.ingestId),
         derived_columns=_derived_dicts(body.derivedColumns),
+        view_state=body.viewState,
     )
     _PROFILES_CACHE.pop(identity, None)
     return {"ok": True}

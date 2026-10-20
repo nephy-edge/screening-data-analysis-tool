@@ -587,6 +587,11 @@ def _eval_func(name, args, cols, index):
         # arguments row by row. Treating the one-argument case as row-wise
         # returned the column unchanged, which looks like it worked.
         if len(ev) == 1:
+            dates = _maybe_dates(ev[0])
+            if _is_dates(dates):
+                # MAX(a date column) - the latest date, repeated per row.
+                d = dates.min() if name == "MIN" else dates.max()
+                return pd.Series(d, index=index)
             col = _num(ev[0])
             if isinstance(col, pd.Series):
                 return float(col.min() if name == "MIN" else col.max())

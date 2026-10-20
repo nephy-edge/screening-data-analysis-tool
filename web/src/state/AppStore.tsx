@@ -197,7 +197,7 @@ const initialState: AppState = {
     country: 'Ghana',
     macroFx: 'Green',
     segmentation: 'Asset Lending',
-    hedgeRate: '0',
+    hedgeRate: '0.05',
     rolledHedge: 'Roll',
     includeUnfinished: false,
   },
@@ -575,6 +575,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
           ? buildRentalGeneralInputs()
           : buildLendingGeneralInputs();
 
+    // Screen-side inputs a save or share restores exactly as they were.
+    const viewState = () => ({
+      ltvInputs: state.ltvInputs,
+      ueModelInputs: state.ueModelInputs,
+      selectedCohorts: state.selectedCohorts,
+      customCharts: state.customCharts,
+      dedupeActive: state.dedupeActive,
+    });
+
     // The result object for whichever model is active (save/share attach it).
     const activeResult = () =>
       state.modelKey === 'revolving'
@@ -767,6 +776,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
           analysisContext: state.analysisContext,
           analysisResult: activeResult(),
           derivedColumns: state.derivedColumns,
+          // LTV/UE inputs and on-screen choices, so reopening shows them as saved.
+          viewState: viewState(),
         });
         dispatch({ type: 'saveDone' });
       } catch (err) {
@@ -829,13 +840,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           analysisContext: state.analysisContext,
           analysisResult: activeResult(),
           derivedColumns: state.derivedColumns,
-          viewState: {
-            ltvInputs: state.ltvInputs,
-            ueModelInputs: state.ueModelInputs,
-            selectedCohorts: state.selectedCohorts,
-            customCharts: state.customCharts,
-            dedupeActive: state.dedupeActive,
-          },
+          viewState: viewState(),
         });
         const url = `${window.location.origin}${window.location.pathname}?share=${token}`;
         dispatch({ type: 'shareDone', url });

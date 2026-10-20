@@ -181,6 +181,19 @@ lgd_multiplier = 1.25
 "Payment per Period" = ["payment per period", "payment", "installment", "instalment", "monthly payment", "periodic payment"]
 "Payment Frequency" = ["payment frequency", "frequency", "payment terms", "repayment frequency"]
 
+[field_aliases.revolving]
+# Header aliases for AI-free auto-mapping on the mapping screen.
+"report_month" = ["report month", "month", "reporting month", "period", "month end", "as of month"]
+"number_of_customers" = ["customers", "number of customers", "active customers", "borrowers", "customer count"]
+"total_credit_line" = ["credit line", "total credit limit", "credit limit", "total limit"]
+"interest_collected" = ["interest collected", "interest received", "interest paid"]
+"principal_collected" = ["principal collected", "principal repaid", "principal received", "repayments"]
+"principal_issued" = ["principal issued", "disbursements", "principal disbursed", "drawdowns"]
+"principal_outstanding" = ["principal outstanding", "outstanding principal", "closing balance", "total outstanding"]
+"principal_written-off" = ["principal written off", "write offs", "writeoffs", "written off"]
+"recoveries" = ["recovery", "recoveries collected", "recovered"]
+"interest_accrued" = ["interest accrued", "interest charged", "accrued interest"]
+
 [field_aliases.rental]
 # No aliases defined yet for the Rental & Subscription model - add entries
 # here (e.g. "contract_id" = ["contract id", "contract no"]) as needed.

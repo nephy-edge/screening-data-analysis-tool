@@ -435,6 +435,9 @@ export function GeneralInputsScreen({ onNext, modelKey }: Props) {
                 </option>
               ))}
             </Select>
+            <span className="sd-muted">
+              Select the tape’s local currency - amounts are converted to US dollars for the analysis.
+            </span>
           </div>
 
           <h2 className="sd-h2">General inputs</h2>

@@ -278,3 +278,16 @@ def test_evaluation_errors_become_formula_errors(formula):
     df = pd.DataFrame({"N": [1.5, 2.5]})
     with pytest.raises(FormulaError):
         apply_derived_columns(df, [{"name": "X", "formula": formula}])
+
+
+def test_max_of_a_date_column_is_the_latest_date_for_case_when_style_rules():
+    # "total due = case when expected completion date < max date then total else 0"
+    df = pd.DataFrame(
+        {
+            "ecd": ["2024-01-01", "2025-06-01", "2024-03-01"],
+            "disb": ["2023-01-01", "2024-06-01", "2024-02-01"],
+            "total": [10, 20, 30],
+        }
+    )
+    out = apply_derived_columns(df, [{"name": "td", "formula": "IF(ecd < MAX(disb), total, 0)"}])
+    assert out["td"].tolist() == [10.0, 0.0, 30.0]

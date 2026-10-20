@@ -676,6 +676,11 @@ export function suggestMapping(input: {
   return post<SuggestMappingResult>('/ai/suggest-mapping', input);
 }
 
+/** Known header aliases per template field, for AI-free auto-mapping. */
+export function fetchFieldAliases(modelKey: ModelKey): Promise<Record<string, string[]>> {
+  return get<Record<string, string[]>>(`/field-aliases/${modelKey}`);
+}
+
 /** Ask AI to turn a natural-language "derive a column" request into a safe
  * formula over the file's real columns, e.g. "Expected Interest = Gross Loan
  * Value - Principal Value" -> {name, formula}. Returns nulls (not an error)
@@ -910,6 +915,7 @@ export function saveProfile(input: {
    * engine - see AppStore's saveSession. */
   analysisResult?: AnalysisResponse | RentalResponse | RevolvingResponse | null;
   derivedColumns?: DerivedColumn[];
+  viewState?: Record<string, unknown>;
 }): Promise<{ ok: boolean }> {
   return post<{ ok: boolean }>('/profiles/save', input);
 }
@@ -938,7 +944,7 @@ export interface RestorePayload {
    * lets the caller skip straight to the results screen instead of
    * re-running the engine (see AppStore's restoreProfile). */
   analysisResult: (AnalysisResponse | RentalResponse | RevolvingResponse) | null;
-  /** Screen-side inputs captured by a share (absent on saves and older shares). */
+  /** Screen-side inputs (LTV/UE inputs, cohort picks); absent on older saves/shares. */
   viewState?: Record<string, unknown>;
   /** AI-derived columns the mapping may use (empty on older saves/shares). */
   derivedColumns?: DerivedColumn[];

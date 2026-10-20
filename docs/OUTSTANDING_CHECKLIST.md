@@ -6,6 +6,40 @@ Source: `docs/GOALS_CHECKLIST.md` (full goal-achievement matrix) + spec
 
 ---
 
+## Lending UI feedback (2026-10-21)
+
+Done on Lending; "Also:" marks where the same change applies to other models.
+
+- [x] **HIGH: Save keeps the inputs.** Save never sent `viewState`, so LTV
+      Calculator / UE Model inputs, cohort picks and charts were lost on
+      reopen (Share already sent them). Now both use one `viewState()`.
+      Also: Rental + Revolving (shared code path - fixed for all three).
+- [x] **Save fixes the LTV inputs** - same fix as above.
+- [x] **Case-when style derived fields.** `IF(cond, a, b)` already covers
+      CASE WHEN; MAX/MIN of a *date* column was broken (returned NaN), so
+      "total due = case when expected completion date < max_date then total
+      else 0" failed. Fixed, tested, added as an example. Also: all models.
+- [x] **Metrics date range ends at "Data up to"** (Portfolio Snapshot).
+      Also: Rental Summary (done).
+- [x] **Outstanding GBV shows "$"** (amounts are USD after conversion).
+- [x] **Map your data: data preview** in the derive box; the long help text
+      moved into a (?) tip; examples are a dropdown. Also: all models.
+- [x] **Mapping opens at the top** (Ask AI button visible) and **auto-maps
+      by name + config aliases** with no AI call. Also: all models (Revolving
+      has no alias table yet - name match only).
+- [x] **Currency note**: "Select the tape's local currency - amounts are
+      converted to US dollars." Also: Rental (same screen).
+- [x] **Weighted Avg Term shows (days)** in the Cohorts table header.
+- [x] **LTV country** guessed from the portfolio currency (only replaces the
+      untouched default) and sorted A-Z. Also: Revolving LTV Calculator.
+- [x] **Hedge defaults to 5%.** Also: Revolving (shared ltvInputs).
+- [x] **Matured cohorts minimum** now filters on Matured Count (General
+      Inputs minimum, default 10) when "Matured loans only" is on.
+- [x] **Loss rate basis note** reworded as requested.
+- [x] **UE Overview: "Average Interest %" -> "Average Product Interest Rate".**
+- [x] Carry-overs: Rental Summary date range ends at Data up to; Revolving
+      alias table added (config.toml [field_aliases.revolving]).
+
 ## Not started
 
 - [ ] **Payments template.** Spec names three templates (lending, asset

@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../state/AppStore';
 import { Alert, Input, Metric, Select, Table, type TableColumn } from '../components/ui';
 import { computeLtvCalculator, type LtvCalculatorResponse } from '../api/engine';
+import { CURRENCY_NAMES } from '../data/currencies';
 import {
   CartesianGrid,
   Line,
@@ -229,6 +230,20 @@ export function LendingLtvTab() {
   const result = response?.ok ? response.result : null;
   const options = response?.options;
 
+  // Default the country from the portfolio currency (e.g. "Kenyan Shilling" ->
+  // Kenya), once per currency so a manual pick afterwards sticks.
+  const currency = state.generalInputs.currency;
+  const guessedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!options || guessedFor.current === currency) return;
+    guessedFor.current = currency;
+    const name = (CURRENCY_NAMES[currency] ?? '').toLowerCase();
+    const guess = options.countries.find((c) => name.startsWith(c.toLowerCase().slice(0, -1)));
+    // Only replace the untouched default, so a saved run keeps its country.
+    if (guess && country === 'Ghana' && guess !== country) setCountry(guess);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options, currency]);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <h2 className="sd-h2">LTV Calculator</h2>
@@ -257,7 +272,7 @@ export function LendingLtvTab() {
           <div className="sd-field">
             <span>Alt Lender Country</span>
             <Select aria-label="Alt Lender Country" value={country} onChange={(e) => setCountry(e.target.value)}>
-              {options.countries.map((o) => (
+              {[...options.countries].sort((a, b) => a.localeCompare(b)).map((o) => (
                 <option key={o} value={o}>
                   {o}
                 </option>
@@ -318,7 +333,7 @@ export function LendingLtvTab() {
             </label>
             <span className="sd-muted">
               {allLoansAvailable
-                ? 'Counts every loan in each cohort, finished or not (Salmon-sheet basis). Recent cohorts will look like heavy losses unless the LTV cohort range excludes them.'
+                ? 'Include cohorts without the minimum number of loans matured. Recent cohorts might show higher losses if selected.'
                 : 'Re-run the analysis to enable this option.'}
             </span>
           </div>

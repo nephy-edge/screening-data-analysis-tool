@@ -67,7 +67,7 @@ const HEADLINE: Array<{ key: string; label: string; fmt: (v: unknown) => string;
     fmt: (v) => fpct(num(v)),
     hint: 'Across cohorts',
   },
-  { key: 'Average Interest %', label: 'Average Interest %', fmt: (v) => fpct(num(v)) },
+  { key: 'Average Interest %', label: 'Average Product Interest Rate', fmt: (v) => fpct(num(v)) },
   { key: 'Average Fee %', label: 'Average Fee %', fmt: (v) => fpct(num(v)) },
   { key: 'Average Total Revenue %', label: 'Average Total Revenue %', fmt: (v) => fpct(num(v)) },
   { key: 'Sense-check Margin', label: 'Sense-check Margin', fmt: (v) => fpct(num(v)) },

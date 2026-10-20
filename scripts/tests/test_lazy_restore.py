@@ -230,3 +230,20 @@ def test_saved_and_shared_runs_keep_ai_derived_columns_for_the_data_grid(client,
         assert grid["derived"] == {"cost_of_asset": "cost * 2"}
         assert grid["rows"][0]["cost_of_asset"] == 6000
         assert "term_days" in grid["calculated"]
+
+
+def test_saved_runs_keep_their_ltv_and_ue_inputs(client, s3):
+    up = client.post("/api/ingest", files={"file": ("t.csv", b"a,b\n1,2\n", "text/csv")}).json()
+    view = {"ltvInputs": {"country": "Kenya", "hedgeRate": "0.05"}, "ueModelInputs": {"x": 1}}
+    r = client.post(
+        "/api/profiles/save",
+        json={"sessionId": "sess3", "label": "L", "ingestId": up["ingestId"], "viewState": view},
+    )
+    assert r.status_code == 200
+    assert client.get("/api/profiles/sess3").json()["viewState"] == view
+
+
+def test_field_aliases_are_served_for_ai_free_mapping(client):
+    aliases = client.get("/api/field-aliases/lending").json()
+    assert "maturity date" in aliases["Expected Completion Date"]
+    assert client.get("/api/field-aliases/nope").json() == {}

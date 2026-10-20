@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAppStore } from '../state/AppStore';
-import { Button, Alert, Select, Table, type TableColumn } from '../components/ui';
-import { suggestMapping, deriveColumn, type DerivedColumn } from '../api/engine';
+import { Button, Alert, HelpTip, Select, Table, type TableColumn } from '../components/ui';
+import { suggestMapping, deriveColumn, fetchFieldAliases, type DerivedColumn } from '../api/engine';
 import { TEMPLATE_FIELDS, RENTAL_TEMPLATE_FIELDS, REVOLVING_TEMPLATE_FIELDS } from '../data/template';
 import type { ModelKey } from '../state/types';
 
@@ -37,15 +37,29 @@ const DERIVE_EXAMPLES = [
   'the larger of fees accrued and penalties accrued',
   'expected completion date is origination date plus the original term in months',
   'recovery rate, but show zero when nothing was written off',
+  'total due is total when expected completion date is before the latest disbursement date, otherwise 0',
 ];
+
+const DERIVE_HELP =
+  'If a template field isn’t in your file, describe how to compute it in plain English - e.g. ' +
+  '“Expected Interest = Gross Loan Value − Principal Value”. AI writes a safe formula; you review it, ' +
+  'then add it as a column to map below. Name the columns as they appear in your file. Understands ' +
+  'arithmetic, comparisons, IF, IFERROR, MIN, MAX, ABS, ROUND per loan; SUM, COUNT, AVERAGE, SUMIF(S), ' +
+  'COUNTIF(S), AVERAGEIF(S) across the whole column (one number repeated on every row); and EDATE, ' +
+  'EOMONTH, YEAR, MONTH, DAY, DATEDIF, TODAY for dates. Subtracting two dates gives a span in days.';
 
 /** Suggest a source column for a template field from the real file's columns
  * by normalised name matching (e.g. map "Expected Interest" to "expected
  * interest" or "EXP Interest"). Returns the best match or undefined. */
-function suggestSource(fieldLabel: string, columns: string[]): string | undefined {
+function suggestSource(fieldLabel: string, columns: string[], aliases: string[] = []): string | undefined {
   const target = norm(fieldLabel);
   for (const col of columns) {
     if (norm(col) === target) return col;
+  }
+  // Known header aliases from config.toml [field_aliases], e.g. "maturity date".
+  for (const alias of aliases) {
+    const col = columns.find((c) => norm(c) === norm(alias));
+    if (col) return col;
   }
   // tolerate small punctuation/word-order differences for common ones
   const compact = target.replace(/ /g, '');
@@ -79,12 +93,14 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
   // Instant, offline baseline: normalised-name matching against the real
   // file's columns (see suggestSource above). Always applied first so the
   // form fills in even without an AI call.
-  const applyHeuristic = () => {
+  const [aliases, setAliases] = useState<Record<string, string[]>>({});
+  const applyHeuristic = (known = aliases) => {
     let count = 0;
     for (const field of fields) {
       // Revolving source headers are the field keys themselves (e.g. BAL_NEW).
       const src =
-        suggestSource(field.label, columns) ?? (isRevolving ? suggestSource(field.key, columns) : undefined);
+        suggestSource(field.label, columns, known[field.key]) ??
+        (isRevolving ? suggestSource(field.key, columns) : undefined);
       if (src) {
         dispatch({ type: 'setMapping', fieldKey: field.key, sourceColumn: src });
         count += 1;
@@ -92,6 +108,24 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
     }
     return count;
   };
+
+  // Open at the top (the previous screen may have been scrolled down) and
+  // pre-fill every field a name or known alias matches - no AI call needed.
+  useEffect(() => {
+    window.scrollTo(0, 0);
+    let live = true;
+    void fetchFieldAliases(modelKey)
+      .catch(() => ({}))
+      .then((known) => {
+        if (!live) return;
+        setAliases(known);
+        if (!mapped.some((m) => m.sourceColumn)) applyHeuristic(known);
+      });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelKey]);
 
   const applySuggestions = async () => {
     const heuristicCount = applyHeuristic();
@@ -174,6 +208,13 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
   const removeDerived = (name: string) =>
     dispatch({ type: 'setDerivedColumns', columns: derived.filter((d) => d.name !== name) });
 
+  const previewCols: TableColumn<string[]>[] = columns.map((c, i) => ({
+    key: c,
+    header: c,
+    mono: true,
+    render: (row) => row[i] ?? '',
+  }));
+
   const allSources = [...columns, ...derived.map((d) => d.name)];
 
   const mappedCount = mapped.filter((m) => m.sourceColumn).length;
@@ -245,13 +286,8 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
         }}
       >
         <h3 className="sd-h2" style={{ marginTop: 0 }}>
-          Ask AI to derive a column
+          Ask AI to derive a column <HelpTip text={DERIVE_HELP} />
         </h3>
-        <p className="sd-muted" style={{ marginTop: 0 }}>
-          If a template field isn’t in your file (e.g. <em>Expected Interest</em>), describe how to
-          compute it — “Expected Interest = Gross Loan Value − Principal Value”. AI writes a safe
-          formula; you review it, then add it as a column to map below.
-        </p>
         <div className="sd-field">
           <input
             className="sd-input"
@@ -268,44 +304,31 @@ export function ColumnMappingScreen({ onNext, modelKey }: MappingProps) {
           >
             {deriveBusy ? 'Asking AI…' : 'Ask AI to derive'}
           </Button>
+          <Select
+            value=""
+            onChange={(e) => e.target.value && setDeriveRequest(e.target.value)}
+            aria-label="Try an example"
+            style={{ maxWidth: 320 }}
+          >
+            <option value="">Try an example…</option>
+            {DERIVE_EXAMPLES.map((ex) => (
+              <option key={ex} value={ex}>
+                {ex}
+              </option>
+            ))}
+          </Select>
         </div>
 
-        <div className="sd-derive__examples" style={{ marginTop: 12 }}>
-          <span className="sd-muted">
-            Plain English is fine — you don’t need to write a formula. Click an example to try it:
-          </span>
-          <ul style={{ margin: '6px 0 0', paddingLeft: 20 }}>
-            {DERIVE_EXAMPLES.map((ex) => (
-              <li key={ex} style={{ marginBottom: 2 }}>
-                <button
-                  type="button"
-                  onClick={() => setDeriveRequest(ex)}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    padding: 0,
-                    font: 'inherit',
-                    color: 'inherit',
-                    textAlign: 'left',
-                    textDecoration: 'underline',
-                    textDecorationStyle: 'dotted',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {ex}
-                </button>
-              </li>
-            ))}
-          </ul>
-          <span className="sd-muted" style={{ display: 'block', marginTop: 8 }}>
-            Name the columns as they appear in your file and it will do better. Understands
-            arithmetic, comparisons, and spreadsheet functions — IF, IFERROR, MIN, MAX, ABS,
-            ROUND per loan; SUM, COUNT, AVERAGE, SUMIF(S), COUNTIF(S), AVERAGEIF(S) across the
-            whole column; and EDATE, EOMONTH, YEAR, MONTH, DAY, DATEDIF, TODAY for dates. An
-            aggregate gives one number repeated on every row, as filling a formula down a
-            spreadsheet would. Subtracting two dates gives a span in days.
-          </span>
-        </div>
+        {state.file?.preview?.length ? (
+          <div style={{ marginTop: 12 }}>
+            <span className="sd-muted">
+              Your data (first {state.file.preview.length} rows) - use these column names in your request:
+            </span>
+            <div style={{ overflowX: 'auto', maxHeight: 220, marginTop: 6 }}>
+              <Table columns={previewCols} rows={state.file.preview} />
+            </div>
+          </div>
+        ) : null}
 
         {aiDerive ? (
           <div className="sd-derive__result" style={{ marginTop: 12 }}>

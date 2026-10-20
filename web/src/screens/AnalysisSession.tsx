@@ -277,7 +277,7 @@ function LendingSummaryTab() {
       {fxWarning ? <Alert tone="warning">{fxWarning}</Alert> : null}
       <div className="sd-grid sd-grid--metrics">
         <Metric label="Data up to" value={String(m.dataUpTo ?? '—')} hint="The most recent loan disbursement date in the tape (as-of point for the snapshot)." />
-        <Metric label="Outstanding GBV" value={fmoney(m.outstandingGbv, '')} hint="Gross book value of loans still within term (not yet matured): Principal + Interest + Fee minus Total Paid for loans where Reached T+3? is False." />
+        <Metric label="Outstanding GBV" value={fmoney(m.outstandingGbv)} hint="Gross book value of loans still within term (not yet matured): Principal + Interest + Fee minus Total Paid for loans where Reached T+3? is False." />
         <Metric label="Loss Rate" value={fpct(m.lossRate)} hint="Portfolio average loss rate across matured cohorts (Reached T+3? = True)." />
         <Metric label={ranged ? `95th %ile Loss Rate (${rangeText})` : '95th %ile Loss Rate'} value={fpct(pctile95)} hint={pctile95Hint} />
         <Metric label={ranged ? `Product Interest Rate (${rangeText})` : 'Product Interest Rate'} value={fpct(productInterest)} hint={productInterestHint} />
@@ -289,7 +289,7 @@ function LendingSummaryTab() {
             rows={[
               ranged
                 ? ['Date Range', `${range!.from || str(m.dateRangeStart).slice(0, 7)} to ${range!.to || str(m.dateRangeEnd).slice(0, 7)}`, `Cohorts ${rangeText} were selected (LTV cohort range, General Inputs) - only these feed the LTV interest and 95th %ile loss. The full tape runs ${m.dateRangeStart} to ${m.dateRangeEnd}, and the other figures in this table still cover all of it.`]
-                : ['Date Range', `${m.dateRangeStart} to ${m.dateRangeEnd}`, 'From the earliest disbursement date to the tape as-of date.'],
+                : ['Date Range', `${m.dateRangeStart} to ${m.dataUpTo ?? m.dateRangeEnd}`, 'From the earliest disbursement date to the latest one (Data up to).'],
               ['Loans', fint(m.loans), 'Total number of loan records in the tape.'],
               ['Value of Principal Disbursed', fmoney(m.principalDisbursed), 'Total principal amount lent across all loans.'],
               ['Total Collected', fmoney(m.totalCollected), 'Total cash collected from borrowers to date.'],
@@ -340,7 +340,7 @@ function RentalSummaryTab() {
           <h2 className="sd-h2">Portfolio Snapshot</h2>
           <SnapshotTable
             rows={[
-              ['Date Range', `${m.dateRangeStart} to ${m.dateRangeEnd}`, 'Earliest contract start date to the extraction (as-of) date.'],
+              ['Date Range', `${m.dateRangeStart} to ${m.dataUpTo ?? m.dateRangeEnd}`, 'Earliest contract start date to the latest one (Data up to).'],
               ['Contracts', fint(m.contractRecords), 'Count of contract rows in the tape.'],
               ['Unique Assets', fint(m.uniqueAssets), 'Count of distinct asset IDs.'],
               ['Total Collected', fmoney(m.totalCollected), 'Sum of total paid on every contract.'],
@@ -777,7 +777,7 @@ function ColumnHeader({ col, stats }: { col: string; stats: ColStats }) {
           ))}
         </div>
       )}
-      <div style={{ marginTop: 3 }}>{col}</div>
+      <div style={{ marginTop: 3 }}>{COHORT_TERM_COLS.has(col) ? `${col} (days)` : col}</div>
     </div>
   );
 }
@@ -944,7 +944,8 @@ function LendingCohortsTab() {
   if (!response) return <Alert tone="info">Run analysis to see cohorts.</Alert>;
 
   const master = maturedOnly ? masterMatured : masterAll;
-  const cohortView = master.filter((r) => (num(r['Loan Count']) ?? 0) >= minLoans);
+  // With 'Matured loans only' on, the minimum applies to matured loans (General Inputs).
+  const cohortView = master.filter((r) => (num(r[maturedOnly ? 'Matured Count' : 'Loan Count']) ?? 0) >= minLoans);
 
   const toggle = (cohort: string) => {
     setSelected((prev) => {
@@ -1003,7 +1004,7 @@ function LendingCohortsTab() {
       </label>
       <p className="sd-muted">
         {maturedOnly
-          ? `${master.length} monthly cohorts with at least one matured loan (Reached T+3? = True)`
+          ? `${master.length} monthly cohorts with matured loans (Reached T+3? = True); shown when matured loans ≥ the minimum below`
           : `${master.length} monthly cohorts (all loans, matured or not)`}
       </p>
       <div className="sd-field" style={{ maxWidth: 260, marginBottom: 12 }}>
@@ -1355,7 +1356,7 @@ function LendingUeOverviewTab() {
     [
       ['Average Principal Amount', fprincipal(ue['Average Principal Amount']), 'Average principal loaned per loan record.'],
       ['Average Fee %', fpct(ue['Average Fee %'], 1), 'Expected fees as a share of total principal.'],
-      ['Average Interest %', fpct(ue['Average Interest %'], 1), 'Expected interest as a share of total principal (the uniform product rate).'],
+      ['Average Product Interest Rate', fpct(ue['Average Interest %'], 1), 'Expected interest as a share of total principal (the uniform product rate).'],
     ],
     [['Sense-check Margin', fpct(ue['Sense-check Margin'], 1), 'Fee + interest margin used as a sanity check on the product economics.']],
   ];
@@ -1373,7 +1374,7 @@ function LendingUeOverviewTab() {
         <div className="sd-grid sd-grid--2">
           <LendingUeCohortChart rows={chart} title="Loss per Cohort" yCol="Loss Rate" yFmt={(v) => `${(v * 100).toFixed(1)}%`} avg={num(ue['Average Loss'])} avgLabel={`Avg: ${pct(num(ue['Average Loss']), 1)}`} color="#2ca02c" />
           <LendingUeCohortChart rows={chart} title="Average Term per Cohort (days)" yCol="Weighted Avg Term" yFmt={(v) => v.toFixed(0)} avg={num(ue['Average Expected Term'])} avgLabel={`Avg: ${naS(ue['Average Expected Term'])} days`} color="#2ca02c" />
-          <LendingUeCohortChart rows={chart} title="Average Product Interest Percent per Cohort" yCol="Interest %" yFmt={(v) => `${(v * 100).toFixed(1)}%`} avg={num(ue['Average Interest %'])} avgLabel={`Avg: ${pct(num(ue['Average Interest %']), 1)}`} color="#ff7f0e" />
+          <LendingUeCohortChart rows={chart} title="Average Product Interest Rate per Cohort" yCol="Interest %" yFmt={(v) => `${(v * 100).toFixed(1)}%`} avg={num(ue['Average Interest %'])} avgLabel={`Avg: ${pct(num(ue['Average Interest %']), 1)}`} color="#ff7f0e" />
           <LendingUeCohortChart rows={chart} title="Average Fee Percent per Cohort" yCol="Fee %" yFmt={(v) => `${(v * 100).toFixed(1)}%`} avg={num(ue['Average Fee %'])} avgLabel={`Avg: ${pct(num(ue['Average Fee %']), 1)}`} color="#1f77b4" />
         </div>
       )}
