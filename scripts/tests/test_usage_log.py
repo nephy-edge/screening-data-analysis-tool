@@ -25,6 +25,8 @@ def test_middleware_logs_tracked_calls_only(monkeypatch):
 
     client = TestClient(m.app, base_url="https://testserver")
     client.post("/api/auth/dummy", json={"email": "a@lendable.io"})
+    # Turn "deployed" on only after signing in: under Cognito the dummy sign-in is refused.
+    monkeypatch.setattr(usage_log.cognito, "is_configured", lambda: True)
     client.post("/api/analyse/revolving", json={})
     client.get("/api/auth/me")
 
@@ -45,3 +47,13 @@ class _InlineThread:
 
     def start(self):
         self._run()
+
+
+def test_local_runs_not_logged(monkeypatch):
+    rows = []
+    monkeypatch.setitem(usage_log.USAGE_LOG, "sheet_id", "sheet123")
+    monkeypatch.setattr(usage_log, "_service_account_info", lambda: {"client_email": "x"})
+    monkeypatch.setattr(usage_log.cognito, "is_configured", lambda: False)
+    monkeypatch.setattr(usage_log, "_safe_append", rows.append)
+    usage_log.log_call("/api/analyse/lending", "POST", "a@lendable.io", 200, 1.0)
+    assert rows == []

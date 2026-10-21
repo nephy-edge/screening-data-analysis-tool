@@ -3,13 +3,15 @@
 Metadata only (who, what, status, how long) - never tape contents. Writes go
 through the existing service account (the sheet must be shared with its
 client_email as Editor) on a daemon thread, and every failure is swallowed:
-logging must never slow down or break a user's run.
+logging must never slow down or break a user's run. Only the deployed app
+(Cognito configured) logs, so local/dev runs never reach the tracker.
 """
 
 import threading
 import time
 from datetime import UTC, datetime
 
+import cognito
 import requests
 from ca_bundle import _ca_bundle_path
 from google_oauth import _delegated_drive_token, _service_account_info
@@ -77,6 +79,7 @@ def log_call(path: str, method: str, user: str | None, status: int, seconds: flo
         or not path.startswith(TRACKED_PREFIXES)
         or not USAGE_LOG["sheet_id"]
         or not _service_account_info()
+        or not cognito.is_configured()
     ):
         return
     threading.Thread(
