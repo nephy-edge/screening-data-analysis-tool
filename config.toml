@@ -169,7 +169,7 @@ lgd_multiplier = 1.25
 # only). Share the sheet with the service account's client_email as Editor.
 # Empty sheet_id = logging off.
 [usage_log]
-sheet_id = "1uIFwTXfI8fDfwv4VqodClrisO42ALa76rfIfIED3v9I"
+sheet_id = "1dyajHTQklNu7JwRzAKPGBKrnDGWfTmPaogDO3p9EFoY"
 tab = "Usage log"
 
 [field_aliases.lending]
