@@ -165,6 +165,13 @@ lgd_multiplier = 1.25
 # model ("lending" / "rental") so an alias never leaks across models (e.g.
 # Lending's "start date" -> "Disbursement Date" must not also claim a Rental
 # file's own start_date field). Matching ignores case/spacing/punctuation.
+# Usage tracker: one row per ingest/analyse/export/AI/save call (metadata
+# only). Share the sheet with the service account's client_email as Editor.
+# Empty sheet_id = logging off.
+[usage_log]
+sheet_id = "1uIFwTXfI8fDfwv4VqodClrisO42ALa76rfIfIED3v9I"
+tab = "Usage log"
+
 [field_aliases.lending]
 "Loan ID" = ["loan id", "loan_id", "account id", "account_id", "id", "loan no", "loan number", "contract no", "contract number"]
 "Disbursement Date" = ["disbursement date", "disbursal date", "disbursed date", "funded date", "funding date", "start date", "origination date", "loan date", "issue date"]

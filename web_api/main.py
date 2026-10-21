@@ -109,6 +109,7 @@ import document_text
 # email) - access control is enforced in s3_store itself (per-user prefix),
 # not by AWS credentials.
 import s3_store
+import usage_log
 
 # Google OAuth mechanics (auth URL, code exchange, userinfo) - the same
 # helpers app.py's own Google sign-in uses (scripts/login_gates.py's
@@ -609,7 +610,17 @@ async def _require_session_middleware(request: Request, call_next):
         and _read_react_session(request) is None
     ):
         return JSONResponse({"detail": "Not signed in."}, status_code=401)
-    return await call_next(request)
+    started = time.monotonic()
+    response = await call_next(request)
+    session = _read_react_session(request)
+    usage_log.log_call(
+        path,
+        request.method,
+        session["email"] if session else None,
+        response.status_code,
+        time.monotonic() - started,
+    )
+    return response
 
 
 # Canonical template fields the Lending engine requires (see LENDING_CONFIG).

@@ -328,6 +328,8 @@ _DEFAULTS = {
         # Deal-specific, so none by default (see config.toml).
         "covenants": [],
     },
+    # Usage-tracker Google Sheet; empty sheet_id disables logging.
+    "usage_log": {"sheet_id": "", "tab": "Usage log"},
     "field_aliases": {
         "lending": {
             "Loan ID": [
@@ -460,6 +462,7 @@ UE_MODEL_COST_DEFAULTS = CONFIG["ue_model_cost_defaults"]
 CREDIT_STRESS = CONFIG["credit_stress"]
 REVOLVING_DEFAULTS = CONFIG["revolving_defaults"]
 FIELD_ALIASES = CONFIG["field_aliases"]
+USAGE_LOG = CONFIG["usage_log"]
 
 
 def render_prompt(template: str, **kwargs) -> str:
