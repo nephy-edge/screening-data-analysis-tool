@@ -171,6 +171,8 @@ lgd_multiplier = 1.25
 [usage_log]
 sheet_id = "1dyajHTQklNu7JwRzAKPGBKrnDGWfTmPaogDO3p9EFoY"
 tab = "Usage log"
+# In-app feedback rows go here (same columns as the Google Form's tab).
+feedback_tab = "Feedback"
 
 [field_aliases.lending]
 "Loan ID" = ["loan id", "loan_id", "account id", "account_id", "id", "loan no", "loan number", "contract no", "contract number"]

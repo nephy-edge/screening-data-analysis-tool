@@ -1059,3 +1059,12 @@ export function importGdriveFile(fileId: string): Promise<IngestResponse> {
 export function importGdriveLink(url: string): Promise<IngestResponse> {
   return post<IngestResponse>('/gdrive-link/import', { url });
 }
+
+/** In-app feedback - appended to the tracker sheet's Feedback tab. */
+export function submitFeedback(body: {
+  message: string;
+  model: 'Lending' | 'Rental' | 'Revolving' | 'General';
+  severity: 'Low' | 'Medium' | 'High';
+}): Promise<{ ok: boolean }> {
+  return request('/feedback', { method: 'POST', body, errorPrefix: 'Feedback' });
+}

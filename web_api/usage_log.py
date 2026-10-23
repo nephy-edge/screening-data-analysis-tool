@@ -7,6 +7,7 @@ logging must never slow down or break a user's run. Only the deployed app
 (Cognito configured) logs, so local/dev runs never reach the tracker.
 """
 
+import re
 import threading
 import time
 from datetime import UTC, datetime
@@ -54,13 +55,69 @@ def _row(path: str, user: str | None, status: int, seconds: float) -> list:
     ]
 
 
-def append_row(row: list) -> None:
-    sheet_id, tab = USAGE_LOG["sheet_id"], USAGE_LOG["tab"]
-    requests.post(
-        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{tab}!A1:append",
-        params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
+def append_row(row: list, tab: str | None = None, value_input: str = "RAW") -> dict:
+    sheet_id, tab = USAGE_LOG["sheet_id"], tab or USAGE_LOG["tab"]
+    resp = requests.post(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/'{tab}'!A1:append",
+        params={"valueInputOption": value_input, "insertDataOption": "INSERT_ROWS"},
         headers={"Authorization": f"Bearer {_access_token()}"},
         json={"values": [row]},
+        timeout=15,
+        verify=_ca_bundle_path(),
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+FEEDBACK_STATUSES = ["Open", "In progress", "Done"]
+
+
+def feedback_enabled() -> bool:
+    return bool(USAGE_LOG["sheet_id"] and _service_account_info() and cognito.is_configured())
+
+
+def append_feedback(message: str, model: str, severity: str, user: str) -> None:
+    """Add one in-app feedback row to the Feedback tab, in the same column
+    order as the Google Form's (Timestamp, message, Model, Severity, Email,
+    Status), and give its Status cell the Open/In progress/Done dropdown.
+    Raises on failure so the user is told their feedback wasn't saved."""
+    sheet_id, tab = USAGE_LOG["sheet_id"], USAGE_LOG["feedback_tab"]
+    # The form writes sheet-local time; USER_ENTERED makes this a real date too.
+    stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    result = append_row([stamp, message, model, severity, user, "Open"], tab, "USER_ENTERED")
+    row = int(re.search(r"!A(\d+)", result["updates"]["updatedRange"]).group(1))
+    base = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
+    headers = {"Authorization": f"Bearer {_access_token()}"}
+    meta = requests.get(
+        base,
+        params={"fields": "sheets.properties"},
+        headers=headers,
+        timeout=15,
+        verify=_ca_bundle_path(),
+    )
+    meta.raise_for_status()
+    gid = next(
+        s["properties"]["sheetId"] for s in meta.json()["sheets"] if s["properties"]["title"] == tab
+    )
+    rule = {
+        "condition": {
+            "type": "ONE_OF_LIST",
+            "values": [{"userEnteredValue": v} for v in FEEDBACK_STATUSES],
+        },
+        "showCustomUi": True,
+        "strict": True,
+    }
+    status_cell = {
+        "sheetId": gid,
+        "startRowIndex": row - 1,
+        "endRowIndex": row,
+        "startColumnIndex": 5,
+        "endColumnIndex": 6,
+    }
+    requests.post(
+        f"{base}:batchUpdate",
+        headers=headers,
+        json={"requests": [{"setDataValidation": {"range": status_cell, "rule": rule}}]},
         timeout=15,
         verify=_ca_bundle_path(),
     ).raise_for_status()

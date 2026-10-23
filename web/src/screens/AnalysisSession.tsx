@@ -31,7 +31,7 @@ import {
   ReferenceLine,
 } from 'recharts';
 import type { DataGrid, EscalateResult, QualityCheck, SummaryChartRow, UeModelAssumptions, WhatIf } from '../api/engine';
-import { escalateVariance, fetchIngestData } from '../api/engine';
+import { escalateVariance, fetchIngestData, submitFeedback } from '../api/engine';
 import {
   aggregateChartData,
   allColumns,
@@ -1915,6 +1915,73 @@ function WhatIfBanner({ whatif }: { whatif: WhatIf }) {
   );
 }
 
+const FEEDBACK_MODEL = { lending: 'Lending', rental: 'Rental', revolving: 'Revolving' } as const;
+
+function FeedbackTab() {
+  const { state } = useAppStore();
+  const [message, setMessage] = useState('');
+  const [severity, setSeverity] = useState<'Low' | 'Medium' | 'High'>('Low');
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const send = async () => {
+    if (!message.trim() || sending) return;
+    setSending(true);
+    setError(null);
+    try {
+      await submitFeedback({ message: message.trim(), model: FEEDBACK_MODEL[state.modelKey], severity });
+      setMessage('');
+      setSent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Couldn't send your feedback.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="sd-card">
+      <h2 className="sd-h2">Feedback</h2>
+      <p className="sd-muted">
+        Something wrong, confusing or missing? Tell us. Your email and the current model are recorded with it.
+      </p>
+      {sent ? <Alert tone="success">Thanks - your feedback has been recorded.</Alert> : null}
+      {error ? <Alert tone="error">{error}</Alert> : null}
+      <div className="sd-field" style={{ marginTop: 12 }}>
+        <span>What happened, or what would you like?</span>
+        <textarea
+          className="sd-input"
+          rows={5}
+          style={{ width: '100%', resize: 'vertical' }}
+          maxLength={4000}
+          value={message}
+          onChange={(e) => {
+            setMessage(e.target.value);
+            setSent(false);
+          }}
+          disabled={sending}
+        />
+      </div>
+      <div className="sd-actions" style={{ marginTop: 12 }}>
+        <Select
+          value={severity}
+          aria-label="Severity"
+          onChange={(e) => setSeverity(e.target.value as 'Low' | 'Medium' | 'High')}
+          disabled={sending}
+        >
+          <option value="Low">Severity: Low</option>
+          <option value="Medium">Severity: Medium</option>
+          <option value="High">Severity: High</option>
+        </Select>
+        <Button onClick={() => void send()} disabled={sending || !message.trim()}>
+          {sending ? 'Sending…' : 'Send feedback'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function AiTab() {
   const { state, askAiQuestion } = useAppStore();
   const [question, setQuestion] = useState('');
@@ -1994,6 +2061,7 @@ export function AnalysisSession({
     { id: 'ue', label: 'Unit Economics' },
     { id: 'viz', label: 'Custom Visualizations' },
     { id: 'ai', label: 'Ask AI' },
+    { id: 'feedback', label: 'Feedback' },
   ];
   const rentalTabs = [
     { id: 'summary', label: 'Summary' },
@@ -2003,6 +2071,7 @@ export function AnalysisSession({
     { id: 'general', label: 'General Analysis' },
     { id: 'viz', label: 'Custom Visualizations' },
     { id: 'ai', label: 'Ask AI' },
+    { id: 'feedback', label: 'Feedback' },
   ];
   const revolvingTabs = [
     { id: 'revSummary', label: 'Summary' },
@@ -2012,6 +2081,7 @@ export function AnalysisSession({
     { id: 'revUe', label: 'Unit Economics' },
     { id: 'viz', label: 'Custom Viz' },
     { id: 'ai', label: 'Ask AI' },
+    { id: 'feedback', label: 'Feedback' },
   ];
   const tabs = isRevolving ? revolvingTabs : isRental ? rentalTabs : lendingTabs;
   const [tab, setTab] = useState<string>(tabs[0].id);
@@ -2038,6 +2108,7 @@ export function AnalysisSession({
       {tab === 'general' && <GeneralAnalysisTab />}
       {tab === 'viz' && <VizTab />}
       {tab === 'ai' && <AiTab />}
+      {tab === 'feedback' && <FeedbackTab />}
       {tab === 'revSummary' && <RevolvingSummaryTab />}
       {tab === 'revPerformance' && <RevolvingPerformanceTab />}
       {tab === 'revLtv' && <RevolvingLtvTab />}

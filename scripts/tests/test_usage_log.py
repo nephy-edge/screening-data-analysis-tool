@@ -57,3 +57,30 @@ def test_local_runs_not_logged(monkeypatch):
     monkeypatch.setattr(usage_log, "_safe_append", rows.append)
     usage_log.log_call("/api/analyse/lending", "POST", "a@lendable.io", 200, 1.0)
     assert rows == []
+
+
+def _signed_in():
+    client = TestClient(m.app, base_url="https://testserver")
+    client.post("/api/auth/dummy", json={"email": "a@lendable.io"})
+    return client
+
+
+def test_feedback_saved_with_signed_in_email(monkeypatch):
+    calls = []
+    client = _signed_in()
+    monkeypatch.setattr(usage_log, "feedback_enabled", lambda: True)
+    monkeypatch.setattr(usage_log, "append_feedback", lambda *a: calls.append(a))
+    resp = client.post(
+        "/api/feedback", json={"message": " Chart broke ", "model": "Rental", "severity": "High"}
+    )
+    assert resp.status_code == 200
+    assert calls == [("Chart broke", "Rental", "High", "a@lendable.io")]
+
+
+def test_feedback_off_locally_and_validated(monkeypatch):
+    client = _signed_in()
+    monkeypatch.setattr(usage_log, "feedback_enabled", lambda: False)
+    body = {"message": "x", "model": "Lending", "severity": "Low"}
+    assert client.post("/api/feedback", json=body).status_code == 503
+    bad = {**body, "severity": "Urgent"}
+    assert client.post("/api/feedback", json=bad).status_code == 422

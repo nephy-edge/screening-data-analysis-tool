@@ -329,7 +329,7 @@ _DEFAULTS = {
         "covenants": [],
     },
     # Usage-tracker Google Sheet; empty sheet_id disables logging.
-    "usage_log": {"sheet_id": "", "tab": "Usage log"},
+    "usage_log": {"sheet_id": "", "tab": "Usage log", "feedback_tab": "Feedback"},
     "field_aliases": {
         "lending": {
             "Loan ID": [

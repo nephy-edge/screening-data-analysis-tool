@@ -3879,6 +3879,31 @@ def _restore_payload(profile: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+class FeedbackBody(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
+    model: Literal["Lending", "Rental", "Revolving", "General"]
+    severity: Literal["Low", "Medium", "High"]
+
+
+@app.post("/api/feedback")
+def submit_feedback(
+    body: FeedbackBody, identity: str = Depends(_require_identity)
+) -> dict[str, Any]:
+    """In-app feedback, appended to the tracker sheet's Feedback tab alongside
+    the Google Form's responses. Deployed app only, like the usage log."""
+    if not usage_log.feedback_enabled():
+        raise HTTPException(
+            status_code=503, detail="Feedback is only recorded on the deployed app."
+        )
+    try:
+        usage_log.append_feedback(body.message.strip(), body.model, body.severity, identity)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail="Couldn't save your feedback - please try again."
+        ) from exc
+    return {"ok": True}
+
+
 class SaveProfileBody(BaseModel):
     sessionId: str = Field(
         ..., description="Client-generated id identifying this deal across saves."
