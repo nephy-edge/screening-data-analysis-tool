@@ -3883,6 +3883,7 @@ class FeedbackBody(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     model: Literal["Lending", "Rental", "Revolving", "General"]
     severity: Literal["Low", "Medium", "High"]
+    deal: str = Field("", max_length=200)
 
 
 @app.post("/api/feedback")
@@ -3896,7 +3897,9 @@ def submit_feedback(
             status_code=503, detail="Feedback is only recorded on the deployed app."
         )
     try:
-        usage_log.append_feedback(body.message.strip(), body.model, body.severity, identity)
+        usage_log.append_feedback(
+            body.message.strip(), body.model, body.severity, identity, body.deal.strip()
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=502, detail="Couldn't save your feedback - please try again."

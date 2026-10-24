@@ -76,15 +76,16 @@ def feedback_enabled() -> bool:
     return bool(USAGE_LOG["sheet_id"] and _service_account_info() and cognito.is_configured())
 
 
-def append_feedback(message: str, model: str, severity: str, user: str) -> None:
+def append_feedback(message: str, model: str, severity: str, user: str, deal: str = "") -> None:
     """Add one in-app feedback row to the Feedback tab, in the same column
     order as the Google Form's (Timestamp, message, Model, Severity, Email,
-    Status), and give its Status cell the Open/In progress/Done dropdown.
+    Status, then Deal in G - the form leaves it blank), and give its Status
+    cell the Open/In progress/Done dropdown.
     Raises on failure so the user is told their feedback wasn't saved."""
     sheet_id, tab = USAGE_LOG["sheet_id"], USAGE_LOG["feedback_tab"]
     # The form writes sheet-local time; USER_ENTERED makes this a real date too.
     stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-    result = append_row([stamp, message, model, severity, user, "Open"], tab, "USER_ENTERED")
+    result = append_row([stamp, message, model, severity, user, "Open", deal], tab, "USER_ENTERED")
     row = int(re.search(r"!A(\d+)", result["updates"]["updatedRange"]).group(1))
     base = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
     headers = {"Authorization": f"Bearer {_access_token()}"}

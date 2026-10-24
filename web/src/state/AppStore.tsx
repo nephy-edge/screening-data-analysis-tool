@@ -77,6 +77,9 @@ export interface AppState {
    * fields mean) - sent to the AI for mapping auto-fill and chat, mirroring
    * app.py's "Additional context for the AI" text area. */
   analysisContext: string;
+  /** Unsent Feedback-tab draft, kept here so switching results tabs (which
+   * unmounts the tab) doesn't wipe it. Session-only, never saved. */
+  feedbackDraft: { message: string; severity: 'Low' | 'Medium' | 'High'; deal: string | null };
   /** Supporting documents (PDF/Excel/Word/text) uploaded alongside the
    * notes above, already extracted to text - see DataInputScreen.tsx's
    * addContextDocs. Session-only, like app.py's context_documents: not
@@ -126,6 +129,7 @@ type Action =
   | { type: 'signOut' }
   | { type: 'setFile'; file: RawFile | null }
   | { type: 'setAnalysisContext'; value: string }
+  | { type: 'setFeedbackDraft'; draft: AppState['feedbackDraft'] }
   | { type: 'setContextDocuments'; documents: ContextDocument[] }
   | { type: 'setDerivedColumns'; columns: DerivedColumn[] }
   | { type: 'setMapping'; fieldKey: string; sourceColumn: string | null }
@@ -161,6 +165,7 @@ const initialState: AppState = {
   auth: { user: null, gdrive: false },
   file: null,
   analysisContext: '',
+  feedbackDraft: { message: '', severity: 'Low', deal: null },
   contextDocuments: [],
   mappings: [],
   derivedColumns: [],
@@ -246,6 +251,8 @@ function reducer(state: AppState, action: Action): AppState {
       };
     case 'setAnalysisContext':
       return { ...state, analysisContext: action.value };
+    case 'setFeedbackDraft':
+      return { ...state, feedbackDraft: action.draft };
     case 'setContextDocuments':
       return { ...state, contextDocuments: action.documents };
     case 'setDerivedColumns':

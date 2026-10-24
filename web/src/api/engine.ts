@@ -1065,6 +1065,7 @@ export function submitFeedback(body: {
   message: string;
   model: 'Lending' | 'Rental' | 'Revolving' | 'General';
   severity: 'Low' | 'Medium' | 'High';
+  deal: string;
 }): Promise<{ ok: boolean }> {
   return request('/feedback', { method: 'POST', body, errorPrefix: 'Feedback' });
 }

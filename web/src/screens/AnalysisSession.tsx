@@ -1918,9 +1918,13 @@ function WhatIfBanner({ whatif }: { whatif: WhatIf }) {
 const FEEDBACK_MODEL = { lending: 'Lending', rental: 'Rental', revolving: 'Revolving' } as const;
 
 function FeedbackTab() {
-  const { state } = useAppStore();
-  const [message, setMessage] = useState('');
-  const [severity, setSeverity] = useState<'Low' | 'Medium' | 'High'>('Low');
+  const { state, dispatch } = useAppStore();
+  // In the store, not useState: leaving the tab unmounts it and lost the draft.
+  const { message, severity } = state.feedbackDraft;
+  // Pre-filled with the same label Save uses until the user edits it.
+  const deal = state.feedbackDraft.deal ?? state.dealLabel ?? '';
+  const setDraft = (draft: Partial<typeof state.feedbackDraft>) =>
+    dispatch({ type: 'setFeedbackDraft', draft: { ...state.feedbackDraft, ...draft } });
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1930,8 +1934,8 @@ function FeedbackTab() {
     setSending(true);
     setError(null);
     try {
-      await submitFeedback({ message: message.trim(), model: FEEDBACK_MODEL[state.modelKey], severity });
-      setMessage('');
+      await submitFeedback({ message: message.trim(), model: FEEDBACK_MODEL[state.modelKey], severity, deal: deal.trim() });
+      setDraft({ message: '' });
       setSent(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't send your feedback.");
@@ -1949,6 +1953,17 @@ function FeedbackTab() {
       {sent ? <Alert tone="success">Thanks - your feedback has been recorded.</Alert> : null}
       {error ? <Alert tone="error">{error}</Alert> : null}
       <div className="sd-field" style={{ marginTop: 12 }}>
+        <span>Deal</span>
+        <Input
+          value={deal}
+          onChange={(e) => setDraft({ deal: e.target.value })}
+          placeholder="Deal name"
+          aria-label="Deal"
+          maxLength={200}
+          disabled={sending}
+        />
+      </div>
+      <div className="sd-field" style={{ marginTop: 12 }}>
         <span>What happened, or what would you like?</span>
         <textarea
           className="sd-input"
@@ -1957,7 +1972,7 @@ function FeedbackTab() {
           maxLength={4000}
           value={message}
           onChange={(e) => {
-            setMessage(e.target.value);
+            setDraft({ message: e.target.value });
             setSent(false);
           }}
           disabled={sending}
@@ -1967,7 +1982,7 @@ function FeedbackTab() {
         <Select
           value={severity}
           aria-label="Severity"
-          onChange={(e) => setSeverity(e.target.value as 'Low' | 'Medium' | 'High')}
+          onChange={(e) => setDraft({ severity: e.target.value as 'Low' | 'Medium' | 'High' })}
           disabled={sending}
         >
           <option value="Low">Severity: Low</option>

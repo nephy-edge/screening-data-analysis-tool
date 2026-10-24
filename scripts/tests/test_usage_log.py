@@ -71,10 +71,16 @@ def test_feedback_saved_with_signed_in_email(monkeypatch):
     monkeypatch.setattr(usage_log, "feedback_enabled", lambda: True)
     monkeypatch.setattr(usage_log, "append_feedback", lambda *a: calls.append(a))
     resp = client.post(
-        "/api/feedback", json={"message": " Chart broke ", "model": "Rental", "severity": "High"}
+        "/api/feedback",
+        json={
+            "message": " Chart broke ",
+            "model": "Rental",
+            "severity": "High",
+            "deal": " Salmon ",
+        },
     )
     assert resp.status_code == 200
-    assert calls == [("Chart broke", "Rental", "High", "a@lendable.io")]
+    assert calls == [("Chart broke", "Rental", "High", "a@lendable.io", "Salmon")]
 
 
 def test_feedback_off_locally_and_validated(monkeypatch):
