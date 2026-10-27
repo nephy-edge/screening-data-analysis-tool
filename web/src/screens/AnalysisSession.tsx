@@ -1136,7 +1136,11 @@ function LendingUeCohortChart({ rows, title, yCol, yFmt, avg, avgLabel, color }:
   avgLabel: string;
   color: string;
 }) {
-  const chart = rows.map((r) => ({ Cohort: String(r.Cohort), value: num(r[yCol]) })).filter((r) => r.value !== null);
+  // The engine serializes Cohort as a full ISO timestamp ("2023-07-01T00:00:00");
+  // trim it to "YYYY-MM" so the axis stays readable, like the other cohort charts.
+  const chart = rows
+    .map((r) => ({ Cohort: String(r.Cohort).slice(0, 7), value: num(r[yCol]) }))
+    .filter((r) => r.value !== null);
   if (chart.length === 0) return null;
   return (
     <div className="sd-card">
@@ -1504,8 +1508,11 @@ function LendingUeModelTab() {
     value: number,
     onChange: (v: number) => void,
   ) => (
-    <label>
-      <div className="sd-muted">{label}</div>
+    // Flex column with the label taking the spare height: grid rows stretch to
+    // the tallest cell, so every input in the row lines up at the bottom even
+    // when one label wraps to two lines and another doesn't.
+    <label style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div className="sd-muted" style={{ flex: 1 }}>{label}</div>
       <Input
         type="number"
         min={0}
@@ -1666,6 +1673,12 @@ function renderChart(
   opts: ChartRenderOpts = {},
 ) {
   const showLegend = seriesNames.length > 1;
+  // Custom-chart X values can be raw ISO timestamps (the "Chart Data" source's
+  // Cohort is "2023-07-01T00:00:00"); drop the time so ticks read as dates.
+  // Callers that pass their own formatter (the Cohorts tab) keep it.
+  const xTickFormat =
+    opts.xTickFormat ??
+    ((v: unknown) => (/^\d{4}-\d{2}-\d{2}T/.test(String(v)) ? String(v).slice(0, 10) : String(v)));
   const xAxisLabel = opts.xLabel
     ? { value: opts.xLabel, position: 'insideBottom' as const, offset: -5, fontSize: 11 }
     : undefined;
@@ -1682,7 +1695,7 @@ function renderChart(
           type="category"
           name={card.xCol}
           tick={{ fontSize: 11, fill: '#666' }}
-          tickFormatter={opts.xTickFormat}
+          tickFormatter={xTickFormat}
           label={xAxisLabel}
         />
         <YAxis
@@ -1711,7 +1724,7 @@ function renderChart(
       <XAxis
         dataKey={card.xCol}
         tick={{ fontSize: 11, fill: '#666' }}
-        tickFormatter={opts.xTickFormat}
+        tickFormatter={xTickFormat}
         label={xAxisLabel}
       />
       <YAxis tick={{ fontSize: 11, fill: '#666' }} tickFormatter={opts.yTickFormat} label={yAxisLabel} />
