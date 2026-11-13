@@ -300,6 +300,12 @@ def _build_lending_export_workbook(
                         None,
                     ),
                     (
+                        "Principal Outstanding",
+                        sm.get("principalOutstanding"),
+                        "ASSUMPTION: an estimate, not on the loan tape. Per loan where Reached T+3? is FALSE: Principal - Total Paid x Principal / (Principal + Expected Interest + Expected Fee), floored at 0. Assumes each payment is split pro rata between principal and interest/fees; other companies may allocate payments differently.",
+                        None,
+                    ),
+                    (
                         "Loss Rate",
                         sm.get("lossRate"),
                         "Engine 'Average Loss' = portfolio average loss rate across matured cohorts.",
