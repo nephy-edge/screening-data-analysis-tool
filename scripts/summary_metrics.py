@@ -44,6 +44,16 @@ def lending_summary_metrics(
             - gbv_df["Total Paid"].sum()
         )
 
+    # ASSUMPTION (not on the tape): payments split pro rata between principal and
+    # interest/fees. Per loan: Principal - Total Paid x Principal / (Principal +
+    # Expected Interest + Expected Fee), floored at 0. Same loans as Outstanding GBV.
+    if gbv_df.empty:
+        principal_outstanding = None
+    else:
+        owed = gbv_df["Principal Value"] + gbv_df["Expected Interest"] + gbv_df["Expected Fee"]
+        repaid = gbv_df["Total Paid"] * gbv_df["Principal Value"] / owed
+        principal_outstanding = (gbv_df["Principal Value"] - repaid).clip(lower=0).sum()
+
     matured = df[df["Reached T+3?"]]
     matured_paid = matured["Total Paid"].sum()
     matured_due = matured["Total Due"].sum() if "Total Due" in matured.columns else float("nan")
@@ -73,6 +83,7 @@ def lending_summary_metrics(
         # Top metrics
         "dataUpTo": str(df["Disbursement Date"].max().date()),
         "outstandingGbv": outstanding_gbv,
+        "principalOutstanding": principal_outstanding,
         "lossRate": ue_data["Average Loss"],
         "pctile95LossRate": ltv_data["95th Percentile Losses"],
         "productInterestRate": ue_data["Average Interest %"],

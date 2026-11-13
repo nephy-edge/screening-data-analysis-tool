@@ -57,6 +57,16 @@ def test_outstanding_gbv_narrows_to_active_status_values_when_given():
     assert m2["outstandingGbv"] == 255.0
 
 
+def test_principal_outstanding_is_pro_rata_estimate_for_unmatured_loans():
+    m = lending_summary_metrics(_tape(), _Gi(), _UE, _LTV)
+    # Loan "c": 500 - 300 x 500 / 555.
+    assert abs(m["principalOutstanding"] - (500.0 - 300.0 * 500.0 / 555.0)) < 1e-9
+    df = _tape()
+    df["Loan Status"] = ["closed", "closed", "dormant"]
+    m2 = lending_summary_metrics(df, _Gi(), _UE, _LTV, active_status_values=["active"])
+    assert m2["principalOutstanding"] is None
+
+
 def test_pvd_uses_matured_loans_only():
     m = lending_summary_metrics(_tape(), _Gi(), _UE, _LTV)
     # (1000 + 2000) / (1110 + 2220), loan "c" excluded as unmatured.
