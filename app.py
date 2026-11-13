@@ -3167,7 +3167,7 @@ if is_lending:
         principal_outstanding = _summary["principalOutstanding"]
         c1, c2, c2b, c3, c4, c5 = st.columns(6)
         c2b.metric(
-            "Principal Outstanding (assumption)",
+            "Principal Outstanding",
             f"{principal_outstanding:,.0f}" if principal_outstanding is not None else "n/a",
             help="ASSUMPTION: an estimate, not on the tape. For the same loans as Outstanding "
             "GBV: Principal - Total Paid x Principal / (Principal + Expected Interest + "

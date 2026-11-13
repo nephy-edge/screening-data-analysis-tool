@@ -278,7 +278,7 @@ function LendingSummaryTab() {
       <div className="sd-grid sd-grid--metrics">
         <Metric label="Data up to" value={String(m.dataUpTo ?? '—')} hint="The most recent loan disbursement date in the tape (as-of point for the snapshot)." />
         <Metric label="Outstanding GBV" value={fmoney(m.outstandingGbv)} hint="Gross book value of loans still within term (not yet matured): Principal + Interest + Fee minus Total Paid for loans where Reached T+3? is False." />
-        <Metric label="Principal Outstanding (assumption)" value={fmoney(m.principalOutstanding)} hint="ASSUMPTION: estimate, not on the tape. For loans still within term, Principal minus Total Paid x Principal / (Principal + Interest + Fee), i.e. payments are assumed to be split pro rata between principal and interest/fees. Companies may allocate payments differently." />
+        <Metric label="Principal Outstanding" value={fmoney(m.principalOutstanding)} hint="ASSUMPTION: estimate, not on the tape. For loans still within term, Principal minus Total Paid x Principal / (Principal + Interest + Fee), i.e. payments are assumed to be split pro rata between principal and interest/fees. Companies may allocate payments differently." />
         <Metric label="Loss Rate" value={fpct(m.lossRate)} hint="Portfolio average loss rate across matured cohorts (Reached T+3? = True)." />
         <Metric label={ranged ? `95th %ile Loss Rate (${rangeText})` : '95th %ile Loss Rate'} value={fpct(pctile95)} hint={pctile95Hint} />
         <Metric label={ranged ? `Product Interest Rate (${rangeText})` : 'Product Interest Rate'} value={fpct(productInterest)} hint={productInterestHint} />
