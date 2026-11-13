@@ -3164,7 +3164,16 @@ if is_lending:
             active_status_values=st.session_state.get("analysis_active_status_values"),
         )
         outstanding_gbv = _summary["outstandingGbv"]
-        c1, c2, c3, c4, c5 = st.columns(5)
+        principal_outstanding = _summary["principalOutstanding"]
+        c1, c2, c2b, c3, c4, c5 = st.columns(6)
+        c2b.metric(
+            "Principal Outstanding (assumption)",
+            f"{principal_outstanding:,.0f}" if principal_outstanding is not None else "n/a",
+            help="ASSUMPTION: an estimate, not on the tape. For the same loans as Outstanding "
+            "GBV: Principal - Total Paid x Principal / (Principal + Expected Interest + "
+            "Expected Fee), i.e. payments are assumed split pro rata between principal and "
+            "interest/fees. Companies may allocate payments differently.",
+        )
         c1.metric(
             "Data up to",
             _summary["dataUpTo"],
